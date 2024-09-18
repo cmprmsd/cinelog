@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+
+"""Cinelog Search CLI
+Usage:
+    hist.py [-a] <term>...
+    hist.py -h | --help
+    hist.py -v | --version
+Options:
+    -a  Also search in *.cast files.
+    <term>...  Search terms to filter commands.
+    -h --help  Show this screen.
+    -v --version  Show version.
+"""
+
+from docopt import docopt
+import glob
+from itertools import chain
+from pathlib import Path
+import json
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import FuzzyWordCompleter
+from prompt_toolkit.key_binding import KeyBindings
+import shutil
+import subprocess
+import os
+import re
+import ast
+
+kb = KeyBindings()
+
+def combine_glob_patterns(*patterns):
+    return chain.from_iterable(glob.iglob(pattern) for pattern in patterns)
+
+def strip_ansi_escape_sequences(text):
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+
+def read_events(file_path, has_header=False):
+    events = []
+    with open(file_path, 'r') as f:
+        if has_header:
+            header_line = f.readline()
+            try:
+                header = json.loads(header_line)
+            except json.JSONDecodeError:
+                header = None
+        else:
+            header = None
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                events.append(event)
+            except json.JSONDecodeError:
+                continue
+    return header, events
+
+
+if __name__ == '__main__':
+    arguments = docopt(__doc__, version='Cinelog Search CLI 1.0', options_first=True)
+    if arguments['<term>']:
+        home = str(Path.home())
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        search_term = ' '.join(arguments['<term>']).casefold()
+        results = {}
+        # Command search base... input and output or just the commands
+        if arguments['-a']:
+            patterns = [
+                os.path.join(home, f"logs/*/*.cast.commands.log"),
+                os.path.join(home, 'logs/*.cast.commands.log'),
+                os.path.join(home, f"logs/*/*.cast"),
+                os.path.join(home, 'logs/*.cast'),
+            ]
+        else:
+            patterns = [
+                os.path.join(home, f"logs/*/*.cast.commands.log"),
+                os.path.join(home, 'logs/*.cast.commands.log'),
+            ]
+        combined_files = chain.from_iterable(glob.iglob(pattern) for pattern in patterns)
+        for filepath in combined_files:
+            with open(filepath) as logfile:
+                file_matched = False
+                results[logfile.name] = []
+                previous_command = ""
+                file_extension = os.path.splitext(filepath)[1]
+                if file_extension == '.log':
+                    for line in logfile:
+                        if '"m"' in line:
+                            # Extract the command from the line
+                            previous_command = ast.literal_eval(line)[2]
+                            # Check if the search term is in the command
+                            if search_term in previous_command.casefold():
+                                file_matched = True
+                                data = json.loads(line, strict=False)
+                                timestamp = data[0]
+                                results[logfile.name].append(f"{timestamp},{previous_command}")
+                    if not file_matched:
+                        del results[logfile.name]
+                elif file_extension == '.cast':
+                    # Skip the header line
+                    header_line = logfile.readline()
+                    try:
+                        header = json.loads(header_line)
+                    except json.JSONDecodeError:
+                        continue
+                    for line in logfile:
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if len(data) >= 3:
+                            timestamp = data[0]
+                            event_type = data[1]
+                            content = data[2]
+                            if event_type == 'o':
+                                if "hist" not in content: # don't pollute search results with search
+                                    # Remove ANSI escape sequences
+                                    clean_content = strip_ansi_escape_sequences(content)
+                                    # Stop at the first backslash to shorten the output
+                                    clean_content = clean_content.split('\\', 1)[0]
+                                    # Check if the search term is in the cleaned content
+                                    if search_term in clean_content.casefold():
+                                        file_matched = True
+                                        # Shorten the output for display
+                                        short_content = clean_content.strip()[:80]
+                                        results[logfile.name].append(f"{timestamp},{short_content}")
+                    if not file_matched:
+                        del results[logfile.name]
+                else:
+                    continue
+        if not results:
+            print(f"No matches found for: '{search_term}'")
+            exit()
+        complete = []
+        for file in results.keys():
+            for timestamp_command in results[file]:
+                file_short = re.sub(f"{home}/logs/", "", file)
+                complete.append(f"{file_short},{timestamp_command}")
+
+        result_completer = FuzzyWordCompleter(complete)
+        session = PromptSession(
+            "Select your match:\n>",
+            completer=result_completer,
+            key_bindings=kb,
+        )
+        while True:
+            try:
+                text = session.prompt(
+                    pre_run=session.default_buffer.start_completion,
+                    complete_while_typing=True,
+                    mouse_support=True
+                )
+                selected_file = text.split(",")[0]
+                timestamp = text.split(",")[1]
+                if os.path.splitext(selected_file)[1] == ".log":
+                    asciinema_log = os.path.join(home, "logs", selected_file.split(".")[0] + ".cast")
+                    asciinema_command_log = os.path.join(home, "logs", selected_file)
+                elif os.path.splitext(selected_file)[1] == ".cast":
+                    asciinema_log = os.path.join(home, "logs", selected_file)
+                    asciinema_command_log = os.path.join(home, "logs", selected_file + ".commands.log")
+                filename = os.path.basename(asciinema_log)
+
+                # Merge terminal log and command log to script-relative tmp directory
+                tmp_dir = os.path.join(script_dir, "asciinema-player", "tmp")
+                os.makedirs(tmp_dir, exist_ok=True)
+                os.makedirs(os.path.join(tmp_dir, str(os.getuid())), exist_ok=True)
+                output_file_path = os.path.join(tmp_dir, str(os.getuid()), filename)
+
+                # Read events from both files
+                header1, events1 = read_events(asciinema_log, has_header=True)
+                _, events2 = read_events(asciinema_command_log)
+
+                # Combine events and sort
+                all_events = events1 + events2
+                all_events.sort(key=lambda event: event[0])
+
+                # Write combined events to output file
+                with open(output_file_path, 'w') as f:
+                    # Write the header from the .cast file
+                    if header1:
+                        json.dump(header1, f)
+                        f.write('\n')
+                    for event in all_events:
+                        json.dump(event, f)
+                        f.write('\n')
+
+                url = f"http://127.0.0.1:10000/play.html?filename=tmp/{os.getuid()}/{filename}&timestamp={timestamp}"
+                print("URL to Event: " + url)
+                subprocess.Popen(['xdg-open', url], stdout=open(os.devnull, 'wb'))
+            except Exception as e:
+                print(e)
+            except KeyboardInterrupt:
+                # Clean up tmp files per user
+                files = glob.glob(os.path.join(script_dir, 'asciinema-player', 'tmp', str(os.getuid()), '*'))
+                for f in files:
+                    os.remove(f)
+                break
+    else:
+        print(__doc__)
