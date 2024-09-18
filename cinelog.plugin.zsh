@@ -110,7 +110,7 @@ CHECK_FREE_SPACE=1
 GET_EXTERNAL_IP=1
 EOL
 		if [[ -n $SUDO_USER ]]; then
-			chown -r "$SUDO_USER:$SUDO_USER" "$CONFIG_DIR/cinelog"
+			chown -R "$SUDO_USER:$SUDO_GID" "$CONFIG_DIR/cinelog"
 		fi
     fi
     # Source the configuration file
@@ -182,6 +182,3 @@ precmd() {
         printf '%*s\n' "$COLUMNS" "$date_str"
     fi
 }
-
-# preexec_functions=(preexec)
-# precmd_functions=(precmd)
