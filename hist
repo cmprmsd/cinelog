@@ -145,6 +145,7 @@ if __name__ == '__main__':
             completer=result_completer,
             key_bindings=kb,
         )
+        webfolder = os.environ.get('SUDO_USER','')
         while True:
             try:
                 text = session.prompt(
@@ -165,8 +166,9 @@ if __name__ == '__main__':
                 # Merge terminal log and command log to script-relative tmp directory
                 tmp_dir = os.path.join(script_dir, "asciinema-player", "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
-                os.makedirs(os.path.join(tmp_dir, str(os.getuid())), exist_ok=True)
-                output_file_path = os.path.join(tmp_dir, str(os.getuid()), filename)
+                os.makedirs(os.path.join(tmp_dir, webfolder), exist_ok=True)
+                output_file_path = os.path.join(tmp_dir, webfolder, filename)
+                print(output_file_path)
 
                 # Read events from both files
                 header1, events1 = read_events(asciinema_log, has_header=True)
@@ -186,14 +188,14 @@ if __name__ == '__main__':
                         json.dump(event, f)
                         f.write('\n')
 
-                url = f"http://127.0.0.1:10000/play.html?filename=tmp/{os.getuid()}/{filename}&timestamp={timestamp}"
+                url = f"http://127.0.0.1:10000/play.html?filename=tmp/{webfolder}/{filename}&timestamp={timestamp}"
                 print("URL to Event: " + url)
                 subprocess.Popen(['xdg-open', url], stdout=open(os.devnull, 'wb'))
             except Exception as e:
                 print(e)
             except KeyboardInterrupt:
                 # Clean up tmp files per user
-                files = glob.glob(os.path.join(script_dir, 'asciinema-player', 'tmp', str(os.getuid()), '*'))
+                files = glob.glob(os.path.join(script_dir, 'asciinema-player', 'tmp', webfolder, '*'))
                 for f in files:
                     os.remove(f)
                 break
