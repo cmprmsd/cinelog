@@ -72,11 +72,14 @@ load_motd() {
     if [[ $MOTD_ENABLED -eq 1 ]]; then
         echo -e "Uptime: $(uptime -p)"
         echo -e "Networks:\n$(ip -brief -color -4 a | grep -v UNKNOWN)"
-
-        if EXT_IP=$(curl --connect-timeout 1 -m 1 -4 https://my.ip.fi/ 2>/dev/null); then
-            echo -e "${BASIC_CYAN}External IP:${RESET}\t ${BASIC_GREEN}UP\t\t${PASTEL_MAGENTA}${EXT_IP} ${RESET}GW:${PASTEL_MAGENTA} $(ip route | awk '/default/ {print $3; exit}')${RESET} ($(ip route | awk '/default/ {print $5; exit}'))"
+        if [[ $GET_EXTERNAL_IP -eq 1 ]]; then
+            if EXT_IP=$(curl --connect-timeout 1 -m 1 -4 https://my.ip.fi/ 2>/dev/null); then
+                echo -e "${BASIC_CYAN}External IP:${RESET}\t ${BASIC_GREEN}UP\t\t${PASTEL_MAGENTA}${EXT_IP} ${RESET}GW:${PASTEL_MAGENTA} $(ip route | awk '/default/ {print $3; exit}')${RESET} ($(ip route | awk '/default/ {print $5; exit}'))"
+            else
+                echo -e "${BASIC_CYAN}External IP:${RESET}\t ${BASIC_RED}DOWN${RESET}\t        ${PASTEL_MAGENTA}Proxy or Offline${RESET}"
+            fi
         else
-            echo -e "${BASIC_CYAN}External IP:${RESET}\t ${BASIC_RED}DOWN${RESET}\t        ${PASTEL_MAGENTA}Proxy or Offline${RESET}"
+            echo ""
         fi
 
         if [[ $CHECK_FREE_SPACE -eq 1 ]]; then
@@ -107,7 +110,7 @@ USE_PER_FOLDER_HISTORY=1
 # Check each mount point for free space with exceptions for tmpfs and cdroms
 CHECK_FREE_SPACE=1
 # Get external IP
-GET_EXTERNAL_IP=1
+GET_EXTERNAL_IP=0
 EOL
 		if [[ -n $SUDO_USER ]]; then
 			chown -R "$SUDO_USER:$SUDO_GID" "$CONFIG_DIR/cinelog"
