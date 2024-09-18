@@ -34,6 +34,8 @@ This feature is a simple webserver. Your selected cast will be viewed in this we
 
 I applied some magic to summon the ingestion of `chapter markers` to the video timeline for each executed command. That way, you can easily navigate between commands via `[` and `]`.
 
+![Cinelog Webplayer](docs/demo-webplayer.gif)
+
 ## Extras
 
 ### Per Folder Logs
@@ -45,3 +47,7 @@ The terminal will by default output some information about the current networkin
 
 ### Customization
 You can opt-out of several extra features by changing your config file in `.config/cinelog/cinelog-settings.conf`.
+
+## Credits
+Thanks to 
+Marcin [ku1ik](https://github.com/ku1ik) for his awesome [asciinema suite](https://github.com/asciinema/)!
