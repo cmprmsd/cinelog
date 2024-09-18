@@ -1,0 +1,46 @@
+<html>
+<title>Cinelog Viewer</title>
+<head>
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+    <meta content="utf-8" http-equiv="encoding">
+    <meta http-equiv="Access-Control-Allow-Origin" content="*">
+    <link rel="stylesheet" type="text/css" href="asciinema-player.css" />
+</head>
+
+<body>
+  <div id="cinelog" onLoad="focusPlayer();"></div>
+  <script src="asciinema-player.min.js"></script>
+  <script>
+    function findGetParameter(parameterName) {
+    var result = null,
+        tmp = [];
+    location.search
+        .substr(1)
+        .split("&")
+        .forEach(function (item) {
+          tmp = item.split("=");
+          if (tmp[0] === parameterName) result = decodeURIComponent(tmp[1]);
+        });
+    return result;
+    }
+    var fileName = findGetParameter("filename")
+    var beginAt = findGetParameter("timestamp");
+    myPlayer = AsciinemaPlayer.create(fileName, document.getElementById('cinelog'), {
+        cols: 180,
+        startAt: beginAt - 1.0,
+        autoPlay: true,
+        //idleTimeLimit: 3.0,
+        controls: true
+    });
+
+    function focusPlayer(){                                 
+      //document.getElementsByClassName("asciinema-player-wrapper").setActive();
+      document.getElementsByClassName("asciinema-player-wrapper").item(0).focus()
+    }
+    window.onload = function() {
+    var input = document.getElementsByClassName("asciinema-player-wrapper").item(0).focus();
+    // print(input)
+    }
+  </script>
+</body>
+</html>
