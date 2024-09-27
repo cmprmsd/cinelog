@@ -26,11 +26,12 @@
     var fileName = findGetParameter("filename")
     var beginAt = findGetParameter("timestamp");
     myPlayer = AsciinemaPlayer.create(fileName, document.getElementById('cinelog'), {
-        cols: 180,
+        //cols: 180,
         startAt: beginAt - 1.0,
         autoPlay: true,
         //idleTimeLimit: 3.0,
-        controls: true
+        controls: true,
+        fit: 'both'
     });
 
     function focusPlayer(){                                 
