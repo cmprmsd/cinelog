@@ -101,6 +101,8 @@ cinelog_check_config() {
         mkdir -p "$(dirname "$config_file")"
         cat > "$config_file" <<EOL
 ############## Config ###############
+# Cinelog Viewer Port
+export CINELOG_VIEWER_PORT=10000
 # Show MOTD
 MOTD_ENABLED=1
 # Show start and end time ([YYYY-MM-DD HH:MM:SS])
@@ -129,9 +131,9 @@ if [[ -n $ASCIINEMA_REC ]]; then
     load_motd
 else
     # Check for webserver and spawn if not running
-    if ! ss -tln | grep -q ":10000"; then
+    if ! ss -tln | grep -q ":${CINELOG_VIEWER_PORT}"; then
 		{
-        	nohup python -m http.server --directory "$HOME/.zim/modules/cinelog/asciinema-player" 10000 >/dev/null 2>&1 &
+        	nohup python -m http.server --directory "$HOME/.zim/modules/cinelog/asciinema-player" ${CINELOG_VIEWER_PORT} >/dev/null 2>&1 &
 		} &>/dev/null
     fi
     export LOGFILE="$LOGDIR/terminal_$(date +%F_%T:%3N).cast"

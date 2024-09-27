@@ -187,8 +187,9 @@ if __name__ == '__main__':
                     for event in all_events:
                         json.dump(event, f)
                         f.write('\n')
-
-                url = f"http://127.0.0.1:10000/play.html?filename=tmp/{webfolder}/{filename}&timestamp={timestamp}"
+                cinelog_viewer_port = os.environ.get('CINELOG_VIEWER_PORT','10001')
+                print(cinelog_viewer_port)
+                url = f"http://127.0.0.1:{cinelog_viewer_port}/play.html?filename=tmp/{webfolder}/{filename}&timestamp={timestamp}"
                 print("URL to Event: " + url)
                 subprocess.Popen(['xdg-open', url], stdout=open(os.devnull, 'wb'))
             except Exception as e:
