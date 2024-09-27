@@ -89,13 +89,17 @@ if __name__ == '__main__':
                     for line in logfile:
                         if '"m"' in line:
                             # Extract the command from the line
-                            previous_command = json.loads(line, strict=False)[2]
-                            # Check if the search term is in the command
-                            if search_term in previous_command.casefold():
-                                file_matched = True
-                                data = json.loads(line, strict=False)
+                            try:
+                                data = ast.literal_eval(line.replace(r'\+', r'\\+'))
                                 timestamp = data[0]
-                                results[logfile.name].append(f"{timestamp},{previous_command}")
+                                previous_command = data[2]
+                                # Check if the search term is in the command
+                                if search_term in previous_command.casefold():
+                                    file_matched = True
+                                    results[logfile.name].append(f"{timestamp},{previous_command}")
+                            except (SyntaxError, SyntaxWarning, ValueError) as e:
+                                print(f"Error parsing line in {filepath}: {e}")
+                                continue
                     if not file_matched:
                         del results[logfile.name]
                 elif file_extension == '.cast':
