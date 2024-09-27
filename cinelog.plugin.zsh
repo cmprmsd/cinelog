@@ -177,7 +177,7 @@ preexec() {
 }
 
 # Function to execute before the next prompt
-precmd() {
+endTime() {
     # Format and echo end time of command execution
     if [[ $SHOW_START_END_TIME -eq 1 ]]; then
         local date_str
@@ -185,3 +185,5 @@ precmd() {
         printf '%*s\n' "$COLUMNS" "$date_str"
     fi
 }
+
+precmd_functions+=(endTime)
