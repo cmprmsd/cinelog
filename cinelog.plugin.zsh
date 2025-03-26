@@ -83,7 +83,7 @@ load_motd() {
         fi
 
         if [[ $CHECK_FREE_SPACE -eq 1 ]]; then
-            timeout -k 2 2 df -H --output=pcent,target | tail -n +2 | while read -r output; do
+            timeout -k 2 2 df -H -l --output=pcent,target 2>/dev/null | grep -v '/tmp/com.freerdp' | tail -n +2 | while read -r output; do
                 USE_PERCENT=$(echo "$output" | awk '{print $1}' | tr -d '%')
                 PARTITION=$(echo "$output" | awk '{print $2}')
                 if [[ $USE_PERCENT -ge 90 ]]; then
