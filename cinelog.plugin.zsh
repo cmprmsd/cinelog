@@ -29,16 +29,20 @@ if [[ $EUID -eq 0 ]]; then
     if [[ -n $SUDO_USER ]]; then
         # Use the home directory of the sudo user
         CONFIG_DIR=$(getent passwd "$SUDO_USER" | cut -d: -f6)/.config
+        # Calculate the port for the cinelog viewer
+        cinelogViewerPort=$(( $(getent passwd "$SUDO_USER" | cut -d: -f3) + 10000 ))
 		# Prepare logging
 		LOGDIR="$HOME/logs/$SUDO_USER"
     else
         CONFIG_DIR="/root/.config"
 		LOGDIR="$HOME/logs/root"
+        cinelogViewerPort=10000
     fi
 else
     # Running as a regular user
     CONFIG_DIR="$HOME/.config"
 	LOGDIR="$HOME/logs"
+    cinelogViewerPort=10000
 fi
 mkdir -p "$LOGDIR"
 
@@ -99,10 +103,19 @@ cinelog_check_config() {
     local config_file="$CONFIG_DIR/cinelog/cinelog-settings.conf"
     if [[ ! -s $config_file ]]; then
         mkdir -p "$(dirname "$config_file")"
+        # Generate UUID for authentication
+        local uuid
+        if command -v uuidgen >/dev/null 2>&1; then
+            uuid=$(uuidgen)
+        else
+            uuid=$(python3 -c 'import uuid; print(uuid.uuid4())')
+        fi
         cat > "$config_file" <<EOL
 ############## Config ###############
 # Cinelog Viewer Port
-export CINELOG_VIEWER_PORT=10000
+export CINELOG_VIEWER_PORT=${cinelogViewerPort}
+# Authentication UUID
+export CINELOG_AUTH_UUID="${uuid}"
 # Show MOTD
 MOTD_ENABLED=1
 # Show start and end time ([YYYY-MM-DD HH:MM:SS])
@@ -114,9 +127,9 @@ CHECK_FREE_SPACE=1
 # Get external IP
 GET_EXTERNAL_IP=0
 EOL
-		if [[ -n $SUDO_USER ]]; then
-			chown -R "$SUDO_USER:$SUDO_GID" "$CONFIG_DIR/cinelog"
-		fi
+        if [[ -n $SUDO_USER ]]; then
+            chown -R "$SUDO_USER:$SUDO_GID" "$CONFIG_DIR/cinelog"
+        fi
     fi
     # Source the configuration file
     # shellcheck disable=SC1090
@@ -132,9 +145,9 @@ if [[ -n $ASCIINEMA_REC ]]; then
 else
     # Check for webserver and spawn if not running
     if ! ss -tln | grep -q ":${CINELOG_VIEWER_PORT}"; then
-		{
-        	nohup python -m http.server --directory "$HOME/.zim/modules/cinelog/asciinema-player" ${CINELOG_VIEWER_PORT} >/dev/null 2>&1 &
-		} &>/dev/null
+        {
+            nohup python3 "$HOME/.zim/modules/cinelog/http_server.py" & #>/dev/null 2>&1 &
+        } &>/dev/null
     fi
     export LOGFILE="$LOGDIR/terminal_$(date +%F_%T:%3N).cast"
     export COMMANDS_LOGFILE="${LOGFILE}.commands.log"
