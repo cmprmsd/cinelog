@@ -40,13 +40,13 @@ I applied some magic to summon the ingestion of `chapter markers` to the video t
 
 1. Download and install zsh zim framework: `curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh`
 2. Remove `compinit` from your .zshrc if needed
-3. Install asciinema `apt install asciinema`
+3. Install asciinema `apt install asciinema python3-docopt`
 4. Edit .zimrc and add `zmodule cmprmsd/cinelog`
 5. Run `zimfw install` to download the plugin from GitHub
 6. Start a new terminal
-7. Verify installation with `logs tree` and verify if the `hist` command is available
-8. Check if the Python webserver is running on port 10000
-9. For future updates `zimfw update` should suffice
+7. Verify installation with `tree logs` and verify if the `hist` command is available
+8. Check if the Python webserver is running on port 10000+uid
+9. For future updates `zimfw update` should suffice, if the settings don't introduce new variables
 
 ## Extras
 
@@ -63,3 +63,12 @@ You can opt-out of several extra features by changing your config file in `.conf
 ## Credits
 Thanks to 
 Marcin [ku1ik](https://github.com/ku1ik) for his awesome [asciinema suite](https://github.com/asciinema/)!
+
+## Changelog
+2025-08-05:
+- Add very rudimentary authentication and network access for shared access and history to one machine (***no userlevel separation as this is intented for shared working as root***)
+- Add authentication middleware
+- Dynamic ports (for sudo users)
+- Fix sanitization in parser
+- open cinelog viewer in browser depending on being in a SSH session
+- Add docopt dependency for `hist` command
