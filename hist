@@ -240,7 +240,8 @@ if __name__ == '__main__':
                 # Clean up tmp files per user
                 files = glob.glob(os.path.join(script_dir, 'asciinema-player', 'tmp', webfolder, '*'))
                 for f in files:
-                    os.remove(f)
+                    if os.path.isfile(f):
+                        os.remove(f)
                 break
     else:
         print(__doc__)
