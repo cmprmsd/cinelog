@@ -36,13 +36,15 @@ if [[ $EUID -eq 0 ]]; then
     else
         CONFIG_DIR="/root/.config"
 		LOGDIR="$HOME/logs/root"
-        cinelogViewerPort=10000
+        # Use root's UID (0) + 10000 for port
+        cinelogViewerPort=$(( $EUID + 10000 ))
     fi
 else
     # Running as a regular user
     CONFIG_DIR="$HOME/.config"
 	LOGDIR="$HOME/logs"
-    cinelogViewerPort=10000
+    # Use current user's UID + 10000 for port
+    cinelogViewerPort=$(( $EUID + 10000 ))
 fi
 mkdir -p "$LOGDIR"
 
