@@ -141,6 +141,9 @@ cinelog_check_config
 
 # Check if terminal is already logging; else start Asciinema
 if [[ -n $ASCIINEMA_REC ]]; then
+    # Handle shutdown signals gracefully - interactive shells ignore SIGTERM by default
+    # Without this trap, systemd shutdown waits 2 minutes before force-killing
+    trap 'exit 0' SIGTERM SIGHUP
     load_motd
 else
     # Check for webserver and spawn if not running
@@ -152,7 +155,8 @@ else
     export LOGFILE="$LOGDIR/terminal_$(date +%F_%T:%3N).cast"
     export COMMANDS_LOGFILE="${LOGFILE}.commands.log"
     touch "$COMMANDS_LOGFILE"  # Create command logfile
-    asciinema rec -q "$LOGFILE"
+    # Use v2 format for compatibility with bundled asciinema-player
+    asciinema rec -q --output-format asciicast-v2 "$LOGFILE"
     exit
 fi
 
