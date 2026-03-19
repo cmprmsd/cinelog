@@ -35,7 +35,14 @@ class AuthHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_server(port, directory, auth_token):
     handler = partial(AuthHandler, auth_token=auth_token, directory=directory)
-    ip = subprocess.check_output("ip route get 1 | awk '{print $7}'", shell=True).decode().strip()
+    try:
+        ip = subprocess.check_output("ip route get 1 | awk '{print $7}'", shell=True).decode().strip()
+    except Exception:
+        import socket
+        # Fallback for non-Linux systems (macOS, BSD)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
     with socketserver.TCPServer((ip, port), handler) as httpd:
         print(f"Serving at port {port} with authentication")
         httpd.serve_forever()
@@ -43,7 +50,11 @@ def run_server(port, directory, auth_token):
 if __name__ == "__main__":
     port = int(os.environ.get('CINELOG_VIEWER_PORT', 10000))
     auth_token = os.environ.get('CINELOG_AUTH_UUID')
-    directory = os.path.expanduser("~/.zim/modules/cinelog/asciinema-player")
+    # Use CINELOG_DIR env var if set (exported by the zsh plugin), otherwise fall back to
+    # a path relative to this script's location — works regardless of plugin manager.
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    directory = os.environ.get('CINELOG_DIR', script_dir)
+    directory = os.path.join(directory, 'asciinema-player')
     
     if not auth_token:
         print("Error: CINELOG_AUTH_UUID environment variable not set")

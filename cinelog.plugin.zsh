@@ -5,6 +5,9 @@
 # Author: Sebastian Haas - https://h8.to
 ####################################################
 
+# Resolve plugin directory dynamically — works with zim, oh-my-zsh, antigen, manual installs, etc.
+CINELOG_DIR="${${0:A:h}}"
+
 # Color definitions using 24-bit true color (RGB)
 RESET='\e[0m'  # Resets all attributes
 BOLD='\e[1m'
@@ -13,7 +16,7 @@ BOLD='\e[1m'
 BASIC_RED='\e[31m'
 BASIC_GREEN='\e[32m'
 BASIC_BLUE='\e[34m'
-BAISC_MAGENTA='\e[35m'
+BASIC_MAGENTA='\e[35m'
 BASIC_CYAN='\e[36m'
 # Pastel Colors
 PASTEL_RED='\e[38;2;255;105;97m'
@@ -69,8 +72,8 @@ here() {
 alias cs="clear; load_motd"
 
 # Interactive history search with graphical Asciinema UI
-alias hist="$HOME/.zim/modules/cinelog/hist"
-alias histo="$HOME/.zim/modules/cinelog/histo"
+alias hist="$CINELOG_DIR/hist"
+alias histo="$CINELOG_DIR/histo"
 
 # MOTD functionality
 load_motd() {
@@ -151,7 +154,7 @@ else
     # Check for webserver and spawn if not running
     if ! ss -tln | grep -q ":${CINELOG_VIEWER_PORT}"; then
         {
-            nohup python3 "$HOME/.zim/modules/cinelog/http_server.py" & #>/dev/null 2>&1 &
+            nohup python3 "$CINELOG_DIR/http_server.py" & #>/dev/null 2>&1 &
         } &>/dev/null
     fi
     export LOGFILE="$LOGDIR/terminal_$(date +%F_%T:%3N).cast"

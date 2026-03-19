@@ -40,7 +40,11 @@ I applied some magic to summon the ingestion of `chapter markers` to the video t
 
 1. Download and install zsh zim framework: `curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh`
 2. Remove `compinit` from your .zshrc if needed
-3. Install asciinema `apt install asciinema python3-docopt`
+3. Install asciinema and Python dependencies:
+   ```bash
+   apt install asciinema
+   pip install -r requirements.txt  # installs docopt + prompt_toolkit
+   ```
 4. Edit .zimrc and add `zmodule cmprmsd/cinelog`
 5. Run `zimfw install` to download the plugin from GitHub
 6. Start a new terminal
