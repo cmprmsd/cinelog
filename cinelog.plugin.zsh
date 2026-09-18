@@ -157,8 +157,7 @@ else
     export LOGFILE="$LOGDIR/terminal_$(date +%F_%T:%3N).cast"
     export COMMANDS_LOGFILE="${LOGFILE}.commands.log"
     touch "$COMMANDS_LOGFILE"  # Create command logfile
-    # Use v2 format for compatibility with bundled asciinema-player, should return error and fall back to command without the new 3.0 flag, if asciinema is v2 and does not know the --output-format flag.
-    asciinema rec -q --output-format asciicast-v2 "$LOGFILE" || asciinema rec -q "$LOGFILE"
+    asciinema rec -q "$LOGFILE"
     exit
 fi
 
