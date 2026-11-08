@@ -84,7 +84,7 @@ other entries. "Missing binary" therefore means missing on any machine.
 | `CINELOG_IT_TIMEOUT_SCALE` | Multiplies every timeout (slow runners). |
 | `CINELOG_IT_KEEP=1` | Keep sandbox trees for debugging. |
 | `CINELOG_IT_B1_BASELINE_MS` | B1 baseline (default 990 ms, the [rec] spike). |
-| `CINELOG_IT_UPGRADE_FROM` | I24: git ref of the previous release. Unset: the tag `v0.12.0`, else commit `54ed9918ef5c` (the last 0.12.0 commit); I24 skips when the clone has neither (shallow or squash-merged history) and **fails** under `CINELOG_IT_REQUIRE=1`. An explicit ref that does not resolve fails. |
+| `CINELOG_IT_UPGRADE_FROM` | I24: git ref of the previous release. Unset: the tag `v0.12.0`, else commit `a5fcdd2bb85e` (the last 0.12.0 commit); I24 skips when the clone has neither (shallow or squash-merged history) and **fails** under `CINELOG_IT_REQUIRE=1`. An explicit ref that does not resolve fails. |
 | `CINELOG_IT_OLD_SRC`, `CINELOG_IT_OLD_BIN` | I24: a prepared old source tree and binary instead of `git archive` + `cargo build --locked` into `<target>/cinelog-it/upgrade-from-<hash>/`. |
 
 ## Root scenarios (manual or CI only)

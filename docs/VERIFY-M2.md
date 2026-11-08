@@ -2,8 +2,8 @@
 
 Plan §13 "M2 Accept". The real-corpus numbers were first taken against the 0.11 tree and
 re-measured on 2026-11-08 with a release build of the 1.0 tree; the table shows the 1.0 run.
-Dev machine: Arch Linux, kernel 6.18, 16 threads, NVMe. The real corpus (`~/logs`, 1650
-old-plugin casts, 3.4 GiB) was mounted read-only as the lower layer of an overlayfs inside a
+Dev machine: a Linux desktop. A real corpus of about 1650 old-plugin casts
+(3.4 GiB) was mounted read-only as the lower layer of an overlayfs inside a
 user namespace, with a recursive inotify watcher on it; the databases went to a scratch
 HOME. Only counts and timings were recorded, never cast content.
 

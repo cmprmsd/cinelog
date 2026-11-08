@@ -1,11 +1,11 @@
 # M5 verification record (1.0)
 
 Plan §13 "M5 Accept" and the final security and completeness review. Run on 2026-11-08
-against the 1.0 tree. Dev machine: Arch Linux, kernel 6.18, zsh 5.9.2, tmux 3.7c, Chromium
-152 headless. Every run used a temporary HOME/ZDOTDIR/XDG tree, a private `tmux -L` server
+against the 1.0 tree. Dev machine: a Linux desktop (zsh 5.9.2, tmux 3.7c, Chromium
+152 headless). Every run used a temporary HOME/ZDOTDIR/XDG tree, a private `tmux -L` server
 and an ephemeral loopback port.
 
-The first M5 verification pass (commit 6cf610c, "fix verification findings") found the
+The first M5 verification pass (commit a690948, "fix verification findings") found the
 build, tests and E2E green and changed no tracked file; its open items were the M5 handoff
 gaps that had no owner. They are fixed in the final pass below.
 

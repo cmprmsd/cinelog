@@ -1,7 +1,7 @@
 # M4 verification record (v0.13, re-run with 1.0)
 
 Plan §13 "M4 Accept". First verified against the 0.13 tree (58 mock / 51 real E2E specs),
-re-run on 2026-11-08 against the 1.0 tree. Dev machine: Arch Linux, kernel 6.18, Chromium
+re-run on 2026-11-08 against the 1.0 tree. Dev machine: a Linux desktop, Chromium
 152 headless (`CINELOG_CHROMIUM=/usr/bin/chromium`). Every run used a temporary HOME/XDG
 tree, a private `tmux -L` server and an ephemeral loopback port.
 

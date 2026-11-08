@@ -21,7 +21,7 @@ use crate::binary::repo_root;
 use crate::util::is_executable;
 
 /// The M4 commit, the last one of 0.12.0.
-pub const DEFAULT_COMMIT: &str = "54ed9918ef5ccdcfe8bdc80242251d13ed493c63";
+pub const DEFAULT_COMMIT: &str = "a5fcdd2bb85e9e0ea07d7d898e88a3c8278a392d";
 const DEFAULT_TAG: &str = "v0.12.0";
 const FROM_VAR: &str = "CINELOG_IT_UPGRADE_FROM";
 

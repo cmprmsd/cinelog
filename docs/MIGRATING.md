@@ -3,7 +3,7 @@
 This guide covers two starting points:
 
 - [The old plugin](#from-the-old-plugin): asciinema, `hist`, the Python viewer, up to commit
-  `bcd4406` on `main`.
+  `097b5ba` on `main`.
 - [A 0.10–0.13 pre-release](#from-a-010013-pre-release) of the rewrite.
 
 Neither path changes or deletes a recording. Old casts are only ever read.
@@ -150,7 +150,7 @@ that `zimfw update` leaves it there. zimfw has no option to pin a commit; a froz
 never installed or updated, but its init script is still loaded.
 
 ```zsh
-git -C ~/.zim/modules/cinelog checkout bcd4406
+git -C ~/.zim/modules/cinelog checkout 097b5ba
 git -C ~/.zim/modules/cinelog stash pop   # only if you stashed edits in step 1
 ```
 

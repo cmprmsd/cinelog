@@ -1,7 +1,7 @@
 # M1 verification record (v0.10)
 
 Checks from plan Appendix B (M1) and the M1 acceptance list that unit and integration tests
-do not cover on their own. Run on the dev machine (Arch Linux, kernel 6.18, zsh 5.9.2, tmux 3.7c,
+do not cover on their own. Run on a Linux dev machine (zsh 5.9.2, tmux 3.7c,
 GNU screen 5.0.2, Chromium 152 headless) on 2026-11-08 against a release build of this tree. Every
 run used a temporary HOME/ZDOTDIR/XDG tree and a private `tmux -L` server.
 
