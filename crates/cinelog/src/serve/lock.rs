@@ -124,7 +124,7 @@ pub fn holder_pid(runtime_dir: &Path) -> Option<u32> {
         File::open(&path).ok()?.read_to_string(&mut s).ok()?;
         let locks = fs::read_to_string("/proc/locks").ok()?;
         if let Ok(pid) = s.trim().parse()
-            && flock_writers(&locks, md.dev(), md.ino()).contains(&pid)
+            && flock_writers(&locks, &lock_file_devs(&path, md.dev()), md.ino()).contains(&pid)
         {
             return Some(pid);
         }
@@ -135,11 +135,57 @@ pub fn holder_pid(runtime_dir: &Path) -> Option<u32> {
     None
 }
 
-/// Pids holding an exclusive flock on the file `(dev, ino)`, from `/proc/locks` lines like
-/// `4: FLOCK  ADVISORY  WRITE 2394 00:21:1783682 0 EOF` (major and minor in hex; waiters,
-/// marked `->`, are skipped).
-fn flock_writers(locks: &str, dev: u64, ino: u64) -> Vec<u32> {
-    let want = (u64::from(libc::major(dev)), u64::from(libc::minor(dev)), ino);
+/// Candidate devices the kernel's lock table (`/proc/locks`) may key a flock on `path`
+/// under: `st_dev`, plus the device of the mount containing the file as mountinfo names
+/// it. The two differ on btrfs — `st_dev` is the (nested) subvolume's anonymous device
+/// while the lock table prints the mount's superblock device — and on ext4 or tmpfs they
+/// are the same, so both must be tried. Best effort: without mountinfo, `st_dev` only.
+fn lock_file_devs(path: &Path, st_dev: u64) -> Vec<u64> {
+    let mut devs = vec![st_dev];
+    let Ok(file) = fs::canonicalize(path) else {
+        return devs;
+    };
+    let Ok(mounts) = fs::read_to_string("/proc/self/mountinfo") else {
+        return devs;
+    };
+    if let Some(dev) = mount_dev(&mounts, &file)
+        && dev != 0
+        && !devs.contains(&dev)
+    {
+        devs.push(dev);
+    }
+    devs
+}
+
+/// The device (mountinfo field 3) of the mount whose mount point is the longest
+/// component-wise prefix of `file`: the mount that contains it. A mount hidden behind
+/// another mount's root defeats path matching; callers then fall back to `st_dev`.
+fn mount_dev(mounts: &str, file: &Path) -> Option<u64> {
+    let file = file.to_str()?;
+    let (_, dev) = mounts
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 5 || !f[4].starts_with('/') {
+                return None;
+            }
+            (f[4] == "/" || file.starts_with(f[4]) && file[f[4].len()..].starts_with('/')).then(|| (f[4], f[2]))
+        })
+        .max_by_key(|(mp, _)| mp.len())?;
+    let (major, minor) = dev.split_once(':')?;
+    let d = libc::makedev(major.parse().ok()?, minor.parse().ok()?);
+    (d != 0).then_some(d)
+}
+
+/// Pids holding an exclusive flock on a file with inode `ino` on any of `devs`, from
+/// `/proc/locks` lines like `4: FLOCK  ADVISORY  WRITE 2394 00:21:1783682 0 EOF` (major and
+/// minor in hex; waiters, marked `->`, are skipped). A file has more than one candidate
+/// device on btrfs; see [`lock_file_devs`].
+fn flock_writers(locks: &str, devs: &[u64], ino: u64) -> Vec<u32> {
+    let want: Vec<(u64, u64)> = devs
+        .iter()
+        .map(|d| (u64::from(libc::major(*d)), u64::from(libc::minor(*d))))
+        .collect();
     locks
         .lines()
         .filter_map(|line| {
@@ -150,8 +196,10 @@ fn flock_writers(locks: &str, dev: u64, ino: u64) -> Vec<u32> {
             let mut id = f[5].split(':');
             let major = u64::from_str_radix(id.next()?, 16).ok()?;
             let minor = u64::from_str_radix(id.next()?, 16).ok()?;
-            let inode = id.next()?.parse().ok()?;
-            ((major, minor, inode) == want).then(|| f[4].parse().ok()).flatten()
+            let inode = id.next()?.parse::<u64>().ok()?;
+            (want.contains(&(major, minor)) && inode == ino)
+                .then(|| f[4].parse().ok())
+                .flatten()
         })
         .collect()
 }
@@ -271,8 +319,29 @@ mod tests {
                      3: -> FLOCK  ADVISORY  WRITE 43 00:21:164952 0 EOF\n\
                      4: FLOCK  ADVISORY  WRITE 44 00:22:164952 0 EOF\n\
                      5: FLOCK  ADVISORY  WRITE 45 00:21:164953 0 EOF\n";
-        assert_eq!(flock_writers(table, dev, 164_952), [42]);
-        assert!(flock_writers("garbage\n", dev, 1).is_empty());
+        assert_eq!(flock_writers(table, &[dev], 164_952), [42]);
+        // btrfs: st_dev is the subvolume's anonymous device (0:24), which /proc/locks
+        // never prints for this file; the mount's device (0:33 decimal = 00:21 hex) is.
+        let st_dev = libc::makedev(0, 0x24);
+        let mount_dev = libc::makedev(0, 33);
+        assert!(flock_writers(table, &[st_dev], 164_952).is_empty());
+        assert_eq!(flock_writers(table, &[st_dev, mount_dev], 164_952), [42]);
+        assert!(flock_writers("garbage\n", &[dev], 1).is_empty());
+    }
+
+    #[test]
+    fn the_mounts_device_is_found_by_longest_mount_point_prefix() {
+        let mounts = "22 1 0:33 / / rw - btrfs /dev/mapper/rootbase rw\n\
+                      23 22 0:38 / /tmp rw - tmpfs none rw\n\
+                      24 22 0:39 /@/home /home rw - btrfs /dev/mapper/rootbase rw\n";
+        assert_eq!(
+            mount_dev(mounts, Path::new("/home/user/run")),
+            Some(libc::makedev(0, 39))
+        );
+        assert_eq!(mount_dev(mounts, Path::new("/tmp/a")), Some(libc::makedev(0, 38)));
+        // A path that merely starts with the mount point's text does not match it.
+        assert_eq!(mount_dev(mounts, Path::new("/homey/a")), Some(libc::makedev(0, 33)));
+        assert_eq!(mount_dev("garbage\n", Path::new("/x")), None);
     }
 
     #[test]

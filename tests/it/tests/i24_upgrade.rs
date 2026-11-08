@@ -49,9 +49,19 @@ fn checkout(tree: &Path, module: &Path) {
     }
 }
 
+/// Copies `src` to `dest` atomically and 0755. The copy is stripped first: it stands in
+/// for a release asset, which the workspace's `[profile.release]` strips, and fetch.zsh
+/// refuses assets over 256 MiB — a debug build with its symbols is bigger than that.
 fn install_file(src: &Path, dest: &Path) {
     let tmp = dest.with_extension("tmp");
-    fs::copy(src, &tmp).unwrap();
+    let out = Command::new("strip")
+        .arg("--strip-debug")
+        .arg("-o")
+        .arg(&tmp)
+        .arg(src)
+        .output()
+        .expect("strip(1)");
+    assert!(out.status.success(), "strip: {}", String::from_utf8_lossy(&out.stderr));
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
     fs::rename(&tmp, dest).unwrap();
 }
@@ -85,26 +95,51 @@ fn on_pull(sb: &Sandbox, module: &Path, args: &[&str]) -> (bool, String) {
 }
 
 fn lock_holder(sb: &Sandbox) -> Option<u32> {
-    let pid: u32 = fs::read_to_string(sb.registry_dir().join("serve.lock"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    let lock = fs::metadata(sb.registry_dir().join("serve.lock")).ok()?;
+    let path = sb.registry_dir().join("serve.lock");
+    let pid: u32 = fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let lock = fs::metadata(&path).ok()?;
     let locks = fs::read_to_string("/proc/locks").ok()?;
-    let id = format!(
-        "{:02x}:{:02x}:{}",
-        libc::major(lock.dev()),
-        libc::minor(lock.dev()),
-        lock.ino()
-    );
+    // /proc/locks keys the flock by the mount's device, which on btrfs differs from the
+    // file's st_dev (the subvolume's anonymous device): the id of either must match.
+    let mut devs = vec![lock.dev()];
+    if let Some(d) = mount_dev(&path) {
+        devs.push(d);
+    }
+    let ids: Vec<String> = devs
+        .iter()
+        .map(|d| format!("{:02x}:{:02x}:{}", libc::major(*d), libc::minor(*d), lock.ino()))
+        .collect();
     locks
         .lines()
         .any(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
-            f.len() > 5 && f[1] == "FLOCK" && f[3] == "WRITE" && f[4] == pid.to_string() && f[5] == id
+            f.len() > 5
+                && f[1] == "FLOCK"
+                && f[3] == "WRITE"
+                && f[4] == pid.to_string()
+                && ids.iter().any(|id| f[5] == *id)
         })
         .then_some(pid)
+}
+
+/// The device of the mount containing `path`, as `/proc/locks` prints it: mountinfo's
+/// field 3 of the mount with the longest mount-point prefix of the file's path.
+fn mount_dev(path: &Path) -> Option<u64> {
+    let file = fs::canonicalize(path).ok()?.to_str()?.to_owned();
+    let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let (_, dev) = mounts
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 5 || !f[4].starts_with('/') {
+                return None;
+            }
+            (f[4] == "/" || (file.starts_with(f[4]) && file[f[4].len()..].starts_with('/'))).then(|| (f[4], f[2]))
+        })
+        .max_by_key(|(mp, _)| mp.len())?;
+    let (major, minor) = dev.split_once(':')?;
+    let d = libc::makedev(major.parse().ok()?, minor.parse().ok()?);
+    (d != 0).then_some(d)
 }
 
 fn server_json_version(sb: &Sandbox) -> Option<(u32, String)> {
