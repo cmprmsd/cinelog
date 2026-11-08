@@ -32,6 +32,11 @@ pub enum Need {
     Recorder,
     /// The testhooks build of `cinelog` (I16).
     Testhooks,
+    /// The M2 index engine: `cinelog index --once` works (not the M2-0 stand-in).
+    Index,
+    /// Nested user namespaces with a subordinate uid range (`newuidmap`, /etc/subuid), a
+    /// private pid namespace with its own `/proc` (hidepid) and devpts instances (I17).
+    ProcNs,
     /// Root scenarios: `--features root`, `CINELOG_IT_ROOT=1` and passwordless sudo.
     Root,
     /// A password-requiring sudo user: `CINELOG_IT_PW_USER` and `CINELOG_IT_PW_PASS` (I6).
@@ -165,6 +170,8 @@ fn check_one(need: Need) -> Result<(), Failure> {
         Need::Sshd => cached(&SSHD, || crate::sshd::probe().map_err(Failure::from)),
         Need::Plugin => cached(&PLUGIN, probe_plugin),
         Need::Recorder => cached(&RECORDER, probe_recorder),
+        Need::Index => cached(&INDEX, probe_index),
+        Need::ProcNs => cached(&PROCNS, probe_procns),
         Need::Testhooks => cached(&TESTHOOKS, || {
             binary::cinelog(Flavour::Testhooks)
                 .map(|_| ())
@@ -200,6 +207,8 @@ static SSHD: Probe = OnceLock::new();
 static PLUGIN: Probe = OnceLock::new();
 static RECORDER: Probe = OnceLock::new();
 static TESTHOOKS: Probe = OnceLock::new();
+static INDEX: Probe = OnceLock::new();
+static PROCNS: Probe = OnceLock::new();
 
 fn cached(cell: &'static Probe, f: impl FnOnce() -> Result<(), Failure>) -> Result<(), Failure> {
     cell.get_or_init(f).clone()
@@ -259,6 +268,32 @@ fn probe_recorder() -> Result<(), Failure> {
         )));
     }
     Ok(())
+}
+
+/// Runs `cinelog index --once` on an empty sandbox: the M2-0 stand-in answers with
+/// [`crate::cli::STUB_MARK`] (a skip); anything but success is a broken index engine.
+fn probe_index() -> Result<(), Failure> {
+    let sb = crate::Sandbox::new().map_err(|e| Failure::broken(format!("sandbox: {e:#}")))?;
+    let out = sb
+        .cinelog(&["index", "--once"])
+        .map_err(|e| Failure::broken(format!("{e:#}")))?;
+    if out.is_stub() {
+        return Err("the index engine is the M2-0 stand-in (not implemented yet)".into());
+    }
+    if !out.ok() {
+        return Err(Failure::broken(format!("{out}")));
+    }
+    Ok(())
+}
+
+/// The namespace layout of I17 ([`crate::procns`]) can be built: a user namespace with
+/// root and a subordinate range mapped, `/proc` with `hidepid=invisible`, a devpts
+/// instance, and a nested user namespace entered with `nsenter`.
+fn probe_procns() -> Result<(), Failure> {
+    for t in ["unshare", "nsenter", "newuidmap", "newgidmap", "python3"] {
+        tool(t)?;
+    }
+    crate::procns::probe().map_err(|e| Failure::from(format!("{e:#}")))
 }
 
 /// Checks prerequisites at the top of a scenario; returns from it when one is missing.

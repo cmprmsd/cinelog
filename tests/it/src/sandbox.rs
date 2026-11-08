@@ -48,6 +48,10 @@ pub struct SandboxOptions {
     pub raw_config: Option<String>,
     /// `paths.logs` override (e.g. a tmpfs mount point); relative paths are below the root.
     pub logs: Option<PathBuf>,
+    /// Raw TOML appended after the generated sections (e.g. `[index]`, `[retention]`).
+    pub extra: Vec<String>,
+    /// `server.autostart`; `off` keeps recorders from starting `cinelog serve`.
+    pub autostart: &'static str,
 }
 
 impl Default for SandboxOptions {
@@ -58,6 +62,8 @@ impl Default for SandboxOptions {
             shell: Vec::new(),
             raw_config: None,
             logs: None,
+            extra: Vec::new(),
+            autostart: "off",
         }
     }
 }
@@ -325,7 +331,14 @@ impl Sandbox {
         for (k, v) in shell {
             s.push_str(&format!("{k} = {v}\n"));
         }
-        s.push_str("\n[server]\nautostart = \"off\"\n");
+        s.push_str(&format!("\n[server]\nautostart = \"{}\"\n", opts.autostart));
+        for line in &opts.extra {
+            s.push('\n');
+            s.push_str(line);
+        }
+        if !opts.extra.is_empty() {
+            s.push('\n');
+        }
         s
     }
 
@@ -717,6 +730,7 @@ mod tests {
         let sb = Sandbox::with(SandboxOptions {
             record: vec!["nested = \"record\"".into()],
             shell: vec![("banners".into(), "true".into())],
+            extra: vec!["[retention]\ncompress_after_days = 3".into()],
             ..quiet()
         })
         .unwrap();
@@ -726,6 +740,7 @@ mod tests {
         assert!(cfg.contains("banners = true"));
         assert!(cfg.contains("motd = false"));
         assert!(cfg.contains("autostart = \"off\""));
+        assert!(cfg.ends_with("\n\n[retention]\ncompress_after_days = 3\n"), "{cfg}");
         assert!(cfg.contains(&*sb.logs.to_string_lossy()));
         let mode = fs::metadata(sb.config_file()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

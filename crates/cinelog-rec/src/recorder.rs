@@ -82,6 +82,8 @@ pub(crate) struct Launch {
     pub registry: Option<(Registry, TtyKey, RegistryEntry)>,
     pub log: Option<RecLog>,
     pub tmux: Option<TmuxClient>,
+    /// Run `<exe> serve --ensure` right after the fork (PERSONAL scope, autostart on).
+    pub autostart: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -191,6 +193,12 @@ pub(crate) fn record(mut l: Launch) -> Result<i32, SpawnError> {
         .map_err(|e| SpawnError(format!("fork: {e}")))?;
     drop(l.slave);
     drop(l.nonce_read);
+    if let Some(exe) = &l.autostart
+        && let Err(e) = crate::autostart::ensure_server(exe)
+        && let Some(log) = &l.log
+    {
+        let _ = log.append(&format!("server autostart: {e}"));
+    }
     if l.effects.ignore_job_signals {
         ignore_job_signals();
     }

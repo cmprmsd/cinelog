@@ -1,0 +1,8 @@
+---
+source: crates/cinelog-index/src/render/golden.rs
+expression: dumps
+---
+"全角の文字列がここで折り返す    \r\n\u{1b}[0m\u{90}1$t3;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"こで折り返す    \r\na long line that wraps over several rows of this narrow screen  \r\n\u{1b}[0m\u{90}1$t6;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"こで折り返す 全 \r\na long line that wraps over several rows of this narrow screen  \r\nx \u{1b}[14b\u{1b}[0m\u{90}1$t1;16;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"\u{1b}[1mafter reset\u{1b}[22m     \r\n\u{1b}[0m\u{90}1$t1;12;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0;1m"

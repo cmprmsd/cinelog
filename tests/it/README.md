@@ -33,6 +33,22 @@ fails, after killing the group, if the command outlives its timeout or if it exi
 descendant still holds its stdout/stderr open (a background job the plugin left behind), so
 such a leak fails the scenario instead of hanging it.
 
+The index scenarios (I11–I14) drive the binary as a user would: `cinelog serve --no-http`
+runs in its own process group (`src/cli.rs`, `Serve`; dropping it kills the group), and
+`cinelog index|search|show|compress|status|import` run with the sandbox environment. Casts
+for them are written without recording: `src/synth.rs` writes cinelog casts the way the
+recorder does (any size and age), `tests/fixtures/legacy-gen` (owned by M2-C) writes the old
+plugin's casts and commands.logs. `src/index.rs` reads `index.db` read-only and builds a
+canonical row image (`Dump`: natural keys instead of ids, sorted, volatile columns left out)
+whose hash I12 and I13 compare; `fts_integrity` runs the FTS5 integrity check on a copy.
+
+I17 (`src/procns.rs`) needs no root: `unshare --map-users` maps root and one subordinate uid
+(`newuidmap`, `/etc/subuid`/`/etc/subgid`), mounts a private `/proc` (optionally
+`hidepid=invisible`) in a new pid namespace and fresh devpts instances, and runs the command
+on a PTY whose holder either shares the shell's credentials (readable) or runs as the
+subordinate uid (unreadable, invisible under hidepid). A decoy holds the same tty index in
+another devpts instance. Everything dies with the namespace (`--kill-child`).
+
 Scenarios that need a private mount (I8 full disk, I15) wrap the shell in `unshare -rm`
 (tmpfs on the log dir) plus a nested `unshare -U --map-user=<uid>`, so the shell runs with the
 real uid. The test reads those logs through `/proc/<pid>/root`.
@@ -49,7 +65,9 @@ and passes, except:
   for them, or under `CINELOG_IT_REQUIRE=1` in a `--features root` build.
 
 The recorder probe skips while `cinelog rec` is still the M1-0 fallback stub, and the plugin
-probe skips while `cinelog.plugin.zsh` is the pre-rewrite plugin.
+probe skips while `cinelog.plugin.zsh` is the pre-rewrite plugin. The index probe
+(`Need::Index`) skips while `cinelog index --once` is the M2-0 stand-in; `Need::ProcNs`
+skips without a subordinate uid/gid range or without unprivileged pid/mount namespaces.
 
 The sandbox `PATH` never contains a foreign `cinelog`: a directory that holds one (a system
 install, a leftover of a team install) is replaced by a shadow directory of symlinks to its
@@ -120,8 +138,13 @@ CINELOG_IT_ROOT=1 CINELOG_IT_PW_USER=clpw CINELOG_IT_PW_PASS=… \
 | `i08_fallback.rs` | I8 | read-only log dir, missing binary, corrupt config, full disk: the shell comes up unrecorded (it is the pane process itself), exactly one warning, `CINELOG_FAILED` unset, no exec loop (pid and process count stable), no cast (for the full disk read through the pane's private tmpfs mount), reason in rec.log; the full disk is caught before forkpty (PROTOCOL §6.4) |
 | `i09_hangup.rs` | I9 | kill-pane, SIGTERM, SIGHUP, exit with a disowned HUP-ignoring job (`x` = 3), kill-pane with a job: `x`, exit, registry cleanup |
 | `i10_nested_zsh.rs` | I10 | nested zsh: `rec --check` says `recorded <uuid>`, one cast, distinct seqs, derived `parent_seq` of inner commands = the `zsh` command |
+| `i11_live_search.rs` | I11 | with `serve --no-http` running, `echo needle-$RANDOM` in a pane that started before serve and in one that started after it: `search` finds the command and `search -a` its output within 3 s of Enter (M2 accept 4); a still-running command and its on-screen output (provisional chunk) too, replaced by the final chunk after Ctrl-C; `show`; clean SIGTERM; a search that keeps failing is reported with its error |
+| `i12_resume.rs` | I12 | 19 MB synthetic corpus with one 10 MB cast indexed first: serve SIGKILLed twice mid-backfill (the first kill after a checkpoint committed inside that cast, so the restart resumes from its terminal dump, open stack and state), then restarted, and `index --once` SIGKILLed after such a checkpoint and rerun, both end with the row hash of a one-shot run; FTS integrity; same search answers after `index --rebuild`; rerun is a no-op |
+| `i13_compress.rs` | I13 | casts older than a non-default `compress_after_days`: `--dry-run` lists exactly them, `--now` writes `.cast.zst` (round trip, no `.tmp` left), frame table contiguous with independently decodable frames cut at newlines, every playback segment slice equal to the original; indexed rows, `search` and `show` unchanged; younger and legacy casts untouched (legacy: content, mtime, atime, inode); `index --rebuild` over the zst gives the same rows and frame table; `--now` while serve runs signals it; a leftover original next to its zst is removed at startup |
+| `i14_legacy.rs` | I14 | every legacy-gen scenario and a 300-command cast through `index --once`: one command per banner at the banner time, log text with confidence ≥ 0.8 or the reconstructed text, outputs, no banner lines in chunks, import rows (status, banners, log lines, aligned, mean confidence), hidden `TERM=dumb`, ≥ 95 % aligned; approximate hits in `search`; aggregate-only `import --report`; zero writes (sha256, mtime, atime, inode, listing, inotify); uuids, rows and the legacy files (stamps) stable over `index --rebuild` |
 | `i15_enospc.rs` | I15 | log tmpfs fills up: shell works, registry `degraded`, one warning, `error{enospc}` marker, `cinelog resume` opens `_part2` with `continues` |
 | `i16_clock.rs` | I16 | +1 h realtime step through the testhooks clock: `clock{step}` marker, boottime consistent, piecewise wall-time mapping correct before and after |
+| `i17_hidepid.rs` | I17 | `rec --check` with an invisible holder under hidepid=2: `start personal hidepid` / `skip hidepid` per `hidepid_fallback` (also behind a decoy); a visible holder under hidepid and an unreadable one without hidepid ignore the setting; unreadable `tmux: server` → comm fallback; devpts index collision → the nearest holder, never the decoy; `rec` records (start) or falls back with `CINELOG_FAILED=hidepid` (skip) |
 | `i18_screen.rs` | I18 | GNU screen: outer `pause{multiplexer}` (comm `screen`), the window shell has its own cast, resume after screen exits |
 | `i20_ctx.rs` | I20 | `ctx` markers at start, after `rename-session` and after `break-pane` (30 s poll) |
 | `i21_mirror.rs` | I21 | `#{pane_current_path}` follows `cd`, `#{pane_current_command}` and automatic-rename show the inner command, comm stays `cinelog` |

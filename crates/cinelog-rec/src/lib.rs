@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use cinelog_core::logging::RecLog;
 use cinelog_proto::env;
 
+mod autostart;
 mod clockwatch;
 mod control;
 mod events;

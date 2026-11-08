@@ -2,6 +2,7 @@
 
 pub mod fsutil;
 pub mod migrate;
+pub mod old_server;
 pub mod personal;
 pub mod team;
 pub mod zshrc;
@@ -83,6 +84,44 @@ pub fn user_unit_file(env: &EnvSnapshot) -> PathBuf {
     env.config_home().join("systemd/user/cinelog.service")
 }
 
+/// The calling user's systemd manager, as far as the personal install may drive it.
+pub struct UserManager {
+    /// The unit directory the manager reads (`~/.config/systemd/user` below the passwd
+    /// home); `None` when unknown.
+    pub unit_dir: Option<PathBuf>,
+    /// Runs `systemctl` (reports into the steps).
+    pub run: fn(&[&str], &mut Steps),
+    /// Linger is enabled: the manager runs without a login session.
+    pub linger: bool,
+}
+
+impl UserManager {
+    pub fn real(euid: u32) -> Self {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(euid))
+            .ok()
+            .flatten();
+        Self {
+            unit_dir: user.as_ref().map(|u| u.dir.join(".config/systemd/user")),
+            run: systemctl,
+            linger: user.is_some_and(|u| Path::new("/var/lib/systemd/linger").join(u.name).exists()),
+        }
+    }
+
+    /// Whether the manager reads `unit`: only then may `systemctl --user` act on it (an
+    /// install into another HOME, such as a test sandbox, never touches the real manager).
+    pub fn reads(&self, unit: &Path) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        match (&self.unit_dir, unit.parent()) {
+            (Some(dir), Some(parent)) => canon(dir) == canon(parent),
+            _ => false,
+        }
+    }
+
+    pub fn systemctl(&self, args: &[&str], steps: &mut Steps) {
+        (self.run)(args, steps);
+    }
+}
+
 /// Runs `systemctl` for an installed unit; failures are reported, never fatal.
 pub fn systemctl(args: &[&str], steps: &mut Steps) {
     let line = format!("systemctl {}", args.join(" "));
@@ -140,25 +179,28 @@ fn execute(args: &InstallArgs, steps: &mut Steps) -> Result<Option<doctor::Repor
         return Ok(None);
     }
     let env = EnvSnapshot::capture();
+    let manager = UserManager::real(env.euid);
     if args.prefix.is_some() {
         steps.note("--prefix only applies to --team; the personal install writes no system paths");
     }
     if args.refresh {
-        personal::refresh(env, steps)?;
+        personal::refresh(env, &manager, steps)?;
         return Ok(None);
     }
     if args.uninstall {
-        personal::uninstall(env, steps)?;
+        personal::uninstall(env, &manager, steps)?;
         return Ok(None);
     }
     let opts = personal::Options {
         migrate: !args.no_migrate,
         exe: None,
+        manager,
+        proc_root: old_server::proc_root(),
     };
     let ctx = personal::install(env, &opts, steps)?;
     steps.note("next: put `zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'` in .zimrc and, for the fastest");
     steps.note("      start, `source <module>/shell/early.zsh` as the first line of .zshrc");
-    steps.note("the search index and the web UI are not part of this version yet");
+    steps.note("search with `cinelog search`; the web UI is not part of this version yet");
     Ok(Some(doctor::collect(&ctx)))
 }
 

@@ -152,7 +152,7 @@ jobs:
       - name: Install test tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends zsh tmux screen fzf openssh-server openssh-client util-linux
+          sudo apt-get install -yq --no-install-recommends zsh tmux screen fzf openssh-server openssh-client util-linux uidmap
       - name: Prepare the runner for the root and namespace scenarios
         run: |
           # `sudo -i` / `sudo su -` start root's login shell; an existing .zshrc keeps
@@ -161,6 +161,11 @@ jobs:
           sudo touch /root/.zshrc
           # I8 full disk and I15 need unprivileged user + mount namespaces.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # I17 maps a second uid into its namespace (newuidmap/newgidmap): give the runner
+          # user a subordinate range if the image has none.
+          for f in /etc/subuid /etc/subgid; do
+            grep -q "^$(id -un):" "$f" 2>/dev/null || echo "$(id -un):100000:65536" | sudo tee -a "$f" >/dev/null
+          done
       - name: Password-requiring sudo user for I6
         run: |
           pw=$(openssl rand -hex 16)

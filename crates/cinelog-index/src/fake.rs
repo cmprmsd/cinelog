@@ -57,10 +57,11 @@ impl State {
             ForgetTarget::Session { uuid: u } => u == uuid,
             ForgetTarget::Command { uuid: u, seq: s } => u == uuid && *s == seq,
             ForgetTarget::Range { .. } => false,
-        }) || self
-            .forgotten
-            .iter()
-            .any(|f| matches!(&f.target, ForgetTarget::Command { uuid: u, seq: s } if u == uuid && *s == seq))
+        }) || self.forgotten.iter().any(|f| match &f.target {
+            ForgetTarget::Session { uuid: u } => u == uuid,
+            ForgetTarget::Command { uuid: u, seq: s } => u == uuid && *s == seq,
+            ForgetTarget::Range { .. } => false,
+        })
     }
 
     fn chunk_forgotten(&self, uuid: &str, chunk: &Chunk) -> bool {
@@ -214,6 +215,19 @@ impl MemIndex {
     pub fn info(&self, key: &str) -> Option<String> {
         self.st().info.get(key).cloned()
     }
+
+    pub fn parts(&self, uuid: &str) -> Vec<CastPart> {
+        self.st()
+            .parts
+            .iter()
+            .filter(|((u, _), _)| u == uuid)
+            .map(|(_, p)| p.clone())
+            .collect()
+    }
+
+    pub fn frames(&self, uuid: &str, part: u32) -> Option<Vec<ZstFrameRow>> {
+        self.st().frames.get(&(uuid.to_owned(), part)).cloned()
+    }
 }
 
 fn now() -> f64 {
@@ -233,8 +247,23 @@ impl IndexWriter for MemIndex {
         if b.reset {
             st.drop_session_rows(&uuid);
         }
+        // Like the real writer: another session at this path (a replaced cast, or a legacy
+        // cast that grew and hashes to a new uuid) is stale.
+        let stale: Vec<String> = st
+            .sessions
+            .iter()
+            .filter(|(u, s)| **u != uuid && s.cast_path == b.session.cast_path)
+            .map(|(u, _)| u.clone())
+            .collect();
+        for u in stale {
+            st.drop_session_rows(&u);
+            st.sessions.remove(&u);
+        }
         st.sessions.insert(uuid.clone(), b.session.clone());
         for p in &b.parts {
+            if let Some(frames) = &p.frames {
+                st.frames.insert((uuid.clone(), p.part), frames.clone());
+            }
             st.parts.insert((uuid.clone(), p.part), p.clone());
         }
         for c in &b.commands {

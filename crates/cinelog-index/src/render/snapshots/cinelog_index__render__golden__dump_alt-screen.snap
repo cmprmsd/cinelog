@@ -1,0 +1,10 @@
+---
+source: crates/cinelog-index/src/render/golden.rs
+expression: dumps
+---
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39m \u{1b}[7b\r\n\u{1b}[0m\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39m \u{1b}[7b\r\n\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?1047h\u{1b}[1;1H\u{1b}[44malt top\u{1b}[49m \u{1b}[8b\r\n\u{90}1$t1;8;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39m \u{1b}[7b\r\n\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?1047h\u{1b}[1;1H\u{1b}[44malt top\u{1b}[49m \u{1b}[8b\r\n \u{1b}[15b\r\n    alt mid     \r\n \u{1b}[15b\r\n \u{1b}[15b\r\nalt bottom \u{1b}[5b\u{90}1$t3;12;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t6;11;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39m \u{1b}[7b\r\n\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?1047h\u{1b}[1;1H\u{1b}[44malt top\u{1b}[49m \u{1b}[8b\r\n \u{1b}[15b\r\n    alt mid saved \u{1b}[14b\r\n \u{1b}[15b\r\nalt bottom \u{1b}[5b\u{90}1$t3;12;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t4;2;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39m \u{1b}[7b\r\n\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{1b}[0m\u{1b}[?1047h\u{90}1$t3;12;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{1b}[?1047l\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"primary 1 \u{1b}[6b\r\nprimary 2 \u{1b}[6b\r\n\u{1b}[33mprompt$ \u{1b}[39mback    \r\n\u{90}1$t3;9;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t4;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?1047h\u{1b}[1;1H \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\nalt again \u{1b}[6b\r\n\u{90}1$t3;12;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}7\u{90}1$t4;10;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"

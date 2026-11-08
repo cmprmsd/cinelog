@@ -334,6 +334,9 @@ pub struct CastPart {
     /// Uncompressed bytes, once known.
     pub bytes: Option<u64>,
     pub t_offset: f64,
+    /// Frame table of a compressed part; `Some` replaces its `zst_frames` rows, `None`
+    /// leaves them as they are.
+    pub frames: Option<Vec<ZstFrameRow>>,
 }
 
 // ------------------------------------------------------------------ commands and output

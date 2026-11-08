@@ -5,7 +5,9 @@ every command (typed text, expansion, cwd, exit status). One static binary (`cin
 recording; a zim module (`cinelog.plugin.zsh`) starts it and emits the command markers.
 
 Version 0.10 is the first release of the rewrite: recorder, plugin, `link`, `pause`/`resume`,
-`doctor` and `install`. Search (`cinelog search`) and indexing arrive in 0.11, the web UI in 0.12.
+`doctor` and `install`. 0.11 adds the index (`cinelog serve --no-http`, live indexing, the
+compressor, the import of old casts) and `cinelog search`/`show`/`forget`; the web UI follows
+in 0.12.
 The marker protocol and the shell/binary interface are specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Installation
@@ -28,11 +30,16 @@ The marker protocol and the shell/binary interface are specified in [docs/PROTOC
    [[ -r ${ZIM_HOME:-~/.zim}/modules/cinelog/shell/early.zsh ]] && source ${ZIM_HOME:-~/.zim}/modules/cinelog/shell/early.zsh
    ```
 
-5. Run `cinelog install` once (directories, config template, migration of the old settings),
-   open a new terminal and check it with `cinelog doctor`.
+5. Run `cinelog install` once (directories, config template, migration of the old settings,
+   the indexer's systemd user unit), open a new terminal and check it with `cinelog doctor`.
 
 `zimfw update` keeps the module and the binary in sync. Asciinema, Python and the old viewer
-port are no longer needed; stop the old `http_server.py` if it still runs (`doctor` warns).
+are no longer needed: `cinelog install` stops a running `http_server.py` of the old plugin and
+warns if something else still listens on its port. The indexer runs as
+`~/.config/systemd/user/cinelog.service` (`loginctl enable-linger` keeps it running while you
+are logged out); without systemd, recorded shells start it themselves (`server.autostart`).
+Old casts in `~/logs` are imported read-only on the first run (never written, never
+compressed).
 
 Checksum trust: only a module that tracks `main` verifies against the checksum committed in
 this repository. The checksum commit lands on `main` after the release tag, so a module
@@ -63,6 +70,11 @@ allowed, and every pause or skip leaves a visible marker.
 |---|---|
 | `cinelog link [--json]` | session uuid and cast path of the current shell |
 | `cinelog pause [--reason TEXT]`, `cinelog resume` | pause and resume the recording (a pause marker marks the gap); `resume` also continues a recording that stopped on a full disk |
+| `cinelog search [-a] [TERM]` | search commands (and with `-a` their output) in fzf; `--print`/`--json` without fzf; `hist` in a recorded shell is the same |
+| `cinelog show <entry>` | a command with its output (the fzf preview) |
+| `cinelog forget <uuid>[:seq]` | removes a session or command from the index (casts stay on disk) |
+| `cinelog status`, `cinelog import --report` | indexer state; per-file results of the legacy import |
+| `cinelog index --once`, `cinelog index --rebuild` | one-shot indexing, or a rebuild from the casts (meta.db is kept) |
 | `cinelog doctor` | checks the installation, the current shell and its terminal |
 | `cinelog install [--refresh]` | personal setup |
 

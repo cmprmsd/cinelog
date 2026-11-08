@@ -2,6 +2,7 @@
 //! HOME/XDG environment. Nothing here needs root; `install --team` runs in `--prefix` mode.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 
@@ -236,6 +237,133 @@ fn personal_install_refresh_and_uninstall() {
     env.cmd().args(["install", "--uninstall"]).assert().success();
     assert!(std::fs::symlink_metadata(&link).is_err());
     assert!(env.path("config/cinelog/config.toml").exists());
+}
+
+/// M2 accept 5: `install` stops the old plugin's python viewer (started from the module
+/// below this HOME) and nothing listens on the carried-over port afterwards.
+#[test]
+fn install_stops_the_old_python_viewer() {
+    if is_root() || StdCommand::new("python3").arg("-V").output().is_err() {
+        return;
+    }
+    let env = Env::new();
+    let module = env.path("home/.zim/modules/cinelog");
+    std::fs::create_dir_all(&module).unwrap();
+    let script = module.join("http_server.py");
+    let port_file = env.path("port");
+    std::fs::write(
+        &script,
+        format!(
+            "import socket, time, os\ns = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n\
+             open({0:?} + '.tmp', 'w').write(str(s.getsockname()[1])); os.rename({0:?} + '.tmp', {0:?})\n\
+             while True: time.sleep(1)\n",
+            port_file.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut viewer = StdCommand::new("python3")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !port_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let port: u16 = std::fs::read_to_string(&port_file).unwrap().parse().unwrap();
+    let old = env.path("home/.config/cinelog/cinelog-settings.conf");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, format!("export CINELOG_VIEWER_PORT={port}\n")).unwrap();
+
+    let out = env.cmd().arg("install").write_stdin("").output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Reap it whatever happened, so a failure never leaves the stand-in running.
+    let _ = viewer.kill();
+    let status = viewer.wait().unwrap();
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("stopped the old viewer"), "{stdout}");
+    assert!(!stdout.contains("still listens"), "{stdout}");
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "stopped by install");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "port {port} is free"
+    );
+    assert!(env.path("config/systemd/user/cinelog.service").is_file());
+    assert!(
+        stdout.contains("not enabled"),
+        "a sandbox HOME never reaches systemctl: {stdout}"
+    );
+}
+
+/// M2 accept 6 (API level): annotations live in meta.db, keyed by session uuid, and survive
+/// `cinelog index --rebuild`, which re-derives the same session.
+#[test]
+fn annotations_survive_an_index_rebuild() {
+    use cinelog_index::model::{Annotation, DbPaths};
+    let env = Env::new();
+    let logs = env.path("home/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join("old.cast"),
+        concat!(
+            r#"{"version": 3, "term": {"cols": 80, "rows": 24}, "timestamp": 1700000000}"#,
+            "\n",
+            r#"[0.5, "o", "$ echo annotated\r\nannotated\r\n$ "]"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    env.cmd().args(["index", "--once"]).assert().success();
+    let db_dir = find_file(&env.path("state"), "index.db")
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let paths = DbPaths::in_dir(&db_dir);
+    let reader = cinelog_index::db::open_reader(&paths).unwrap();
+    let uuid = reader.legacy_report().unwrap()[0].session_uuid.clone().unwrap();
+    drop(reader);
+    let note = Annotation {
+        uuid: "01934f5e-7b2a-7c3d-8e4f-00000000a001".into(),
+        session_uuid: uuid.clone(),
+        cmd_seq: None,
+        t_from: Some(0.5),
+        t_to: Some(0.75),
+        author: "me".into(),
+        body: "kept across rebuilds".into(),
+        tags: vec!["m2".into()],
+        created_at: 1_794_000_000.25,
+        updated_at: 1_794_000_000.25,
+        deleted_at: None,
+    };
+    cinelog_index::db::open_meta(&paths)
+        .unwrap()
+        .put_annotation(&note)
+        .unwrap();
+
+    env.cmd().args(["index", "--rebuild"]).assert().success();
+    let meta = cinelog_index::db::open_meta(&paths).unwrap();
+    assert_eq!(meta.annotations(&uuid).unwrap(), vec![note]);
+    let reader = cinelog_index::db::open_reader(&paths).unwrap();
+    assert!(
+        reader.session(&uuid).unwrap().is_some(),
+        "the rebuilt index has the session"
+    );
+}
+
+/// The first file called `name` below `root`.
+fn find_file(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(root).ok()?.flatten().find_map(|e| {
+        let p = e.path();
+        if p.file_name().is_some_and(|n| n == name) {
+            Some(p)
+        } else if p.is_dir() {
+            find_file(&p, name)
+        } else {
+            None
+        }
+    })
 }
 
 fn fake_module(env: &Env) -> PathBuf {

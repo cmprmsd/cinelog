@@ -1,0 +1,20 @@
+# cinelog personal server (plan §10.4). `cinelog install` copies it to
+# ~/.config/systemd/user/cinelog.service. It runs while the user is logged in;
+# `loginctl enable-linger` keeps it running without a session.
+# Until the web server lands (M3) it runs the indexer only (--no-http).
+[Unit]
+Description=cinelog personal server
+Documentation=https://github.com/cmprmsd/cinelog
+
+[Service]
+ExecStart=%h/.local/bin/cinelog serve --scope personal --no-http
+Restart=on-failure
+RestartSec=2
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryHigh=1G
+
+[Install]
+WantedBy=default.target

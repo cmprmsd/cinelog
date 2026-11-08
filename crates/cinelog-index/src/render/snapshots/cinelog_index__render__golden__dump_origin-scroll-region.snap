@@ -1,0 +1,10 @@
+---
+source: crates/cinelog-index/src/render/golden.rs
+expression: dumps
+---
+"r1 \u{1b}[13b\r\nr2 \u{1b}[13b\r\nr3 \u{1b}[13b\r\nr4 \u{1b}[13b\r\nr5 \u{1b}[13b\r\nr6 \u{1b}[13b\u{1b}[0m\u{90}1$t6;3;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"r1 \u{1b}[13b\r\norigin \u{1b}[9b\r\nr3 \u{1b}[13b\r\nr4 \u{1b}[13b\r\nr5 \u{1b}[13b\r\nr6 \u{1b}[13b\u{1b}[0m\u{1b}[2;5r\u{90}1$t2;7;1;@;@;A;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"r1 \u{1b}[13b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\nscrolled in region \u{1b}[13b\r\nr6 \u{1b}[13b\u{1b}[0m\u{1b}[2;5r\u{90}1$t5;3;1;@;@;A;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"r1 \u{1b}[13b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\nr6 \u{1b}[13b\u{1b}[0m\u{1b}[2;5r\u{90}1$t3;1;1;@;@;A;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"r1 \u{1b}[13b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\nr6 \u{1b}[13b\u{1b}[0m\u{1b}[2;5r\u{90}1$t3;1;1;@;@;A;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"r1 \u{1b}[13b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\n \u{1b}[15b\r\nfull \u{1b}[11b\u{1b}[0m\u{90}1$t6;5;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"

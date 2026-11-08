@@ -1,0 +1,9 @@
+---
+source: crates/cinelog-index/src/render/golden.rs
+expression: dumps
+---
+"\u{1b}[1mbold\u{1b}[22m \u{1b}[3mit\u{1b}[23m \u{1b}[4mund\u{1b}[24m     \r\n\u{1b}[0m\u{90}1$t2;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"\u{1b}[1mbold\u{1b}[22m \u{1b}[3mit\u{1b}[23m \u{1b}[4mund\u{1b}[24m     \r\n\u{1b}[38:5:196m256\u{1b}[39m \u{1b}[48:2:10:20:30mrgb\u{1b}[49m \u{1b}[7minv\u{1b}[27m     \r\n\u{1b}[0m\u{90}1$t3;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"\u{1b}[1mbold\u{1b}[22m \u{1b}[3mit\u{1b}[23m \u{1b}[4mund\u{1b}[24m     \r\n\u{1b}[38:5:196m256\u{1b}[39m \u{1b}[48:2:10:20:30mrgb\u{1b}[49m \u{1b}[7minv\u{1b}[27m     \r\n\u{1b}[31;42mcolor \u{1b}[0m \u{1b}[9b\r\n\u{1b}[0m\u{90}1$t3;7;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0;31;42m\u{9b}"
+"\u{1b}[1mbold\u{1b}[22m \u{1b}[3mit\u{1b}[23m \u{1b}[4mund\u{1b}[24m     \r\n\u{1b}[38:5:196m256\u{1b}[39m \u{1b}[48:2:10:20:30mrgb\u{1b}[49m \u{1b}[7minv\u{1b}[27m     \r\n\u{1b}[31;42mcolor \u{1b}[1;9mmixed\u{1b}[0m plain \u{1b}[14b\r\n\u{1b}[0m\u{90}1$t5;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m"
+"\u{1b}[1mbold\u{1b}[22m \u{1b}[3mit\u{1b}[23m \u{1b}[4mund\u{1b}[24m     \r\n\u{1b}[38:5:196m256\u{1b}[39m \u{1b}[48:2:10:20:30mrgb\u{1b}[49m \u{1b}[7minv\u{1b}[27m     \r\n\u{1b}[31;42mcolor \u{1b}[1;9mmixed\u{1b}[0m plain \u{1b}[14b\r\n0123456789abcdef\r\n\u{1b}[0m\u{90}1$t5;16;1;@;@;H;0;2;@;BBBB\u{9c}\u{1b}[0m"

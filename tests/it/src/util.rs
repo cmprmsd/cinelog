@@ -218,6 +218,90 @@ pub fn base64_nopad(data: &[u8]) -> String {
     out
 }
 
+/// Broken-down local time of `epoch_us` (the process's `TZ`/`/etc/localtime`).
+fn local_tm(epoch_us: u64) -> (libc::tm, u32) {
+    let secs = libc::time_t::try_from(epoch_us / 1_000_000).unwrap_or(0);
+    // SAFETY: `tm` is plain data that localtime_r fills in completely.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the duration of the call.
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    (tm, (epoch_us % 1_000_000) as u32)
+}
+
+/// `(YYYY-MM, YYYYmmddTHHMMSS.ffffff)` of `epoch_us` in local time: the month directory and
+/// file name stamp of a cast (PROTOCOL §5).
+pub fn local_time(epoch_us: u64) -> (String, String) {
+    let (tm, us) = local_tm(epoch_us);
+    let (y, mo) = (tm.tm_year + 1900, tm.tm_mon + 1);
+    (
+        format!("{y:04}-{mo:02}"),
+        format!(
+            "{y:04}{mo:02}{:02}T{:02}{:02}{:02}.{us:06}",
+            tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec
+        ),
+    )
+}
+
+/// Sets atime and mtime (µs since the epoch) without following symlinks.
+pub fn set_times(path: &Path, atime_us: u64, mtime_us: u64) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let ts = |us: u64| libc::timespec {
+        tv_sec: libc::time_t::try_from(us / 1_000_000).unwrap_or(libc::time_t::MAX),
+        tv_nsec: libc::c_long::from((us % 1_000_000) as u32) * 1000,
+    };
+    let times = [ts(atime_us), ts(mtime_us)];
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `c` is a valid C string and `times` holds exactly two timespecs.
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("utimensat {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Now, in µs since the epoch.
+pub fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
+/// Lowercase hex sha256 of a file, read with `O_NOATIME` so the check itself never touches
+/// the access time.
+pub fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = open_noatime(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex(&h.finalize()))
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Opens `path` read-only with `O_NOATIME` (plain read-only when the kernel refuses it).
+pub fn open_noatime(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let r = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOATIME)
+        .open(path);
+    match r {
+        Err(e) if e.raw_os_error() == Some(libc::EPERM) => std::fs::File::open(path),
+        r => r,
+    }
+    .with_context(|| format!("opening {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +384,34 @@ mod tests {
             crate::procs::with_env("CLIT_OWT", &marker).is_empty().then_some(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn local_time_formats() {
+        let (month, stamp) = local_time(1_794_139_200_123_456);
+        assert_eq!(month.len(), 7);
+        assert_eq!(&month[4..5], "-");
+        assert_eq!(stamp.len(), "20261108T120000.123456".len());
+        assert!(stamp.ends_with(".123456"));
+        assert!(stamp.starts_with(&month.replace('-', "")));
+    }
+
+    #[test]
+    fn times_and_hashes() {
+        let d = scratch_dir().unwrap();
+        let p = d.path().join("f");
+        std::fs::write(&p, b"abc").unwrap();
+        set_times(&p, 1_000_000_000_500_000, 1_000_000_100_000_000).unwrap();
+        let md = std::fs::metadata(&p).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((md.atime(), md.atime_nsec()), (1_000_000_000, 500_000_000));
+        assert_eq!(md.mtime(), 1_000_000_100);
+        assert_eq!(
+            sha256_file(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let md2 = std::fs::metadata(&p).unwrap();
+        assert_eq!(md2.atime(), md.atime(), "hashing never updates the atime");
     }
 
     #[test]

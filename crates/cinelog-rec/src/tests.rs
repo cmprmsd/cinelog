@@ -218,6 +218,7 @@ fn start(script: &str, opts: Opts) -> Running {
         registry: Some((registry.clone(), key.clone(), entry)),
         log: None,
         tmux: None,
+        autostart: None,
     };
     let host_slave = host.slave;
     let (done_tx, done) = crossbeam_channel::bounded(1);

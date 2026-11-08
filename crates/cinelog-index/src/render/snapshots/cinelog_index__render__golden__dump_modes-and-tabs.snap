@@ -1,0 +1,11 @@
+---
+source: crates/cinelog-index/src/render/golden.rs
+expression: dumps
+---
+"\u{1b}[0m\u{90}1$t1;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[4h\u{1b}[?1h"
+"azb \u{1b}[12b\r\n\u{1b}[0m\u{90}1$t2;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h"
+"azb \u{1b}[12b\r\n    T1     T2   \r\n\u{1b}[5W\u{1b}[5G\u{1b}[0W\u{1b}[12G\u{1b}[0W\u{1b}[0m\u{90}1$t3;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h"
+"azb \u{1b}[12b\r\n    T1     T2   \r\n┌──┐ text \u{1b}[6b\r\n\u{1b}[5W\u{1b}[5G\u{1b}[0W\u{1b}[12G\u{1b}[0W\u{1b}[0m\u{90}1$t4;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h"
+"azb \u{1b}[12b\r\n    T1     T2   \r\n┌──┐ text \u{1b}[6b\r\nno autowrap pase\r\n\u{1b}[5W\u{1b}[5G\u{1b}[0W\u{1b}[12G\u{1b}[0W\u{1b}[0m\u{90}1$t5;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h"
+"azb \u{1b}[12b\r\n    T1     T2   \r\n┌──┐ text \u{1b}[6b\r\nno autowrap pase\r\n\u{1b}[5W\u{1b}[5G\u{1b}[0W\u{1b}[12G\u{1b}[0W\u{1b}[0m\u{90}1$t5;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h"
+"azb \u{1b}[12b\r\n    T1     T2   \r\n┌──┐ text \u{1b}[6b\r\nno autowrap pase\r\n\u{1b}[5W\u{1b}[5G\u{1b}[0W\u{1b}[12G\u{1b}[0W\u{1b}[0m\u{90}1$t5;1;1;@;@;@;0;2;@;BBBB\u{9c}\u{1b}[0m\u{1b}[?25l\u{1b}[?1h\u{9d}2;unfinished osc"

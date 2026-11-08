@@ -434,11 +434,18 @@ fn server(ctx: &Ctx, r: &mut Report) {
                 s.url, s.pid, s.version, s.fingerprint
             ),
         ),
-        None => r.add(
-            "server",
-            Status::Info,
-            "no cinelog server running (the index and web UI arrive in later versions)",
-        ),
+        None => match crate::serve::lock::holder_pid(&ctx.paths.runtime_dir) {
+            Some(pid) => r.add(
+                "server",
+                Status::Ok,
+                format!("indexer running (pid {pid}; the web UI arrives in a later version)"),
+            ),
+            None => r.add(
+                "server",
+                Status::Info,
+                "no cinelog server running: recorded shells start it (server.autostart), or run `cinelog serve`",
+            ),
+        },
     }
 }
 

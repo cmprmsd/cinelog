@@ -214,15 +214,21 @@ impl ProcFs for RealProcFs {
 
     fn fds(&self, pid: Pid) -> io::Result<Vec<FdEntry>> {
         let dir = self.entry(pid, "fd")?;
-        let mut out: Vec<FdEntry> = fs::read_dir(&dir)?
-            .filter_map(|e| {
-                let e = e.ok()?;
-                let fd = e.file_name().to_str()?.parse().ok()?;
-                // An fd closed between readdir and readlink is simply skipped.
-                let target = fs::read_link(e.path()).ok()?;
-                Some(FdEntry { fd, target })
-            })
-            .collect();
+        let mut out = Vec::new();
+        for e in fs::read_dir(&dir)? {
+            let Ok(e) = e else { continue };
+            let Some(fd) = e.file_name().to_str().and_then(|n| n.parse().ok()) else {
+                continue;
+            };
+            match fs::read_link(e.path()) {
+                Ok(target) => out.push(FdEntry { fd, target }),
+                // A listable fd directory whose links are not readable (the ptrace access
+                // check failed) hides the holder: report it as denied, not as "no master".
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return Err(err),
+                // Closed between readdir and readlink.
+                Err(_) => {}
+            }
+        }
         out.sort_unstable_by_key(|e| e.fd);
         Ok(out)
     }

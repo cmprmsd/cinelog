@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cinelog_core::clock::{self, Clock};
-use cinelog_core::config::{Config, PathsConfig};
+use cinelog_core::config::{Autostart, Config, PathsConfig};
 use cinelog_core::ids::{self, SessionId};
 use cinelog_core::logging::RecLog;
 use cinelog_core::paths::{self, EnvSnapshot, Paths, SystemRoot};
@@ -361,6 +361,8 @@ pub(crate) fn prepare(req: &RecRequest) -> Result<(Launch, PathBuf), Fallback> {
     );
     let clock: Arc<dyn Clock> = Arc::from(clock::system_clock());
 
+    let autostart =
+        (scope == Scope::Personal && cfg.server.autostart != Autostart::Off).then(crate::autostart::self_exe);
     let launch = Launch {
         child,
         master: pair.master,
@@ -389,6 +391,7 @@ pub(crate) fn prepare(req: &RecRequest) -> Result<(Launch, PathBuf), Fallback> {
         registry: Some((registry, key, entry)),
         log: Some(log),
         tmux,
+        autostart,
     };
     Ok((launch, cast_path))
 }
