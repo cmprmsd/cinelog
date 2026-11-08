@@ -1,5 +1,5 @@
 //! Frozen command-line surface (see docs/PROTOCOL.md, "Binary interface"): M1 plus the M2
-//! subcommands. Later milestones add subcommands; existing names and flags do not change.
+//! and M3 subcommands. Later milestones add subcommands; existing names and flags do not change.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -45,6 +45,10 @@ pub enum Command {
     Import(ImportArgs),
     /// Export or import meta.db (annotations, tags, forget list, settings)
     Meta(MetaArgs),
+    /// Manage web login tokens (TEAM: one named token per member)
+    Token(TokenArgs),
+    /// Show or regenerate the web server's TLS certificate
+    Tls(TlsArgs),
     /// Print a shell completion script
     #[command(hide = true)]
     Completions {
@@ -127,7 +131,7 @@ pub struct ServeArgs {
     /// Scope to serve; TEAM needs EUID 0 (default: the scope of the current EUID)
     #[arg(long, value_enum)]
     pub scope: Option<ScopeArg>,
-    /// Indexer only: no HTTP listener (the only mode before the web server lands)
+    /// Indexer only: no HTTPS listener
     #[arg(long)]
     pub no_http: bool,
     /// Return at once if a server holds serve.lock; otherwise start one (systemd user unit if
@@ -181,6 +185,9 @@ pub struct SearchArgs {
     /// Maximum number of results
     #[arg(long, default_value_t = 1000)]
     pub limit: usize,
+    /// Search the team server's history over HTTPS with your team token (`token team-login`)
+    #[arg(long)]
+    pub team: bool,
     /// Search term (words are joined with single spaces); empty lists the newest commands
     #[arg(value_name = "TERM")]
     pub term: Vec<String>,
@@ -271,6 +278,60 @@ pub enum MetaAction {
     },
 }
 
+#[derive(Debug, Args)]
+pub struct TokenArgs {
+    #[command(subcommand)]
+    pub action: TokenAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenAction {
+    /// Create a token and print it once. TEAM: NAME is the member (required); PERSONAL:
+    /// replaces your token (NAME defaults to your user name) and ends its web sessions
+    New {
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// List token names and creation times (never the tokens)
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a token and end all web sessions it opened
+    Revoke {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Store your team token for `search --team` (read from the terminal, or stdin when it
+    /// is not a terminal) and pin the team server's certificate fingerprint
+    TeamLogin {
+        /// Team server URL (default: https://<this host>:10000)
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// Expected certificate fingerprint (as `cinelog tls show` prints it on the server);
+        /// without it the first fingerprint seen is trusted and printed
+        #[arg(long, value_name = "SHA256")]
+        fingerprint: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct TlsArgs {
+    #[command(subcommand)]
+    pub action: TlsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TlsAction {
+    /// Print the certificate's fingerprint, names and expiry
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace the self-signed certificate (restart the server afterwards)
+    Regen,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +378,18 @@ mod tests {
             panic!()
         };
         assert_eq!(s.max_bytes, 65536);
+    }
+
+    #[test]
+    fn m3_subcommands() {
+        let ok = |args: &[&str]| Cli::try_parse_from(args).map(|_| ()).map_err(|e| e.to_string());
+        assert!(ok(&["cinelog", "token", "new"]).is_ok());
+        assert!(ok(&["cinelog", "token", "new", "alice"]).is_ok());
+        assert!(ok(&["cinelog", "token", "list", "--json"]).is_ok());
+        assert!(ok(&["cinelog", "token", "revoke"]).is_err());
+        assert!(ok(&["cinelog", "token", "team-login", "--url", "https://t:10000"]).is_ok());
+        assert!(ok(&["cinelog", "tls", "show", "--json"]).is_ok());
+        assert!(ok(&["cinelog", "tls", "regen"]).is_ok());
+        assert!(ok(&["cinelog", "search", "--team", "-a", "x"]).is_ok());
     }
 }

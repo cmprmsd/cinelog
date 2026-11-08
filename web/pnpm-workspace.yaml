@@ -1,0 +1,2 @@
+minimumReleaseAgeExclude:
+  - eslint-plugin-svelte@3.24.1

@@ -9,6 +9,8 @@ mod pause;
 mod search;
 mod serve;
 mod session;
+mod tls;
+mod token;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -46,6 +48,8 @@ fn main() -> ExitCode {
         Command::Index(args) => search::index(&args),
         Command::Status(args) => search::status(&args),
         Command::Import(args) => search::import_report(&args),
+        Command::Token(args) => token::run(&args),
+        Command::Tls(args) => tls::run(&args),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "cinelog", &mut std::io::stdout());
             ExitCode::SUCCESS

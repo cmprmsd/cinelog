@@ -14,6 +14,7 @@ mod list;
 mod pick;
 mod show;
 mod status;
+mod team;
 mod text;
 mod when;
 
@@ -57,6 +58,12 @@ pub fn run(args: &SearchArgs) -> ExitCode {
             None => list::Ui::Plain,
         }
     };
+    if args.team {
+        return exit("search", |out, err| {
+            let store = team::store(&ctx)?;
+            list::search(args, store.as_ref(), &env, ui, out, err)
+        });
+    }
     let store = DbStore::new(&ctx);
     exit("search", |out, err| list::search(args, &store, &env, ui, out, err))
 }

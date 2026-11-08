@@ -6,3 +6,5 @@ tmp/
 /bin/cinelog
 /bin/cinelog.new
 *.zwc
+/web/test-results/
+/web/playwright-report/

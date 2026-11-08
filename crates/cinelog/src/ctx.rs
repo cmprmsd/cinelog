@@ -58,6 +58,11 @@ impl Ctx {
         self.paths.is_disabled(self.env_disable().as_deref())
     }
 
+    /// What the web server and `tls`/`token` need from this context.
+    pub fn web_context(&self) -> cinelog_web::WebContext {
+        cinelog_web::WebContext::new(&self.env, self.config.clone(), self.paths.clone(), paths::hostname())
+    }
+
     pub fn detector(&self) -> ProcDetector<RealProcFs, Registry> {
         ProcDetector::new(RealProcFs::new(), self.registry())
     }

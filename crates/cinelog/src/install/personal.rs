@@ -98,6 +98,11 @@ pub fn install(env: EnvSnapshot, opts: &Options, steps: &mut Steps) -> Result<Ct
     let port = old_server::persisted_port(cfg.legacy_port, &p.migrated_port_file());
     stop_old_server(&ctx.env, &opts.proc_root, port, steps);
     install_unit(&ctx.env, (!linked).then_some(exe.as_path()), &opts.manager, steps)?;
+    match crate::token::ensure_personal(&ctx) {
+        Ok(Some(t)) => steps.done(format!("web login token for {} (shown once): {}", t.name, t.secret)),
+        Ok(None) => {}
+        Err(e) => steps.warn(format!("web login token: {e:#}")),
+    }
     Ok(ctx)
 }
 

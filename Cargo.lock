@@ -440,6 +440,7 @@ dependencies = [
  "cinelog-index",
  "cinelog-proto",
  "cinelog-rec",
+ "cinelog-web",
  "clap",
  "clap_complete",
  "crossbeam-channel",
@@ -449,6 +450,7 @@ dependencies = [
  "libc",
  "nix",
  "predicates",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -596,6 +598,7 @@ name = "cinelog-web"
 version = "0.10.0"
 dependencies = [
  "async-stream",
+ "avt",
  "axum",
  "axum-extra",
  "axum-server",
@@ -607,25 +610,36 @@ dependencies = [
  "data-encoding",
  "futures-util",
  "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "jiff",
+ "libc",
+ "memchr",
  "nix",
  "rcgen",
+ "rusqlite",
  "rust-embed",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socket2",
  "subtle",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
  "ts-rs",
  "uuid",
+ "x509-parser",
+ "zstd",
 ]
 
 [[package]]
@@ -821,6 +835,27 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "dirs"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1138,6 +1173,7 @@ dependencies = [
  "pin-project-lite",
  "smallvec",
  "tokio",
+ "want",
 ]
 
 [[package]]
@@ -1147,12 +1183,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
  "bytes",
+ "futures-channel",
+ "futures-util",
  "http",
  "http-body",
+ "httparse",
  "hyper",
+ "libc",
  "pin-project-lite",
+ "socket2",
  "tokio",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1274,6 +1316,15 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libredox"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libsqlite3-sys"
@@ -1462,6 +1513,12 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "parking_lot"
@@ -1679,6 +1736,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_users"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
+dependencies = [
+ "libredox",
+ "thiserror",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1766,6 +1833,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rust-embed-utils",
+ "shellexpand",
  "syn 2.0.119",
  "walkdir",
 ]
@@ -1983,6 +2051,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
@@ -2439,6 +2516,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "try-lock"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
 name = "ts-rs"
 version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2551,6 +2634,15 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "want"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
+dependencies = [
+ "try-lock",
 ]
 
 [[package]]

@@ -13,11 +13,17 @@ cinelog-core.workspace = true
 cinelog-proto.workspace = true
 cinelog-cast.workspace = true
 cinelog-index.workspace = true
+avt.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+memchr.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 axum-extra.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
+x509-parser.workspace = true
+socket2.workspace = true
 subtle.workspace = true
 rust-embed.workspace = true
 tokio.workspace = true
@@ -33,6 +39,8 @@ sha2.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
 nix.workspace = true
+libc.workspace = true
+toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -41,7 +49,12 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cinelog-index = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

@@ -10,7 +10,8 @@
 //! - [`compress`]: the zstd compressor and the reconciliation of interrupted runs;
 //! - [`backup`]: meta export/import, nightly backups, the migrated port.
 //!
-//! The user unit is `packaging/systemd/cinelog.service`.
+//! Unless `--no-http`, `serve` also runs the web server ([`cinelog_web::spawn`], M3) for the
+//! daemon's lifetime. The user unit is `packaging/systemd/cinelog.service`.
 
 pub mod backup;
 pub mod compress;
@@ -65,13 +66,10 @@ pub fn run(args: &ServeArgs) -> ExitCode {
         ctx.scope(),
         std::process::id()
     );
-    if !args.no_http {
-        tracing::info!("this build has no web server yet: running the indexer only");
-    }
     if let Some(e) = &ctx.config_error {
         tracing::warn!("{e}; using the defaults");
     }
-    match serve(&ctx) {
+    match serve(&ctx, !args.no_http) {
         Ok(()) => ExitCode::from(code::OK),
         Err(e) => {
             tracing::error!("{e:#}");
@@ -96,7 +94,7 @@ fn check_scope(ctx: &Ctx, arg: Option<ScopeArg>) -> Result<(), String> {
     }
 }
 
-fn serve(ctx: &Ctx) -> anyhow::Result<()> {
+fn serve(ctx: &Ctx, http: bool) -> anyhow::Result<()> {
     let db = prepare_db_dir(ctx)?;
     if let Some(p) =
         cinelog_core::location::db_location_problem(&ctx.paths.logs_root).filter(|_| ctx.paths.logs_root.exists())
@@ -121,6 +119,17 @@ fn serve(ctx: &Ctx) -> anyhow::Result<()> {
         return Ok(());
     };
     let meta = db::open_meta(&db)?;
+    // The indexer keeps running when the web server cannot start (TLS, ports), so search
+    // from the shell keeps working; the error is in the log.
+    let web = http
+        .then(|| match cinelog_web::spawn(ctx.web_context()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::error!("web server: {e}; running the indexer only");
+                None
+            }
+        })
+        .flatten();
     let cfg = DaemonConfig::new(
         ctx.scope(),
         ctx.paths.logs_root.clone(),
@@ -131,7 +140,11 @@ fn serve(ctx: &Ctx) -> anyhow::Result<()> {
     );
     tracing::info!("indexing {} into {}", cfg.logs_root.display(), cfg.db.dir.display());
     let daemon = Daemon::new(writer, meta, sources(ctx), Box::new(SystemProbe), cfg);
-    daemon.run(&signals)?;
+    let result = daemon.run(&signals);
+    if let Some(web) = web {
+        web.shutdown();
+    }
+    result?;
     drop(serve_lock);
     Ok(())
 }

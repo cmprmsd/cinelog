@@ -83,7 +83,7 @@ _arguments "${_arguments_options[@]}" : \
 (serve)
 _arguments "${_arguments_options[@]}" : \
 '--scope=[Scope to serve; TEAM needs EUID 0 (default\: the scope of the current EUID)]:SCOPE:(personal team)' \
-'--no-http[Indexer only\: no HTTP listener (the only mode before the web server lands)]' \
+'--no-http[Indexer only\: no HTTPS listener]' \
 '--ensure[Return at once if a server holds serve.lock; otherwise start one (systemd user unit if installed, else a detached process) and return]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -106,6 +106,7 @@ _arguments "${_arguments_options[@]}" : \
 '--case-sensitive[Case-sensitive match (default\: Unicode case-insensitive)]' \
 '--json[Print JSON lines instead of running fzf]' \
 '(--json)--print[Print the plain list instead of running fzf]' \
+'--team[Search the team server'\''s history over HTTPS with your team token (\`token team-login\`)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '*::term -- Search term (words are joined with single spaces); empty lists the newest commands:_default' \
@@ -221,6 +222,148 @@ esac
     ;;
 esac
 ;;
+(token)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_cinelog__subcmd__token_commands" \
+"*::: :->token" \
+&& ret=0
+
+    case $state in
+    (token)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-token-command-$line[1]:"
+        case $line[1] in
+            (new)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'::name:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(team-login)
+_arguments "${_arguments_options[@]}" : \
+'--url=[Team server URL (default\: https\://<this host>\:10000)]:URL:_default' \
+'--fingerprint=[Expected certificate fingerprint (as \`cinelog tls show\` prints it on the server); without it the first fingerprint seen is trusted and printed]:SHA256:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__token__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-token-help-command-$line[1]:"
+        case $line[1] in
+            (new)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(team-login)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(tls)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_cinelog__subcmd__tls_commands" \
+"*::: :->tls" \
+&& ret=0
+
+    case $state in
+    (tls)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-tls-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(regen)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__tls__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-tls-help-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(regen)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -320,6 +463,62 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(token)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__help__subcmd__token_commands" \
+"*::: :->token" \
+&& ret=0
+
+    case $state in
+    (token)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-help-token-command-$line[1]:"
+        case $line[1] in
+            (new)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(revoke)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(team-login)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(tls)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__help__subcmd__tls_commands" \
+"*::: :->tls" \
+&& ret=0
+
+    case $state in
+    (tls)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-help-tls-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(regen)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -355,6 +554,8 @@ _cinelog_commands() {
 'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
 'import:Legacy import report (aggregate numbers only)' \
 'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
+'token:Manage web login tokens (TEAM\: one named token per member)' \
+'tls:Show or regenerate the web server'\''s TLS certificate' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -398,6 +599,8 @@ _cinelog__subcmd__help_commands() {
 'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
 'import:Legacy import report (aggregate numbers only)' \
 'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
+'token:Manage web login tokens (TEAM\: one named token per member)' \
+'tls:Show or regenerate the web server'\''s TLS certificate' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -501,6 +704,54 @@ _cinelog__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help status commands' commands "$@"
 }
+(( $+functions[_cinelog__subcmd__help__subcmd__tls_commands] )) ||
+_cinelog__subcmd__help__subcmd__tls_commands() {
+    local commands; commands=(
+'show:Print the certificate'\''s fingerprint, names and expiry' \
+'regen:Replace the self-signed certificate (restart the server afterwards)' \
+    )
+    _describe -t commands 'cinelog help tls commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__tls__subcmd__regen_commands] )) ||
+_cinelog__subcmd__help__subcmd__tls__subcmd__regen_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help tls regen commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__tls__subcmd__show_commands] )) ||
+_cinelog__subcmd__help__subcmd__tls__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help tls show commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__token_commands] )) ||
+_cinelog__subcmd__help__subcmd__token_commands() {
+    local commands; commands=(
+'new:Create a token and print it once. TEAM\: NAME is the member (required); PERSONAL\: replaces your token (NAME defaults to your user name) and ends its web sessions' \
+'list:List token names and creation times (never the tokens)' \
+'revoke:Delete a token and end all web sessions it opened' \
+'team-login:Store your team token for \`search --team\` (read from the terminal, or stdin when it is not a terminal) and pin the team server'\''s certificate fingerprint' \
+    )
+    _describe -t commands 'cinelog help token commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__token__subcmd__list_commands] )) ||
+_cinelog__subcmd__help__subcmd__token__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help token list commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__token__subcmd__new_commands] )) ||
+_cinelog__subcmd__help__subcmd__token__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help token new commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__token__subcmd__revoke_commands] )) ||
+_cinelog__subcmd__help__subcmd__token__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help token revoke commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__token__subcmd__team-login_commands] )) ||
+_cinelog__subcmd__help__subcmd__token__subcmd__team-login_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help token team-login commands' commands "$@"
+}
 (( $+functions[_cinelog__subcmd__import_commands] )) ||
 _cinelog__subcmd__import_commands() {
     local commands; commands=()
@@ -598,6 +849,116 @@ _cinelog__subcmd__show_commands() {
 _cinelog__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog status commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls_commands] )) ||
+_cinelog__subcmd__tls_commands() {
+    local commands; commands=(
+'show:Print the certificate'\''s fingerprint, names and expiry' \
+'regen:Replace the self-signed certificate (restart the server afterwards)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog tls commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__help_commands] )) ||
+_cinelog__subcmd__tls__subcmd__help_commands() {
+    local commands; commands=(
+'show:Print the certificate'\''s fingerprint, names and expiry' \
+'regen:Replace the self-signed certificate (restart the server afterwards)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog tls help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__help__subcmd__help_commands] )) ||
+_cinelog__subcmd__tls__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog tls help help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__help__subcmd__regen_commands] )) ||
+_cinelog__subcmd__tls__subcmd__help__subcmd__regen_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog tls help regen commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__help__subcmd__show_commands] )) ||
+_cinelog__subcmd__tls__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog tls help show commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__regen_commands] )) ||
+_cinelog__subcmd__tls__subcmd__regen_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog tls regen commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__tls__subcmd__show_commands] )) ||
+_cinelog__subcmd__tls__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog tls show commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token_commands] )) ||
+_cinelog__subcmd__token_commands() {
+    local commands; commands=(
+'new:Create a token and print it once. TEAM\: NAME is the member (required); PERSONAL\: replaces your token (NAME defaults to your user name) and ends its web sessions' \
+'list:List token names and creation times (never the tokens)' \
+'revoke:Delete a token and end all web sessions it opened' \
+'team-login:Store your team token for \`search --team\` (read from the terminal, or stdin when it is not a terminal) and pin the team server'\''s certificate fingerprint' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog token commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help_commands] )) ||
+_cinelog__subcmd__token__subcmd__help_commands() {
+    local commands; commands=(
+'new:Create a token and print it once. TEAM\: NAME is the member (required); PERSONAL\: replaces your token (NAME defaults to your user name) and ends its web sessions' \
+'list:List token names and creation times (never the tokens)' \
+'revoke:Delete a token and end all web sessions it opened' \
+'team-login:Store your team token for \`search --team\` (read from the terminal, or stdin when it is not a terminal) and pin the team server'\''s certificate fingerprint' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog token help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help__subcmd__help_commands] )) ||
+_cinelog__subcmd__token__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token help help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help__subcmd__list_commands] )) ||
+_cinelog__subcmd__token__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token help list commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help__subcmd__new_commands] )) ||
+_cinelog__subcmd__token__subcmd__help__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token help new commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help__subcmd__revoke_commands] )) ||
+_cinelog__subcmd__token__subcmd__help__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token help revoke commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__help__subcmd__team-login_commands] )) ||
+_cinelog__subcmd__token__subcmd__help__subcmd__team-login_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token help team-login commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__list_commands] )) ||
+_cinelog__subcmd__token__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token list commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__new_commands] )) ||
+_cinelog__subcmd__token__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token new commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__revoke_commands] )) ||
+_cinelog__subcmd__token__subcmd__revoke_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token revoke commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__token__subcmd__team-login_commands] )) ||
+_cinelog__subcmd__token__subcmd__team-login_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog token team-login commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_cinelog" ]; then
