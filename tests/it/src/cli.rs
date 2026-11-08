@@ -226,8 +226,8 @@ impl Serve {
         let bin = sb.bin.as_ref().context("this sandbox has no cinelog binary")?;
         let log = sb.work.join(format!("{name}.log"));
         let out = fs::File::create(&log)?;
-        let child = Command::new(bin)
-            .env_clear()
+        let mut cmd = Command::new(bin);
+        cmd.env_clear()
             .envs(sb.env())
             .current_dir(&sb.work)
             .arg("serve")
@@ -235,9 +235,18 @@ impl Serve {
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
-            .process_group(0)
-            .spawn()
-            .context("spawning cinelog serve")?;
+            .process_group(0);
+        // A test running in parallel may fork while a freshly written stand-in is still open
+        // for writing; that child holds the write fd until it execs, so retry ETXTBSY briefly.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let child = loop {
+            match cmd.spawn() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => break other.context("spawning cinelog serve")?,
+            }
+        };
         Ok(Self { child, log })
     }
 
