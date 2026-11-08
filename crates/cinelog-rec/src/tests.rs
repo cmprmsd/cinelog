@@ -73,7 +73,9 @@ impl Detector for FakeDetector {
 
 /// Shell functions available to every test script.
 const PRELUDE: &str = r#"
-read -r N <&"$CINELOG_NONCE_FD"
+# /dev/fd, not <&"$fd": dash only takes single-digit fds in redirections
+# ("Bad fd number"), and a parallel test run often hands out fd 10 and up.
+read -r N < "/dev/fd/$CINELOG_NONCE_FD"
 # The real plugin closes the nonce fd (zsh's exec {fd}<&-); this fake stays
 # POSIX-portable instead: dash rejects exec <&- for fd numbers it has not
 # allocated itself ("Bad fd number"), and the recorder never waits on the
@@ -155,7 +157,11 @@ fn start(script: &str, opts: Opts) -> Running {
     ];
     let full = format!("{PRELUDE}{script}");
     let child = ChildSpec::new(
-        "/bin/sh".as_ref(),
+        // CINELOG_TEST_SH runs the scripts under another sh, e.g. dash as on Ubuntu CI.
+        std::env::var_os("CINELOG_TEST_SH")
+            .as_deref()
+            .unwrap_or("/bin/sh".as_ref())
+            .as_ref(),
         &["-c".into(), full.into()],
         pty::child_env(std::env::vars_os(), &extra),
     )
