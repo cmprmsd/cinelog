@@ -4,10 +4,10 @@
   import { fmtClock } from '../format';
   import type { Band, NestedPoint } from '../markers';
   import { router } from '../router.svelte';
-  import type { AnnotationSpan, TimeRange } from '../spans';
+  import { rangeOf, type AnnotationSpan, type TimeRange } from '../spans';
 
-  // M4: `selection` (a drag on the rail selects a span; M4-C implements the gesture) and
-  // `annotations` (spans from the annotations panel) are drawn as bands.
+  // A click seeks; a drag selects a span (`selection`, for annotations and exports) and
+  // `Esc` in the session view clears it. Annotation spans are drawn as bands.
   interface Props {
     duration: number;
     commands: Command[];
@@ -33,10 +33,57 @@
 
   let rail: HTMLDivElement | undefined = $state();
 
-  function click(e: MouseEvent): void {
-    if (!rail || !(duration > 0)) return;
+  /** Pointer travel (px) before a press becomes a drag instead of a click. */
+  const DRAG_PX = 4;
+
+  let press: { id: number; x: number; t: number; dragging: boolean } | null = null;
+  /** The click that ends a drag must not seek. */
+  let swallowClick = false;
+
+  function timeAt(clientX: number): number {
+    if (!rail || !(duration > 0)) return 0;
     const r = rail.getBoundingClientRect();
-    onseek(Math.max(0, Math.min(duration, ((e.clientX - r.left) / r.width) * duration)));
+    return Math.max(0, Math.min(duration, ((clientX - r.left) / r.width) * duration));
+  }
+
+  function click(e: MouseEvent): void {
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
+    if (!rail || !(duration > 0)) return;
+    onseek(timeAt(e.clientX));
+  }
+
+  function pointerdown(e: PointerEvent): void {
+    if (e.button !== 0 || !(duration > 0)) return;
+    swallowClick = false;
+    press = { id: e.pointerId, x: e.clientX, t: timeAt(e.clientX), dragging: false };
+  }
+
+  function pointermove(e: PointerEvent): void {
+    if (!press || e.pointerId !== press.id) return;
+    if (!press.dragging) {
+      if (Math.abs(e.clientX - press.x) < DRAG_PX) return;
+      press.dragging = true;
+      rail?.setPointerCapture?.(e.pointerId);
+    }
+    selection = rangeOf(press.t, timeAt(e.clientX), duration);
+  }
+
+  function pointerup(e: PointerEvent): void {
+    if (!press || e.pointerId !== press.id) return;
+    if (press.dragging) {
+      swallowClick = true;
+      const s = rangeOf(press.t, timeAt(e.clientX), duration);
+      selection = s.to > s.from ? s : null;
+      if (rail?.hasPointerCapture?.(e.pointerId)) rail.releasePointerCapture(e.pointerId);
+    }
+    press = null;
+  }
+
+  function pointercancel(): void {
+    press = null;
   }
 
   function key(e: KeyboardEvent): void {
@@ -66,6 +113,11 @@
     aria-valuetext={`${fmtClock(currentTime)} of ${fmtClock(duration)}`}
     onclick={click}
     onkeydown={key}
+    onpointerdown={pointerdown}
+    onpointermove={pointermove}
+    onpointerup={pointerup}
+    onpointercancel={pointercancel}
+    title="Click to seek, drag to select a span"
     data-testid="rail"
   >
     {#each bands as b, i (i)}
@@ -78,6 +130,8 @@
         style:width={`${Math.max(0.4, pct(a.to, duration) - pct(a.from, duration))}%`}
         style:background={a.color}
         title={a.label}
+        data-testid="rail-annotation"
+        data-uuid={a.uuid}
       ></span>
     {/each}
     {#if selection}
@@ -86,6 +140,9 @@
         style:left={`${pct(selection.from, duration)}%`}
         style:width={`${Math.max(0.4, pct(selection.to, duration) - pct(selection.from, duration))}%`}
         data-testid="rail-selection"
+        data-from={selection.from}
+        data-to={selection.to}
+        title={`Selection ${fmtClock(selection.from)}–${fmtClock(selection.to)} (Esc clears)`}
       ></span>
     {/if}
     {#each commands as c (c.seq)}
@@ -131,6 +188,9 @@
     border: 1px solid var(--border);
     cursor: pointer;
     overflow: hidden;
+    /* Horizontal drags select; vertical swipes still scroll the page. */
+    touch-action: pan-y;
+    user-select: none;
   }
   .rail > span {
     position: absolute;

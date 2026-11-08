@@ -42,7 +42,7 @@ import type {
 import { buildFixtures, FIX, OUTPUT_DELAY, sessionEvents, toCommand, type CastEvent, type FixSession } from './fixtures.ts';
 import { handle as annotationsMock } from './m4/annotations.ts';
 import type { MockContext, MockHandler } from './m4/context.ts';
-import { handle as liveMock } from './m4/live.ts';
+import { handle as liveMock, recorderOf } from './m4/live.ts';
 import { handle as timelineMock } from './m4/timeline.ts';
 
 /** M4 handlers, each owned by its work package (docs/API.md §9.7). */
@@ -167,7 +167,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       server_started_at: startedAt,
       live: visible()
         .filter((f) => f.session.state === 'live')
-        .map((f) => ({ session: f.session, status: 'recording', reason: null, detail: null, since: null })),
+        .map((f) => recorderOf(f.session.uuid) ?? { session: f.session, status: 'recording', reason: null, detail: null, since: null }),
     };
     res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
     busClients.add(res);
@@ -523,7 +523,9 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
     const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(method);
     if (mutating) {
       if (req.headers.origin !== `https://${authority}`) throw new HttpError(403, 'forbidden', 'origin mismatch');
-      if (!String(req.headers['content-type'] ?? '').startsWith('application/json'))
+      // Like the real server (hosts.rs `origin_problem`), only a request with a body must be JSON.
+      const hasBody = Number(req.headers['content-length'] ?? 0) > 0 || req.headers['transfer-encoding'] !== undefined;
+      if (hasBody && !String(req.headers['content-type'] ?? '').startsWith('application/json'))
         throw new HttpError(415, 'unsupported_media_type', 'expected application/json');
     }
 
@@ -655,6 +657,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
     readJson,
     json,
     publish,
+    maskFor,
     startedAt,
   };
 

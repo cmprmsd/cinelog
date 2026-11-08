@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Bus, BUS_EVENT_NAMES, parseBusEvent, type EventSourceLike } from './events.svelte';
-import type { BusEvent } from './types';
+import { Bus, BUS_EVENT_NAMES, nextLive, parseBusEvent, type EventSourceLike } from './events.svelte';
+import type { BusEvent, LiveSession, Session } from './types';
 
 class FakeSource implements EventSourceLike {
   readyState = 0;
@@ -112,5 +112,41 @@ describe('bus', () => {
     sources[0]!.fire('hello', hello);
     expect(got).toEqual(['hello']);
     err.mockRestore();
+  });
+
+  it('keeps the live sessions from hello and the events after it', () => {
+    const live = (uuid: string, started_at: number, status: LiveSession['status'] = 'recording'): LiveSession => ({
+      session: { uuid, started_at } as Session,
+      status,
+      reason: null,
+      detail: null,
+      since: null,
+    });
+    bus.subscribe(() => {});
+    expect(bus.live).toEqual([]);
+    sources[0]!.fire('hello', JSON.stringify({ version: 'v', server_started_at: 1, live: [live('a', 1), live('b', 2)] }));
+    expect(bus.live.map((l) => l.session.uuid)).toEqual(['b', 'a']);
+    sources[0]!.fire('session-start', JSON.stringify(live('c', 3)));
+    sources[0]!.fire('session-update', JSON.stringify(live('a', 1, 'paused')));
+    expect(bus.live.map((l) => [l.session.uuid, l.status])).toEqual([
+      ['c', 'recording'],
+      ['b', 'recording'],
+      ['a', 'paused'],
+    ]);
+    sources[0]!.fire('session-end', JSON.stringify({ session: 'b', state: 'ended', ended_at: 5 }));
+    sources[0]!.fire('forgotten', JSON.stringify({ target: { kind: 'session', uuid: 'c' }, by: 'x', at: 6 }));
+    sources[0]!.fire('forgotten', JSON.stringify({ target: { kind: 'command', uuid: 'a', seq: 1 }, by: 'x', at: 6 }));
+    expect(bus.live.map((l) => l.session.uuid)).toEqual(['a']);
+    expect(nextLive(bus.live, { type: 'tag', data: { name: 't', color: null, count: 1 } })).toBeNull();
+    sources[0]!.fire('hello', JSON.stringify({ version: 'v', server_started_at: 1, live: [] }));
+    expect(bus.live).toEqual([]);
+  });
+
+  it('forgets the live sessions when it stops', () => {
+    const off = bus.subscribe(() => {});
+    sources[0]!.fire('hello', JSON.stringify({ version: 'v', server_started_at: 1, live: [{ session: { uuid: 'a', started_at: 1 }, status: 'recording', reason: null, detail: null, since: null }] }));
+    expect(bus.live).toHaveLength(1);
+    off();
+    expect(bus.live).toEqual([]);
   });
 });

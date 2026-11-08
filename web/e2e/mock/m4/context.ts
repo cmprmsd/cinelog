@@ -18,6 +18,8 @@ export interface MockContext {
   /** The JSON body of a mutating request (`undefined` when empty; 400 on bad JSON). */
   readJson(req: IncomingMessage): Promise<unknown>;
   json(res: ServerResponse, status: number, body: unknown): void;
+  /** The forget mask of a session: the `by` of a forgotten command seq, else null. */
+  maskFor(f: FixSession): (seq: number) => string | null;
   /** Sends a UI bus event to every open `/api/events` stream. */
   publish(event: BusEvent): void;
   /** ts the mock started; fixture times are relative to it. */

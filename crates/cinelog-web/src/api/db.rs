@@ -552,6 +552,11 @@ impl Forgets {
             .any(|f| matches!(f.target, im::ForgetTarget::Session { .. }))
     }
 
+    /// Sessions with anything forgotten (the session, a command or a range).
+    pub fn touched(&self) -> impl Iterator<Item = &str> + '_ {
+        self.by_uuid.keys().map(String::as_str)
+    }
+
     /// Every forgotten session.
     pub fn sessions(&self) -> Vec<String> {
         let mut v: Vec<String> = self.by_uuid.keys().filter(|u| self.session(u)).cloned().collect();

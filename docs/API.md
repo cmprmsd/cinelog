@@ -399,34 +399,50 @@ expired session signs out; while `status !== 'open'` callers fall back to pollin
 
 ### 9.3 Timeline: `GET /api/timeline`
 `TimelineParams {from, to, group, user, host, hidden}` → `Timeline`. Plan §8.3, §15.2.
-- **Window:** ts, default the last 24 h; `from < to`, at most 31 days (else 400). Sessions
-  active in the window (started before `to`, not ended before `from`); hidden sessions only
-  with `hidden=true`; forgotten sessions never.
+- **Window:** ts, default the last 24 h; only `from` gives `[from, from + 24 h]`, only `to`
+  gives `[to - 24 h, to]`; `from < to`, at most 31 days (else 400). Sessions active in the
+  window (started before `to`, not ended before `from`); hidden sessions only with
+  `hidden=true`; forgotten sessions never. A session counts as active until `ended_at`, else
+  (a non-live session never closed, e.g. `degraded`) until its indexed end (`started_at +
+  duration`, mapped through its `clock` markers), else (live) until now.
+- **Drawn end:** `TimelineSession.ended_at` is the end the client draws to: for a non-live
+  session without `ended_at` the server sends the indexed end above, so open commands
+  (`ts_end: null`) and open pause/forgotten spans end where the server's idle breaks assume.
+  Live sessions keep `null` (draw to now).
 - **Grouping:** the *person* of a session is `sudo_user`, else `claimed_user`, else `user`
   (TEAM root shells belong to the member). `group=user` (default): one lane per person
   (`key` `user:<name>`, by label), one row per pane (`pane:<host>/<tmux server>/<pane>`,
   label `<tmux session>:<window>.<pane>`) or non-tmux shell (`tty:<host>/<tty>`, else
   `session:<uuid>`; label `<holder_comm> <tty>`), rows by first activity. `group=pane`: one
   lane per pane or shell (key as the row key above), one row per person in it
-  (`<lane key>|user:<name>`). Nested sessions (`parent_uuid` in the response) are drawn in
+  (`<lane key>|user:<name>`). With `group=user`, a pane or tty key used by more than one
+  person in the response becomes `<key>|user:<name>` for each of them (keeps
+  `TimelineRow.key` unique, e.g. a reused `/dev/pts/N`). Nested sessions (`parent_uuid` in the response) are drawn in
   their parent's row; `TimelineRow.sessions` lists every session of the row.
 - **Blocks:** one `TimelineBlock` per command overlapping the window, by `ts_start`;
   `typed` is the first line cut to 200 characters; `ts_end: null` means running (draw to
   now) or never closed (draw to the session end). Forgotten commands are left out.
   Colours (client): exit 0 green, non-zero red, unknown grey, `approx` hatched.
 - **Marks** (always sent, also when aggregated): `pause` spans from `pause`/`resume`
-  markers (`reason`, `detail` from the marker; `ts_end: null` while still paused), `skip`
-  points (leading-space commands), `nested` points (`child` = the nested session), `gap`
-  spans (dropped output) and `forgotten` spans (`SessionDetail.masked`; `detail` = who).
-  Every pause or skip is visible (plan §15.2).
-- **Idle:** spans of at least 600 s inside the window without any block in any row
-  (`idle`), drawn collapsed as a break mark.
+  markers (`reason`, `detail` from the marker; without a `resume`, `ts_end` is `null` while
+  live, else the session end), `skip` points (leading-space commands), `nested` points
+  (`reason` = mode, `detail` = user, `child` = the nested session, `null` when that one is
+  forgotten), `gap` spans (dropped output; `ts..ts_end` is `marker.t - (to_t - from_t)` ..
+  `marker.t`, from the part offsets) and `forgotten` spans (`SessionDetail.masked`;
+  `detail` = who). Every pause or skip is visible (plan §15.2).
+- **Idle:** spans of at least 600 s inside the window in which no block and no mark is drawn
+  in any row (`idle`), drawn collapsed as a break mark. Pause, gap and forgotten spans count
+  as busy (an open one until the session end, or now while live); skip and nested points
+  count with 60 s on either side, so a pause or skip never ends up inside a break.
 - **Aggregation:** more than 20 000 commands in the window: `aggregated = true`, every row's
   `blocks` is empty and `density` holds the non-empty bins; `bin_secs` is the smallest of 60,
   300, 900, 1800, 3600, 10800, 21600, 86400 that gives at most 2000 bins over the window.
   `commands` is the total before aggregation.
-- **Annotations:** the non-deleted annotations of the window's sessions
-  (`MetaStore::find_annotations` with `sessions`), as `TimelineAnnotation` in wall time: a
+- **Annotations:** every non-deleted annotation of the drawn sessions
+  (`MetaStore::find_annotations` with `sessions`; not clipped to the window; a command
+  annotation whose command lies outside the window is resolved from index.db, one on a
+  forgotten or unknown command is left out; `user=` filters by the row's person, i.e. the
+  root session of a nested chain), as `TimelineAnnotation` in wall time: a
   command annotation spans its command (`ts_start`…`ts_end`, or `ts_start` when open), a
   span annotation `t_from`…`t_to` mapped to wall time like output chunks (`started_at + t`,
   corrected by `clock` markers); `row` is the session's row key, `color` the first tag
@@ -464,7 +480,8 @@ Stored in meta.db (authoritative, keyed by session uuid and command seq, so they
   `AnnotationChange::apply` (the result still needs a body or a tag). 200 with the result.
 - `DELETE /api/annotations/{uuid}`: author only (403), soft delete (`deleted_at` and
   `updated_at` = now), 204; 404 when unknown or already deleted.
-- `GET /api/tags` → `TagList` (by name, `count` = non-deleted annotations).
+- `GET /api/tags` → `TagList` (by name, `count` = non-deleted annotations that are not gone with a
+  forgotten session or command).
   `POST /api/tags` (`TagRequest`, `TagRequest::validate`) creates the tag or sets its colour;
   any principal; 200 with the `Tag`.
 - **Sync:** every successful create, change or delete publishes `annotation` (`op`

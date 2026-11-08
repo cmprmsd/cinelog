@@ -4,7 +4,7 @@
 // (re)connection and is a full resync of the live sessions.
 
 import { api } from './client';
-import type { BusEvent } from './types';
+import type { BusEvent, LiveSession } from './types';
 
 /** Every bus event name (must match `BusEvent::NAMES` in api/types.rs). */
 export const BUS_EVENT_NAMES = [
@@ -54,8 +54,34 @@ export function parseBusEvent(type: string, data: string): BusEvent | null {
   }
 }
 
+/**
+ * The live sessions after `event`: `hello` replaces them, `session-start`/`session-update`
+ * upsert one (newest `started_at` first), `session-end` and a forgotten session remove one.
+ */
+export function nextLive(live: readonly LiveSession[], event: BusEvent): LiveSession[] | null {
+  switch (event.type) {
+    case 'hello':
+      return [...event.data.live].sort((a, b) => b.session.started_at - a.session.started_at);
+    case 'session-start':
+    case 'session-update': {
+      const uuid = event.data.session.uuid;
+      return [...live.filter((l) => l.session.uuid !== uuid), event.data].sort((a, b) => b.session.started_at - a.session.started_at);
+    }
+    case 'session-end':
+      return live.filter((l) => l.session.uuid !== event.data.session);
+    case 'forgotten': {
+      const t = event.data.target;
+      return t.kind === 'session' ? live.filter((l) => l.session.uuid !== t.uuid) : null;
+    }
+    default:
+      return null;
+  }
+}
+
 export class Bus {
   status = $state<BusStatus>('idle');
+  /** The live sessions as of the last `hello` and the events since; empty while idle. */
+  live = $state<LiveSession[]>([]);
 
   private readonly open: () => EventSourceLike;
   private readonly onClosed: () => void;
@@ -114,6 +140,8 @@ export class Bus {
           this.status = 'open';
           this.retryMs = RETRY_MIN_MS;
         }
+        const live = nextLive(this.live, event);
+        if (live) this.live = live;
         this.emit(event);
       });
     }
@@ -143,6 +171,7 @@ export class Bus {
     this.source = null;
     this.retryMs = RETRY_MIN_MS;
     this.status = 'idle';
+    this.live = [];
   }
 }
 

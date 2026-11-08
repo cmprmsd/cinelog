@@ -19,6 +19,48 @@ export interface RealServer {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Registers FIX.live in the personal registry (crates/cinelog-core/src/registry.rs) with a
+ * `sleep` child standing in for its recorder: pid, starttime and boot id must name a running
+ * process, or the server treats the session as crashed. The caller kills the child.
+ */
+function registerLive(runtimeDir: string, uuid: string, cast: string): ChildProcess {
+  const holder = spawn('sleep', ['infinity'], { stdio: 'ignore' });
+  try {
+    writeRegistryEntry(runtimeDir, uuid, cast, holder);
+  } catch (e) {
+    holder.kill('SIGKILL');
+    throw e;
+  }
+  return holder;
+}
+
+function writeRegistryEntry(runtimeDir: string, uuid: string, cast: string, holder: ChildProcess): void {
+  const pid = holder.pid;
+  if (pid === undefined) throw new Error('could not start the stand-in recorder');
+  // Field 22 of /proc/<pid>/stat; the fields after the `(comm)` start at field 3.
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const starttime = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
+  const entry = {
+    format: 1,
+    pid,
+    starttime,
+    boot_id: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+    uuid,
+    nonce: '0'.repeat(31) + '1',
+    scope: 'personal',
+    cast,
+    pts: '/dev/pts/990',
+    host_tty: '',
+    shell_pid: 0,
+    state: 'live',
+    part: 1,
+    version: '0.13.0',
+  };
+  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(runtimeDir, 'pts-990.json'), JSON.stringify(entry), { mode: 0o600 });
+}
+
 export async function startReal(binary: string): Promise<RealServer> {
   const bin = resolve(binary);
   if (!existsSync(bin)) throw new Error(`CINELOG_E2E_BIN: ${bin} does not exist`);
@@ -49,6 +91,7 @@ export async function startReal(binary: string): Promise<RealServer> {
   if (!legacyHit) throw new Error('the legacy fixture was not imported');
   const legacy = String(JSON.parse(legacyHit).entry).split(':')[0]!;
 
+  const recorder = registerLive(join(run, 'cinelog'), FIX.live, live.livePath);
   const logFd = openSync(join(dir, 'serve.log'), 'a');
   const serve: ChildProcess = spawn(bin, ['serve', '--scope', 'personal'], { env, stdio: ['ignore', logFd, logFd] });
   const info = join(run, 'cinelog/server.json');
@@ -67,6 +110,7 @@ export async function startReal(binary: string): Promise<RealServer> {
   const keepAlive = setInterval(() => touchLive(live, Date.now() / 1000), 5000);
   const close = async () => {
     clearInterval(keepAlive);
+    recorder.kill('SIGKILL');
     if (serve.exitCode === null) {
       const exited = new Promise((r) => serve.once('exit', r));
       serve.kill('SIGTERM');

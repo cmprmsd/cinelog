@@ -11,7 +11,8 @@
 - **Real server:** `CINELOG_E2E_BIN=../target/debug/cinelog pnpm e2e` (or `pnpm e2e:real`) runs
   the specs against a real `cinelog serve`: `real/server.ts` writes the `FIX` sessions as casts
   (`real/casts.ts`: v3 casts with the recorder's markers, a 50 MB segmented session, a live
-  session it keeps growing, an old-plugin cast with banners and `.commands.log`) into a
+  session it keeps growing and registers with a `sleep` child as its recorder, an old-plugin
+  cast with banners and `.commands.log`) into a
   throwaway HOME below `$CINELOG_E2E_TMP` (default the system temp dir), runs `index --once`,
   creates a token and starts `serve` on an ephemeral loopback port (TZ=UTC). Ids the server
   derives itself (the legacy uuid) reach the specs as `CINELOG_E2E_FIX`. `CINELOG_E2E_KEEP=1`
@@ -22,7 +23,9 @@
 
 Some specs reshape responses with `page.route` instead of adding fixtures: cursor pages of a
 session's hits (`n`/`N`), a failing next result page, and `PlayInfo.ready=false` build progress.
-They run unchanged against a real server. The forget spec changes server state, so run it once
+They run unchanged against a real server. The live specs that grow, pause, crash or end the
+recorder through the mock's control endpoint skip there; the real recorder path is covered by
+the Rust integration test `tests/it/tests/i23_live_web.rs`. The forget spec changes server state, so run it once
 per fresh fixture set (a CI retry of that spec fails).
 
 `auth.setup.ts` signs in once and stores the cookie in `e2e/.auth/` (git-ignored) for the

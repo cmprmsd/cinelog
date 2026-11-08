@@ -902,8 +902,10 @@ pub struct Timeline {
     pub group: TimelineGroup,
     /// By label.
     pub lanes: Vec<TimelineLane>,
-    /// Spans of at least 10 min inside `[from, to]` in which no command ran in any row
-    /// (drawn collapsed, as a break mark). Ascending.
+    /// Spans of at least 10 min inside `[from, to]` in which no block and no mark is drawn
+    /// in any row (drawn collapsed, as a break mark). Pause, gap and forgotten spans count as
+    /// busy (an open one until the session end, or now while live); skip and nested points
+    /// count with 60 s on either side. Ascending.
     pub idle: Vec<TimeSpan>,
     /// Annotations of the sessions in the window, by `ts_from`.
     pub annotations: Vec<TimelineAnnotation>,
@@ -955,6 +957,9 @@ pub struct TimelineSession {
     pub user: String,
     pub state: SessionState,
     pub started_at: Seconds,
+    /// The drawn end. A non-live session that never closed gets its indexed end
+    /// (`started_at + duration`, mapped through its `clock` markers), so open commands and
+    /// open spans end where the server's idle breaks assume. `null` while live (draw to now).
     pub ended_at: Option<Seconds>,
     pub parent_uuid: Option<String>,
     pub legacy: bool,

@@ -85,6 +85,7 @@ export const SHORTCUTS: readonly { keys: string[]; what: string }[] = [
   { keys: [',', '.'], what: 'Back / forward 5 s' },
   { keys: ['e'], what: 'Export the current command' },
   { keys: ['t'], what: 'Team timeline' },
+  { keys: ['+', '-'], what: 'Zoom the timeline' },
   { keys: ['l'], what: 'Switch between the recording and the live view' },
   { keys: ['a'], what: 'Annotate the current command or selection' },
   { keys: ['?'], what: 'This sheet' },

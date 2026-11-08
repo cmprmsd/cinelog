@@ -2,6 +2,7 @@
 //! forgotten in it (as a [`Mask`]), its chapter labels and its indexed playback segments.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use cinelog_cast::EventCode;
@@ -40,7 +41,15 @@ impl Loaded {
         let commands = db.commands(row.id)?;
         let segments = db.segments(row.id)?;
         drop(_snap);
-        let mask = mask_for(ctx, cache, &forgets, &row, &files, &commands)?;
+        let mask = mask_for(
+            ctx,
+            cache,
+            &forgets,
+            &row.session.uuid,
+            row.session.legacy,
+            &files,
+            &commands,
+        )?;
         let forgotten = forgets.fingerprint(uuid);
         let mut labels: Vec<(u64, String)> = Vec::new();
         let mut label_seqs = HashSet::new();
@@ -102,6 +111,8 @@ const MARKER_SCANS: usize = 16;
 struct MarkerScan {
     /// The seqs looked for, ascending.
     seqs: Vec<u64>,
+    /// The cast's first part, so a scan is never resumed in another cast's files.
+    first: PathBuf,
     /// Where the scan stopped.
     at: StartPoint,
     /// Commands seen without their `done` yet, by (shell, counter).
@@ -112,9 +123,10 @@ struct MarkerScan {
 }
 
 impl MarkerScan {
-    fn new(seqs: Vec<u64>) -> Self {
+    fn new(seqs: Vec<u64>, files: &CastFiles) -> Self {
         Self {
             seqs,
+            first: first_part(files),
             at: StartPoint::ORIGIN,
             open: HashMap::new(),
             last_done: 0,
@@ -130,10 +142,11 @@ impl MarkerScan {
 
     /// Whether the files still hold the data scanned so far.
     fn resumable(&self, files: &CastFiles) -> bool {
-        files
-            .parts
-            .get(self.at.part_idx)
-            .is_some_and(|p| p.bytes >= self.at.offset)
+        self.first == first_part(files)
+            && files
+                .parts
+                .get(self.at.part_idx)
+                .is_some_and(|p| p.bytes >= self.at.offset)
     }
 
     /// Reads the markers from where the scan stopped to the end of the files: a forgotten
@@ -170,6 +183,10 @@ impl MarkerScan {
     }
 }
 
+fn first_part(files: &CastFiles) -> PathBuf {
+    files.parts.first().map(|p| p.path.clone()).unwrap_or_default()
+}
+
 impl MarkerCache {
     /// The marker spans of `seqs` in the session's cast.
     fn spans(&self, uuid: &str, files: &CastFiles, seqs: &HashSet<u64>) -> Result<HashMap<u64, (u64, u64)>> {
@@ -177,9 +194,11 @@ impl MarkerCache {
         sorted.sort_unstable();
         let lock = || self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut scan = match lock().get(uuid) {
-            Some(prev) if prev.seqs == sorted && prev.complete() => return Ok(prev.spans.clone()),
+            Some(prev) if prev.seqs == sorted && prev.first == first_part(files) && prev.complete() => {
+                return Ok(prev.spans.clone());
+            }
             Some(prev) if prev.seqs == sorted && prev.resumable(files) => prev.clone(),
-            _ => MarkerScan::new(sorted),
+            _ => MarkerScan::new(sorted, files),
         };
         scan.scan(files)?;
         let spans = scan.spans.clone();
@@ -212,7 +231,15 @@ pub(crate) fn mask_of(
     }
     let files = CastFiles::load(db, row)?;
     let commands = db.commands(row.id)?;
-    mask_for(ctx, cache, forgets, row, &files, &commands)
+    mask_for(
+        ctx,
+        cache,
+        forgets,
+        &row.session.uuid,
+        row.session.legacy,
+        &files,
+        &commands,
+    )
 }
 
 /// The mask of a session: its forgotten ranges and the spans of its forgotten commands
@@ -221,16 +248,17 @@ pub(crate) fn mask_of(
 /// soon after the forget; afterwards the recorded span is used. A cinelog cast without one
 /// (a command forgotten with the CLI and purged before this server saw it), or with an open
 /// one, takes it from the cast's `cmd`/`done` markers, scanned once and recorded too.
-fn mask_for(
+/// `commands` may be empty: a live session without index rows is masked from meta.db and
+/// its markers alone.
+pub(crate) fn mask_for(
     ctx: &WebContext,
     cache: &MarkerCache,
     forgets: &Forgets,
-    row: &SessionRow,
+    uuid: &str,
+    legacy: bool,
     files: &CastFiles,
     commands: &[im::Command],
 ) -> Result<Mask> {
-    let uuid = &row.session.uuid;
-    let legacy = row.session.legacy;
     let mut spans: Vec<Span> = forgets
         .ranges(uuid)
         .map(|(a, b, by)| Span {

@@ -483,8 +483,10 @@ export type Timeline = { from: number, to: number, group: TimelineGroup,
  */
 lanes: Array<TimelineLane>, 
 /**
- * Spans of at least 10 min inside `[from, to]` in which no command ran in any row
- * (drawn collapsed, as a break mark). Ascending.
+ * Spans of at least 10 min inside `[from, to]` in which no block and no mark is drawn
+ * in any row (drawn collapsed, as a break mark). Pause, gap and forgotten spans count as
+ * busy (an open one until the session end, or now while live); skip and nested points
+ * count with 60 s on either side. Ascending.
  */
 idle: Array<TimeSpan>, 
 /**
@@ -546,7 +548,13 @@ marks: Array<TimelineMark>,
  */
 density: Array<DensityBin>, };
 
-export type TimelineSession = { uuid: string, user: string, state: SessionState, started_at: number, ended_at: number | null, parent_uuid: string | null, legacy: boolean, };
+export type TimelineSession = { uuid: string, user: string, state: SessionState, started_at: number, 
+/**
+ * The drawn end. A non-live session that never closed gets its indexed end
+ * (`started_at + duration`, mapped through its `clock` markers), so open commands and
+ * open spans end where the server's idle breaks assume. `null` while live (draw to now).
+ */
+ended_at: number | null, parent_uuid: string | null, legacy: boolean, };
 
 export type TimelineBlock = { session: string, seq: number, t_start: number, ts_start: number, 
 /**

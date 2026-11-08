@@ -107,7 +107,7 @@ export function buildFixtures(now: number): FixSession[] {
     markers: [
       marker(9.5, base, 'nested', { user: 'root', sudo_user: 'alice', mode: 'link', child_uuid: FIX.nested }),
       marker(13.5, base, 'pause', { reason: 'multiplexer', detail: 'tmux: client' }),
-      marker(15, base, 'resume'),
+      marker(15, base, 'resume', { reason: 'foreground' }),
     ],
     segments: null,
     duration: 20,
