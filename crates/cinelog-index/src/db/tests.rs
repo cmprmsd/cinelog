@@ -193,6 +193,48 @@ fn reader_needs_an_index() {
     assert_eq!(r.status().unwrap().schema_version, crate::schema::INDEX_SCHEMA_VERSION);
 }
 
+/// After a rollback (§10.3) the older binary reads a newer index.db and meta.db, says so in
+/// the status and writes neither.
+#[test]
+fn a_newer_schema_is_read_only_and_reported() {
+    let env = Env::new();
+    let mut w = env.writer();
+    fixture(&env, w.as_mut());
+    drop(w);
+    drop(env.meta());
+    for p in [&env.paths.index, &env.paths.meta] {
+        Connection::open(p)
+            .unwrap()
+            .pragma_update(None, "user_version", 7)
+            .unwrap();
+    }
+    assert!(matches!(
+        open_writer(&env.paths, &IndexConfig::default()),
+        Err(IndexError::NewerSchema { found: 7, .. })
+    ));
+    let r = env.reader();
+    assert_eq!(search(r.as_ref(), "needle", SearchTarget::All).hits.len(), 2);
+    let st = r.status().unwrap();
+    assert_eq!(st.schema_version, 7);
+    let note = st.last_error.unwrap();
+    assert!(
+        note.starts_with("index.db has schema version 7") && note.contains("read-only"),
+        "{note}"
+    );
+
+    let mut meta = env.meta();
+    assert!(meta.forgotten().unwrap().is_empty());
+    assert!(matches!(
+        meta.forget(&ForgetTarget::Session { uuid: U1.into() }, "alice"),
+        Err(IndexError::NewerSchema { found: 7, .. })
+    ));
+    assert!(matches!(
+        meta.set_setting("k", Some("v")),
+        Err(IndexError::NewerSchema { .. })
+    ));
+    assert_eq!(meta.setting("k").unwrap(), None);
+}
+
 #[test]
 fn command_and_output_search() {
     let env = Env::new();
@@ -933,6 +975,82 @@ fn a_grown_legacy_cast_replaces_its_earlier_session() {
     );
     let raw = env.raw();
     assert_eq!(count(&raw, "SELECT count(*) FROM sessions WHERE legacy = 1"), 2);
+    fts_integrity(&raw);
+}
+
+/// A forget on a legacy cast survives the cast growing (the old plugin still appends to it):
+/// the import under the new uuid carries the forget rows, the forgotten command's playback
+/// span and the annotations over, also when serve then hands over a list read before that.
+#[test]
+fn a_forget_on_a_legacy_cast_survives_its_growth() {
+    let env = Env::new();
+    let mut w = env.writer();
+    let mut meta = env.meta();
+    let import = |w: &mut Box<dyn IndexWriter>, uuid: &str, typed: &[&str]| {
+        let mut s = SessionMeta {
+            legacy: true,
+            state: SessionState::Ended,
+            ..session(&env, uuid)
+        };
+        s.cast_path = env.cast("old.cast");
+        let mut b = IndexBatch::new(s);
+        for (i, t) in typed.iter().enumerate() {
+            let seq = i as Seq + 1;
+            b.commands.push(command(seq, t, seq as f64 * 10.0));
+            b.chunks
+                .push(chunk(Some(seq), seq as f64 * 10.0 + 0.5, &format!("output of {t}")));
+        }
+        let mut row = legacy_row(&env, "old.cast", LegacyStatus::Imported);
+        row.session_uuid = Some(uuid.to_owned());
+        b.legacy = Some(row);
+        b.finished = true;
+        w.apply(&b).unwrap();
+    };
+    import(&mut w, U1, &["export TOKEN=hunter2_secret", "ls"]);
+    let forgotten = ForgetTarget::Command {
+        uuid: U1.into(),
+        seq: 1,
+    };
+    meta.forget(&forgotten, "alice").unwrap();
+    let span_key = |u: &str| format!("{}{u}/1", settings_keys::FORGET_SPAN_PREFIX);
+    meta.set_setting(&span_key(U1), Some("10 11")).unwrap();
+    meta.put_annotation(&annotation("a1", T0, &[])).unwrap();
+    let stale = meta.forgotten().unwrap();
+    w.apply_forgotten(&stale).unwrap();
+
+    // The cast grew: the next import has a new uuid.
+    import(&mut w, U2, &["export TOKEN=hunter2_secret", "ls", "grown_tail"]);
+    // Serve hands over the list it read before the import carried the forget over, and the
+    // session is imported again (a later poll, or `index --rebuild`).
+    w.apply_forgotten(&stale).unwrap();
+    import(&mut w, U2, &["export TOKEN=hunter2_secret", "ls", "grown_tail"]);
+
+    let r = env.reader();
+    assert!(r.session(U1).unwrap().is_none());
+    assert!(search(r.as_ref(), "hunter2_secret", SearchTarget::All).hits.is_empty());
+    assert_eq!(search(r.as_ref(), "grown_tail", SearchTarget::Commands).hits.len(), 1);
+    let raw = env.raw();
+    assert_eq!(
+        count(&raw, "SELECT count(*) FROM commands WHERE typed LIKE '%hunter2%'"),
+        0,
+        "the writer drops it on the way in, not only at query time"
+    );
+    assert_eq!(
+        count(&raw, "SELECT count(*) FROM outputs WHERE text LIKE '%hunter2%'"),
+        0
+    );
+
+    let meta = env.meta();
+    let list = meta.forgotten().unwrap();
+    let targets: Vec<&ForgetTarget> = list.iter().map(|f| &f.target).collect();
+    assert!(targets.contains(&&forgotten), "the old row stays");
+    assert!(targets.contains(&&ForgetTarget::Command {
+        uuid: U2.into(),
+        seq: 1
+    }));
+    assert_eq!(meta.setting(&span_key(U2)).unwrap().as_deref(), Some("10 11"));
+    assert!(meta.annotations(U1).unwrap().is_empty());
+    assert_eq!(meta.annotations(U2).unwrap().len(), 1);
     fts_integrity(&raw);
 }
 

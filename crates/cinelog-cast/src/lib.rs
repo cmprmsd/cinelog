@@ -32,7 +32,7 @@ pub use utf8::Utf8Accumulator;
 pub use writer::{SyncFn, V3Writer, WRITE_BUFFER, create};
 pub use zst::{
     CompressOptions, Compressed, DEFAULT_FRAME_BYTES, DEFAULT_LEVEL, FrameEncoder, ZSTD_MAGIC, ZstFrame, compress_file,
-    is_zstd_magic, scan_frames, tmp_path, verify_zst,
+    compress_from, is_zstd_magic, scan_frames, tmp_path, verify_zst,
 };
 
 use std::collections::BTreeMap;

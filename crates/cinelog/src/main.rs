@@ -42,6 +42,7 @@ fn main() -> ExitCode {
         Command::Install(args) => install::run(&args),
         Command::Serve(args) => serve::run(&args),
         Command::Compress(args) => serve::compress(&args),
+        Command::ArchiveLegacy(args) => serve::archive_legacy(&args),
         Command::Meta(args) => serve::meta(&args),
         Command::Search(args) => search::run(&args),
         Command::Show(args) => search::show(&args),

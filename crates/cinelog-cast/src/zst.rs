@@ -293,8 +293,13 @@ pub fn tmp_path(dst: &Path) -> PathBuf {
 /// error the temporary file is removed. Updating the DB and unlinking the source is the
 /// caller's job.
 pub fn compress_file(src: &Path, dst: &Path, opts: CompressOptions) -> Result<Compressed, CastError> {
+    compress_from(File::open(src)?, dst, opts)
+}
+
+/// [`compress_file`] from an already opened source (e.g. one opened with `O_NOATIME`).
+pub fn compress_from(input: impl Read, dst: &Path, opts: CompressOptions) -> Result<Compressed, CastError> {
     let tmp = tmp_path(dst);
-    let result = write_compressed(src, &tmp, opts).and_then(|c| {
+    let result = write_compressed(input, &tmp, opts).and_then(|c| {
         fs::rename(&tmp, dst)?;
         if let Some(dir) = dst.parent().filter(|d| !d.as_os_str().is_empty()) {
             File::open(dir)?.sync_all()?;
@@ -307,8 +312,7 @@ pub fn compress_file(src: &Path, dst: &Path, opts: CompressOptions) -> Result<Co
     result
 }
 
-fn write_compressed(src: &Path, tmp: &Path, opts: CompressOptions) -> Result<Compressed, CastError> {
-    let mut input = File::open(src)?;
+fn write_compressed(mut input: impl Read, tmp: &Path, opts: CompressOptions) -> Result<Compressed, CastError> {
     let out = OpenOptions::new()
         .write(true)
         .create(true)

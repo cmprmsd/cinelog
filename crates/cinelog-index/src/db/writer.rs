@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
 use nix::fcntl::{Flock, FlockArg};
@@ -60,6 +60,13 @@ pub(crate) struct SqliteWriter {
     // Declared before the lock so the connection closes before the flock is released.
     conn: Connection,
     forget: ForgetSet,
+    /// The forget list `forget` was built from.
+    forgotten: Vec<Forgotten>,
+    /// Forget rows this writer copied onto a legacy cast's new uuid (see
+    /// [`SqliteWriter::carry_legacy_identity`]); they stay in effect whatever list serve
+    /// hands over next, which may have been read before the copy.
+    carried: Vec<Forgotten>,
+    meta_path: PathBuf,
     redact: Redactor,
     _lock: Flock<File>,
 }
@@ -93,6 +100,9 @@ impl SqliteWriter {
         let w = Self {
             conn,
             forget: ForgetSet::new(&forgotten),
+            forgotten,
+            carried: Vec::new(),
+            meta_path: paths.meta.clone(),
             redact,
             _lock: lock,
         };
@@ -107,6 +117,90 @@ impl SqliteWriter {
     fn immediate(&mut self) -> Result<Transaction<'_>> {
         Ok(self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?)
     }
+
+    /// A legacy cast's uuid hashes its size ([`crate::model::legacy_uuid`]), so a cast the
+    /// old plugin still appends to gets a new uuid on its next import, and `upsert_session`
+    /// drops the row of the old one. Before that happens, meta.db's forget rows and
+    /// forgotten-command playback spans of the old uuid are copied to the new one (the
+    /// originals stay, so nothing keyed by the old uuid is ever uncovered) and its
+    /// annotations move over, so a forgotten secret stays forgotten (§15.7).
+    fn carry_legacy_identity(&mut self, s: &SessionMeta) -> Result<()> {
+        let old: Vec<String> = self
+            .conn
+            .prepare_cached("SELECT uuid FROM sessions WHERE cast_path = ?1 AND uuid <> ?2 AND legacy = 1")?
+            .query_map(params![path_value(&s.cast_path), s.uuid], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if old.is_empty() || !self.meta_path.exists() {
+            return Ok(());
+        }
+        let mut meta = match schema::open(&self.meta_path, DbKind::Meta, Access::ReadWrite) {
+            Ok(c) => c,
+            // A newer cinelog's meta.db is never written (§10.3): import only what needs
+            // nothing carried over.
+            Err(e @ IndexError::NewerSchema { .. }) => {
+                let ro = schema::open(&self.meta_path, DbKind::Meta, Access::ReadOnly)?;
+                return match keyed_rows(&ro, &old)? {
+                    0 => Ok(()),
+                    _ => Err(e),
+                };
+            }
+            Err(e) => return Err(e),
+        };
+        let tx = meta.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let span = crate::model::settings_keys::FORGET_SPAN_PREFIX;
+        for o in &old {
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO forgotten(session_uuid, kind, cmd_seq, t_from, t_to, by, at)
+                 SELECT ?2, kind, cmd_seq, t_from, t_to, by, at FROM forgotten WHERE session_uuid = ?1",
+            )?
+            .execute(params![o, s.uuid])?;
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO settings(key, value)
+                 SELECT ?2 || substr(key, length(?1) + 1), value FROM settings WHERE substr(key, 1, length(?1)) = ?1",
+            )?
+            .execute(params![format!("{span}{o}/"), format!("{span}{}/", s.uuid)])?;
+            tx.prepare_cached("UPDATE annotations SET session_uuid = ?2 WHERE session_uuid = ?1")?
+                .execute(params![o, s.uuid])?;
+        }
+        let carried: Vec<Forgotten> = super::meta::read_forgotten(&tx)?
+            .into_iter()
+            .filter(|f| f.target.uuid() == s.uuid)
+            .collect();
+        tx.commit()?;
+        if !carried.is_empty() {
+            tracing::info!(
+                "legacy cast {} grew: {} forget row(s) carried over to its new uuid",
+                s.cast_path.display(),
+                carried.len()
+            );
+        }
+        for f in carried {
+            if !self.forgotten.contains(&f) {
+                self.forgotten.push(f.clone());
+            }
+            if !self.carried.contains(&f) {
+                self.carried.push(f);
+            }
+        }
+        self.forget = ForgetSet::new(&self.forgotten);
+        Ok(())
+    }
+}
+
+/// meta.db rows keyed by any of `uuids` (forget rows, playback spans, annotations).
+fn keyed_rows(meta: &Connection, uuids: &[String]) -> Result<u64> {
+    let span = crate::model::settings_keys::FORGET_SPAN_PREFIX;
+    let mut n = 0;
+    for u in uuids {
+        n += meta.query_row(
+            "SELECT (SELECT count(*) FROM forgotten WHERE session_uuid = ?1)
+                  + (SELECT count(*) FROM annotations WHERE session_uuid = ?1)
+                  + (SELECT count(*) FROM settings WHERE substr(key, 1, length(?2)) = ?2)",
+            params![u, format!("{span}{u}/")],
+            |r| u64_at(r, 0),
+        )?;
+    }
+    Ok(n)
 }
 
 fn set_info(conn: &Connection, key: &str, value: Option<&str>) -> Result<()> {
@@ -650,6 +744,9 @@ fn known_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownCast> {
 
 impl IndexWriter for SqliteWriter {
     fn apply(&mut self, batch: &IndexBatch) -> Result<()> {
+        if batch.session.legacy {
+            self.carry_legacy_identity(&batch.session)?;
+        }
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         apply_batch(&tx, &self.forget, &self.redact, batch)?;
         set_info(&tx, info_keys::WRITER_HEARTBEAT, Some(&now().to_string()))?;
@@ -664,7 +761,13 @@ impl IndexWriter for SqliteWriter {
             purge(&tx, &f.target, &mut out)?;
         }
         tx.commit()?;
-        self.forget = ForgetSet::new(forgotten);
+        self.forgotten = forgotten.to_vec();
+        for f in &self.carried {
+            if !self.forgotten.contains(f) {
+                self.forgotten.push(f.clone());
+            }
+        }
+        self.forget = ForgetSet::new(&self.forgotten);
         Ok(out)
     }
 

@@ -98,7 +98,7 @@ process (a VT) has no `holder_comm`.
 | L2 | Release assets | `cinelog-x86_64-unknown-linux-musl`, `cinelog-aarch64-unknown-linux-musl` and `SHA256SUMS`; `sha256sum -c` passes |
 | L3 | Checksum commit | `shell/checksums/v<VERSION>.sha256` lands on `main` and is identical to `SHA256SUMS` |
 | L4 | Fresh user, module tracking `main`: `zimfw install` | Verified against the committed file, without a fallback warning |
-| L5 | Module pinned with `--tag v<VERSION>` | Verified against the release `SHA256SUMS`, with the documented warning |
+| L5 | Module pinned with `--tag v<VERSION>` | Without the checksum file the release binary is refused and the pinned source is built; with `--trust-release-sums` it is verified against the release `SHA256SUMS` with a warning; with `v<VERSION>.sha256` copied from `main` it is verified against that file |
 | L6 | A tampered asset (`CINELOG_FETCH_BASE_URL=file://…` with one changed byte) | Rejected with a checksum mismatch; the old binary stays |
 | L7 | Offline (no network) | The cargo fallback builds `bin/cinelog`; the UI is the placeholder page if `web/dist` is missing |
 | L8 | The `verify` job of the same run | `fetch.zsh` installs and verifies the release binary on both x86_64 and aarch64 runners against the published assets |
@@ -148,5 +148,8 @@ machine: <distro, kernel, zsh, tmux>   arm: <machine>
 | 6 web   | W1–W9     |                |       |
 ```
 
-Earlier milestone records: [VERIFY-M1.md](VERIFY-M1.md) (recorder and plugin) and
-[VERIFY-M3.md](VERIFY-M3.md) (web and team server).
+Milestone records: [VERIFY-M1.md](VERIFY-M1.md) (recorder and plugin),
+[VERIFY-M2.md](VERIFY-M2.md) (index, real-corpus import and search),
+[VERIFY-M3.md](VERIFY-M3.md) (web and team server), [VERIFY-M4.md](VERIFY-M4.md) (live view,
+timeline, annotations, export) and [VERIFY-M5.md](VERIFY-M5.md) (1.0 release and the final
+security pass).

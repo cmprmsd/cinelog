@@ -156,6 +156,14 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(archive-legacy)
+_arguments "${_arguments_options[@]}" : \
+'--to=[Directory for the copies (\`<DIR>/<path below the logs directory>.zst\`); not inside the logs directory]:DIR:_files' \
+'--dry-run[List what would be archived without writing anything]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (import)
 _arguments "${_arguments_options[@]}" : \
 '--report[Per-file banners, log lines, aligned commands and mean confidence]' \
@@ -437,6 +445,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(archive-legacy)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (import)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -554,6 +566,7 @@ _cinelog_commands() {
 'index:Index the casts once, or rebuild the index from the casts' \
 'status:Indexer lag, backlog, legacy import progress and server state' \
 'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
+'archive-legacy:Write zstd copies of the legacy casts to another directory (the originals stay as they are)' \
 'import:Legacy import report (aggregate numbers only)' \
 'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
 'token:Manage web login tokens (TEAM\: one named token per member)' \
@@ -562,6 +575,11 @@ _cinelog_commands() {
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'cinelog commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__archive-legacy_commands] )) ||
+_cinelog__subcmd__archive-legacy_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog archive-legacy commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__completions_commands] )) ||
 _cinelog__subcmd__completions_commands() {
@@ -599,6 +617,7 @@ _cinelog__subcmd__help_commands() {
 'index:Index the casts once, or rebuild the index from the casts' \
 'status:Indexer lag, backlog, legacy import progress and server state' \
 'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
+'archive-legacy:Write zstd copies of the legacy casts to another directory (the originals stay as they are)' \
 'import:Legacy import report (aggregate numbers only)' \
 'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
 'token:Manage web login tokens (TEAM\: one named token per member)' \
@@ -607,6 +626,11 @@ _cinelog__subcmd__help_commands() {
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'cinelog help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__archive-legacy_commands] )) ||
+_cinelog__subcmd__help__subcmd__archive-legacy_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help archive-legacy commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__help__subcmd__completions_commands] )) ||
 _cinelog__subcmd__help__subcmd__completions_commands() {

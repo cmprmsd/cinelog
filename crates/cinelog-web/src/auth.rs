@@ -309,7 +309,19 @@ impl Inner {
     fn with_db<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let mut guard: MutexGuard<'_, Option<Connection>> = self.db.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            *guard = Some(schema::open(&self.meta, DbKind::Meta, Access::ReadWrite)?);
+            *guard = Some(match schema::open(&self.meta, DbKind::Meta, Access::ReadWrite) {
+                Ok(c) => c,
+                // A newer cinelog wrote meta.db (§10.3, read-only mode): logins live in memory
+                // until the next restart, so the read-only views stay reachable.
+                Err(IndexError::NewerSchema { found, .. }) => {
+                    tracing::warn!(
+                        "{}: schema version {found} is newer than this cinelog; web logins are kept in memory",
+                        self.meta.display()
+                    );
+                    schema::open_in_memory(DbKind::Meta)?
+                }
+                Err(e) => return Err(e.into()),
+            });
         }
         let conn = guard.as_ref().expect("opened above");
         f(conn).map_err(|e| {
@@ -475,7 +487,13 @@ pub fn revoke_principal(meta_db: &Path, principal: &str) -> Result<u64> {
     if !meta_db.exists() {
         return Ok(0);
     }
-    let conn = schema::open(meta_db, DbKind::Meta, Access::ReadWrite)?;
+    let conn = match schema::open(meta_db, DbKind::Meta, Access::ReadWrite) {
+        Ok(c) => c,
+        // Written by a newer cinelog (§10.3): not ours to change. Every session is checked
+        // against the token file on each request, so the revoked token ends them anyway.
+        Err(IndexError::NewerSchema { .. }) => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
     let n = conn
         .execute("DELETE FROM auth_sessions WHERE principal = ?1", [principal])
         .map_err(IndexError::from)?;
@@ -852,6 +870,29 @@ mod tests {
         assert_eq!(rows(&f), 0);
         let r = send(&f.app, Call::get("/api/me").cookie(pair)).await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A meta.db written by a newer cinelog (rollback, §10.3) is never written: logins work
+    /// from memory, so the read-only views stay reachable.
+    #[tokio::test]
+    async fn newer_meta_db_keeps_logins_in_memory() {
+        let f = fixture();
+        let meta = f.state.ctx.db.meta.clone();
+        drop(schema::open(&meta, DbKind::Meta, Access::ReadWrite).unwrap());
+        Connection::open(&meta)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        let cookie = login(&f, ME, UA).await;
+        let r = send(&f.app, Call::get("/api/me").cookie(&cookie)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(rows(&f), 1, "the session is held in memory");
+        let on_disk: i64 = Connection::open(&meta)
+            .unwrap()
+            .query_row("SELECT count(*) FROM auth_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on_disk, 0, "nothing written to the newer meta.db");
+        assert_eq!(revoke_principal(&meta, "tester").unwrap(), 0);
     }
 
     #[tokio::test]

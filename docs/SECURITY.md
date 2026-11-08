@@ -68,13 +68,13 @@ To keep something out:
 - **masks** that range in every cast, segment, live stream and export the server sends. The
   output becomes one `[redacted by <who>]` event, and the keystrokes are dropped.
 
-**Known limit in 1.0:**
-
-- **Old-plugin casts that are still growing.** An imported legacy cast is identified by its
-  name, size and first MiB, so it gets a new identity each time the old plugin appends to
-  it. A forget made while it still grows stops applying at the next import, and the old
-  session row stays as a duplicate. Forget data in a legacy cast only after its shell has
-  exited, and check the result with `cinelog search`.
+**Old-plugin casts that are still growing.** An imported legacy cast is identified by its
+name, size and first MiB, so it gets a new uuid each time the old plugin appends to it. The
+import under the new uuid replaces the old session row and first carries meta.db's forget
+rows and forgotten-command playback spans over to the new uuid (the rows of the old uuid
+stay) and moves its annotations, so a forget keeps applying to search, show, playback and
+export. If meta.db was written by a newer cinelog (read-only, §10.3 of the plan) and
+something has to be carried over, the import of that cast fails until cinelog is upgraded.
 
 Forget **never rewrites a cast on disk.** The owner of the file and root can still read the
 original, and so can any backup of `~/logs`. Delete or edit the cast file yourself if the
@@ -222,11 +222,17 @@ These risks are known and accepted, or left to deployment:
   process-based, with up to 250 ms of lag. The first frame of a `tmux attach` can land in
   the outer cast; an alternate-screen fix-up keeps playback correct.
 - **Forgotten data stays on disk** (§3), and so do backups of the casts.
-- **Forget has a gap in the index** (§3): a forget on an old-plugin cast that is still
-  growing stops applying.
 - **Release integrity rests on the repository.** Checksums are committed to `main` by CI.
-  There are no detached signatures. A module pinned to a tag verifies only against the
-  release's own `SHA256SUMS` ([shell/checksums/README.md](../shell/checksums/README.md)).
+  There are no detached signatures. A module pinned to a tag never receives that commit:
+  `fetch.zsh` then refuses the release's own `SHA256SUMS` (it comes from the same server as
+  the binary) and builds from the pinned source instead, unless you copy
+  `shell/checksums/v<VERSION>.sha256` from `main` into the checkout or pass
+  `--trust-release-sums` ([shell/checksums/README.md](../shell/checksums/README.md)).
+- **Dependencies are audited in CI.** `cargo audit` (RustSec) checks `Cargo.lock` and
+  `pnpm audit --prod` the bundled web dependencies on every push, pull request and night.
+  Both were clean for 1.0 (2026-11-08: 292 crates against 1422 advisories; the two
+  `pnpm audit` findings are in build tools only, eslint's minimatch and the Svelte vite
+  plugin's deepmerge, and do not reach the binary).
 - **LAN exposure.** By default the servers listen on all addresses. TLS, tokens and the
   checks above protect them, but a host on an untrusted network should restrict
   `server.bind`.

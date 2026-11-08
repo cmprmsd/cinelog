@@ -212,6 +212,18 @@ impl ServerHandle {
     }
 }
 
+/// Persists a server fact in meta.db. A meta.db of a newer cinelog (§10.3) is read-only: the
+/// server still starts, it just does not remember the fact.
+fn keep_setting(meta: &mut dyn cinelog_index::MetaStore, key: &str, value: &str) -> Result<()> {
+    match meta.set_setting(key, Some(value)) {
+        Err(cinelog_index::IndexError::NewerSchema { .. }) => {
+            tracing::warn!("meta.db was written by a newer cinelog; {key} is not saved");
+            Ok(())
+        }
+        r => Ok(r?),
+    }
+}
+
 /// Starts the server of `ctx`'s scope; returns once it listens.
 pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
     tls::install_provider();
@@ -231,7 +243,7 @@ pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
     let first = persisted.unwrap_or_else(|| auto_port(ctx.scope, ctx.uid));
     let (listeners, port) = bind_all(&specs, first)?;
     if specs.iter().any(|s| s.port.is_none()) && persisted != Some(port) {
-        meta.set_setting(settings_keys::PORT, Some(&port.to_string()))?;
+        keep_setting(meta.as_mut(), settings_keys::PORT, &port.to_string())?;
     }
     if let Some(reason) = material.regenerated {
         tracing::warn!("new self-signed certificate ({reason:?}), fingerprint {fingerprint}");
@@ -241,7 +253,7 @@ pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
         if stored.is_some() && material.regenerated.is_none() {
             tracing::warn!("the TLS certificate changed, fingerprint {fingerprint}");
         }
-        meta.set_setting(settings_keys::CERT_FINGERPRINT, Some(&fingerprint))?;
+        keep_setting(meta.as_mut(), settings_keys::CERT_FINGERPRINT, &fingerprint)?;
     }
     drop(meta);
 

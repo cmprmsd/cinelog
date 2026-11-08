@@ -39,6 +39,18 @@ jobs:
         if: hashFiles('shell/completions/_cinelog') != ''
         run: cargo run --quiet --locked -p cinelog -- completions zsh | diff -u shell/completions/_cinelog -
 
+  audit:
+    name: dependency advisories (RustSec)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      # The advisory database is fetched fresh on every run (pushes, pull requests and the
+      # nightly schedule), so a new advisory against Cargo.lock fails the next run.
+      - run: cargo audit --deny unsound --deny yanked
+
   msrv:
     name: MSRV check
     runs-on: ubuntu-24.04
@@ -129,6 +141,9 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - if: steps.probe.outputs.present == 'true'
         run: pnpm -C web install --frozen-lockfile
+      - name: Advisories of the bundled (production) dependencies
+        if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web audit --prod
       - if: steps.probe.outputs.present == 'true'
         run: pnpm -C web check
       - if: steps.probe.outputs.present == 'true'

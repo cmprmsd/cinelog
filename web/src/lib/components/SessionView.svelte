@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiFailure, errorText, isAbort } from '../api/client';
+  import { api, ApiFailure, errorText, isAbort, retryNotFound } from '../api/client';
   import AnnotationsPanel from '../annotations/AnnotationsPanel.svelte';
   import type { BusEvent, Command, SessionDetail } from '../api/types';
   import { bus } from '../api/events.svelte';
@@ -64,7 +64,7 @@
     void reload;
     const ctl = new AbortController();
     loadError = null;
-    Promise.all([api.session(id, ctl.signal), api.commands(id, ctl.signal)]).then(
+    retryNotFound(() => Promise.all([api.session(id, ctl.signal), api.commands(id, ctl.signal)]), ctl.signal).then(
       ([d, c]) => {
         detail = d;
         commands = c.commands;

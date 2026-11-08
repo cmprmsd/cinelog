@@ -998,7 +998,18 @@ impl Searcher for SqliteSearcher {
             .prepare("SELECT key, value FROM index_info WHERE value IS NOT NULL ORDER BY key")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        st.last_error = info.get(info_keys::LAST_ERROR).cloned();
+        // A newer index.db or meta.db (a downgrade, §10.3) outranks the indexer's last error:
+        // nothing is indexed until cinelog is upgraded again.
+        let meta_version = if self.paths.meta.exists() {
+            schema::open(&self.paths.meta, DbKind::Meta, Access::ReadOnly)
+                .and_then(|c| schema::user_version(&c))
+                .ok()
+        } else {
+            None
+        };
+        st.last_error = schema::newer_note(DbKind::Index, st.schema_version)
+            .or_else(|| meta_version.and_then(|v| schema::newer_note(DbKind::Meta, v)))
+            .or_else(|| info.get(info_keys::LAST_ERROR).cloned());
         st.info = info;
         Ok(st)
     }

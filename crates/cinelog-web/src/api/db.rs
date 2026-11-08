@@ -481,7 +481,7 @@ pub(crate) struct CmdSpan {
 }
 
 /// meta.db `settings` keys of [`CmdSpan`]s: `forget_span/<uuid>/<seq>`.
-pub(crate) const SPAN_PREFIX: &str = "forget_span/";
+pub(crate) const SPAN_PREFIX: &str = im::settings_keys::FORGET_SPAN_PREFIX;
 
 pub(crate) fn span_key(uuid: &str, seq: u64) -> String {
     format!("{SPAN_PREFIX}{uuid}/{seq}")

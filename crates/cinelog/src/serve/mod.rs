@@ -8,11 +8,13 @@
 //! - [`daemon`]: the scheduler loop, crash detection, forget sync, daily compressor and
 //!   nightly meta backup;
 //! - [`compress`]: the zstd compressor and the reconciliation of interrupted runs;
+//! - [`archive`]: `archive-legacy`, compressed copies of legacy casts elsewhere;
 //! - [`backup`]: meta export/import, nightly backups, the migrated port.
 //!
 //! Unless `--no-http`, `serve` also runs the web server ([`cinelog_web::spawn`], M3) for the
 //! daemon's lifetime. The user unit is `packaging/systemd/cinelog.service`.
 
+pub mod archive;
 pub mod backup;
 pub mod compress;
 pub mod daemon;
@@ -35,7 +37,7 @@ use cinelog_core::registry::SystemProbe;
 use cinelog_index::model::{DbPaths, RenderOptions};
 use cinelog_index::{IndexEngine, IndexError, IndexWriter, MetaStore, db};
 
-use crate::cli::{CompressArgs, MetaAction, MetaArgs, ScopeArg, ServeArgs};
+use crate::cli::{ArchiveLegacyArgs, CompressArgs, MetaAction, MetaArgs, ScopeArg, ServeArgs};
 use crate::ctx::Ctx;
 use compress::CompressOpts;
 use daemon::{Daemon, DaemonConfig, Signals};
@@ -115,9 +117,13 @@ fn serve(ctx: &Ctx, http: bool) -> anyhow::Result<()> {
         }
     };
     tracing::debug!("holding {}", serve_lock.path().display());
-    let Some(writer) = open_writer_waiting(&db, ctx, &signals.stop)? else {
-        return Ok(());
+    let writer = match open_writer_waiting(&db, ctx, &signals.stop) {
+        Ok(Some(w)) => w,
+        Ok(None) => return Ok(()),
+        Err(e @ IndexError::NewerSchema { .. }) => return serve_read_only(ctx, http, &signals, &e),
+        Err(e) => return Err(e.into()),
     };
+    // A meta.db of a newer cinelog opens read-only (its writes fail, `status` says so).
     let meta = db::open_meta(&db)?;
     // The indexer keeps running when the web server cannot start (TLS, ports), so search
     // from the shell keeps working; the error is in the log.
@@ -146,6 +152,29 @@ fn serve(ctx: &Ctx, http: bool) -> anyhow::Result<()> {
     }
     result?;
     drop(serve_lock);
+    Ok(())
+}
+
+/// index.db was written by a newer cinelog (a rollback, plan §10.3): nothing is indexed or
+/// written, the web server serves what the index holds until the server is stopped.
+/// `cinelog status` and `/api/status` report it as the index error.
+fn serve_read_only(ctx: &Ctx, http: bool, signals: &Signals, e: &IndexError) -> anyhow::Result<()> {
+    tracing::error!("{e}; serving read-only without the indexer until cinelog is upgraded");
+    let web = http
+        .then(|| match cinelog_web::spawn(ctx.web_context()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::error!("web server: {e}");
+                None
+            }
+        })
+        .flatten();
+    while !signals.stop.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if let Some(web) = web {
+        web.shutdown();
+    }
     Ok(())
 }
 
@@ -344,6 +373,76 @@ fn compress_cmd(ctx: &Ctx, db: &DbPaths, dry_run: bool, out: &mut dyn std::io::W
         eprintln!("cinelog: compress: {e}");
     }
     Ok(if r.errors.is_empty() { code::OK } else { code::PARTIAL })
+}
+
+// ------------------------------------------------------------------ archive-legacy
+
+pub fn archive_legacy(args: &ArchiveLegacyArgs) -> ExitCode {
+    let ctx = Ctx::load();
+    let db = DbPaths::in_dir(&ctx.paths.db_dir);
+    let mut out = std::io::stdout().lock();
+    match archive_legacy_cmd(&ctx, &db, args, &mut out) {
+        Ok(c) => ExitCode::from(c),
+        Err(e) => {
+            eprintln!("cinelog: archive-legacy: {e:#}");
+            ExitCode::from(code::ERROR)
+        }
+    }
+}
+
+fn archive_legacy_cmd(
+    ctx: &Ctx,
+    db: &DbPaths,
+    args: &ArchiveLegacyArgs,
+    out: &mut dyn std::io::Write,
+) -> anyhow::Result<u8> {
+    let logs = &ctx.paths.logs_root;
+    let to = archive::check_target(logs, &args.to).map_err(anyhow::Error::msg)?;
+    if !db.index.is_file() {
+        anyhow::bail!(
+            "no index yet at {}: legacy casts are found by indexing (cinelog index --once)",
+            db.index.display()
+        );
+    }
+    // The legacy casts the index knows, also those whose import failed.
+    let casts: Vec<PathBuf> = db::open_reader(db)?
+        .legacy_report()?
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    let opts = archive::ArchiveOpts {
+        to: to.clone(),
+        level: ctx.config.retention.zstd_level,
+        dry_run: args.dry_run,
+    };
+    let r = archive::archive(&casts, logs, &opts);
+    let to = to.display();
+    if args.dry_run {
+        writeln!(
+            out,
+            "would archive {} of {} legacy casts ({} bytes) to {to}; {} already archived",
+            r.archived, r.casts, r.bytes_in, r.current
+        )?;
+    } else {
+        writeln!(
+            out,
+            "archived {} of {} legacy casts to {to}: {} → {} bytes; {} already archived, {} failed",
+            r.archived, r.casts, r.bytes_in, r.bytes_out, r.current, r.failed
+        )?;
+        if r.archived + r.current > 0 {
+            writeln!(
+                out,
+                "the originals are unchanged; delete them yourself once you have checked the copies"
+            )?;
+        }
+    }
+    for e in &r.errors {
+        eprintln!("cinelog: archive-legacy: {e}");
+    }
+    if r.aborted {
+        eprintln!("cinelog: archive-legacy: stopped: the target disk is full");
+    }
+    Ok(if r.failed == 0 { code::OK } else { code::PARTIAL })
 }
 
 // ------------------------------------------------------------------ meta

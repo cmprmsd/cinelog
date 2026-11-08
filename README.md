@@ -101,8 +101,11 @@ verified, `install --refresh` points the symlink at it and restarts your server.
 plugin code you already run. The release workflow commits it to `main` after the tag, so:
 
 - A module that tracks `main` (the default) verifies against the committed file.
-- A module pinned with `--tag`, or to a commit, verifies only against the release's
-  `SHA256SUMS`, and `fetch.zsh` says so.
+- A module pinned with `--tag`, or to a commit, never gets that commit. The release's own
+  `SHA256SUMS` comes from the same server as the binary, so `fetch.zsh` does not trust it on
+  its own and builds the pinned source with cargo instead. To use the release binary, copy
+  `shell/checksums/v<VERSION>.sha256` from `main` into the checkout, or run
+  `cinelog-fetch --trust-release-sums`.
 
 See [shell/checksums/README.md](shell/checksums/README.md).
 
@@ -164,6 +167,7 @@ stay allowed. Every pause or skip leaves a visible mark in the timeline.
 | `cinelog token new\|list\|revoke`, `cinelog tls show\|regen` | Web login tokens; the certificate's fingerprint, names and expiry |
 | `cinelog meta export\|import FILE` | Annotations, tags and the forget list as JSON Lines. A copy is also written every night |
 | `cinelog compress --now\|--dry-run` | Compresses finished casts older than `retention.compress_after_days` with zstd. Reads stay transparent, and legacy casts are never compressed |
+| `cinelog archive-legacy --to DIR [--dry-run]` | Writes zstd copies of the old plugin's casts to `DIR`, keeping their layout. The originals are not changed; delete them yourself once you have checked the copies |
 | `cinelog doctor [--json]` | Checks the binary, plugin, units, server, certificate, DB location, terminal detection and version skew |
 
 In a recorded shell:

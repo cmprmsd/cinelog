@@ -65,7 +65,7 @@ humans and never contains tokens, terminal content, SQL or paths.
 | `payload_too_large` | 413 | `/cast` of a cast above `index.playback_segment_threshold_mb` |
 | `unsupported_media_type` | 415 | a mutating request whose body is not `application/json` |
 | `too_many_requests` | 429 | login rate limit; `Retry-After` header in seconds |
-| `unavailable` | 503 | no index yet (first start, rebuild) or a component is unavailable |
+| `unavailable` | 503 | no index yet (first start, rebuild), a component is unavailable, or a write to a meta.db that a newer cinelog wrote (read-only mode, §5.1) |
 | `internal` | 500 | anything else (details only in the server log) |
 
 ## 3. Request checks (every request, in this order)
@@ -173,6 +173,12 @@ immutable`; everything else `no-cache`, with an `ETag`.
   the indexer view of `cinelog status`: schema version, index.db size, session counts by
   state, command and output row counts, lag per live session, backlog bytes, legacy import
   progress and the last indexer error.
+- Read-only mode (plan §10.3): when index.db or meta.db has a newer `user_version` than this
+  binary supports (a rollback), `serve` runs the web server without the indexer and writes
+  to neither database; logins are then kept in memory. `Status.schema_version` is the
+  version found and `last_error` says `… newer than cinelog <v> supports (<n>): read-only,
+  not indexing; upgrade cinelog`. Reads work as usual; writes (forget, annotations, tags)
+  answer 503 `unavailable`.
 - `ImportReport`: `progress` plus one `ImportFile` per legacy file in path order (status,
   session uuid, banners, log lines, aligned commands, mean confidence, error). Aggregates
   only, never cast content.
@@ -256,6 +262,12 @@ real shell often writes the prompt and the echo a fraction of a millisecond befo
 stamped), every line showing a line of the typed command becomes empty (line ordinals stay).
 Queries strip it at once, the purge rewrites the chunks, and a rebuild strips it on the way
 in. Other output in that span stays searchable.
+
+A legacy (old-plugin) cast is identified by its name, size and first MiB, so a cast the old
+plugin still appends to gets a new uuid at its next import, which replaces the session of the
+old uuid. Before that, the writer copies the old uuid's `forgotten` rows and
+`forget_span/<old uuid>/…` settings to the new uuid (keeping the old ones) and moves its
+annotations, in one meta.db transaction, so forgets and annotations follow the cast.
 
 ## 6. Playback
 

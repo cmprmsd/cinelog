@@ -93,6 +93,37 @@ async function failure(res: Response): Promise<ApiFailure> {
   return new ApiFailure(res.status, code, message, Number.isFinite(ra) && ra > 0 ? ra : null);
 }
 
+/**
+ * Runs `load` again while it fails with 404, up to `tries` times `delayMs` apart. A session
+ * whose link was just printed (`cinelog link`) is in the index only after the indexer's
+ * first commit, about 2 s after the shell started.
+ */
+export async function retryNotFound<T>(
+  load: () => Promise<T>,
+  signal: AbortSignal,
+  tries = 5,
+  delayMs = 1000,
+): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await load();
+    } catch (e) {
+      if (!(e instanceof ApiFailure && e.status === 404) || i >= tries || signal.aborted) throw e;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException('aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+  }
+}
+
 export type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 export async function request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {

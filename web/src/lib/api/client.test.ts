@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiFailure, buildQuery, onUnauthorized } from './client';
+import { api, ApiFailure, buildQuery, onUnauthorized, retryNotFound } from './client';
 
 function respond(status: number, body?: unknown, headers: Record<string, string> = {}) {
   const fetch = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
@@ -13,6 +13,39 @@ describe('api client', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     onUnauthorized(null);
+  });
+
+  it('retries a 404 while a new session reaches the index, and nothing else', async () => {
+    const ctl = new AbortController();
+    let calls = 0;
+    const late = () =>
+      ++calls < 3 ? Promise.reject(new ApiFailure(404, 'not_found', 'not found')) : Promise.resolve(7);
+    await expect(retryNotFound(late, ctl.signal, 5, 1)).resolves.toBe(7);
+    expect(calls).toBe(3);
+
+    calls = 0;
+    const never = () => {
+      calls += 1;
+      return Promise.reject(new ApiFailure(404, 'not_found', 'not found'));
+    };
+    await expect(retryNotFound(never, ctl.signal, 3, 1)).rejects.toMatchObject({ status: 404 });
+    expect(calls).toBe(3);
+
+    calls = 0;
+    const denied = () => {
+      calls += 1;
+      return Promise.reject(new ApiFailure(401, 'unauthorized', 'no'));
+    };
+    await expect(retryNotFound(denied, ctl.signal, 5, 1)).rejects.toMatchObject({ status: 401 });
+    expect(calls).toBe(1);
+
+    calls = 0;
+    const stop = new AbortController();
+    const pending = retryNotFound(never, stop.signal, 5, 10_000);
+    await new Promise((r) => setTimeout(r, 0));
+    stop.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(1);
   });
 
   it('builds queries from defined values', () => {

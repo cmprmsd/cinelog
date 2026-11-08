@@ -81,7 +81,8 @@ impl DbKind {
 pub enum Access {
     /// Creates the file (0600, parent 0700) and migrates.
     ReadWrite,
-    /// Never writes; fails unless the schema is exactly current.
+    /// Never writes; fails unless the schema is current or newer (plan §10.3: a binary that
+    /// finds a newer `user_version` reads it and says so, see [`newer_note`]).
     ReadOnly,
 }
 
@@ -113,11 +114,17 @@ pub fn open(path: &Path, kind: DbKind, access: Access) -> Result<Connection> {
             check_application_id(&conn, kind, path)?;
             let found = user_version(&conn)?;
             if found > kind.version() {
-                return Err(IndexError::NewerSchema {
-                    path: path.to_owned(),
-                    found,
-                    supported: kind.version(),
-                });
+                // A database without our application_id is not one we can vouch for.
+                let id: i32 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
+                if id != kind.application_id() {
+                    return Err(IndexError::NewerSchema {
+                        path: path.to_owned(),
+                        found,
+                        supported: kind.version(),
+                    });
+                }
+                warn_newer_once(path, kind, found);
+                return Ok(conn);
             }
             if found != kind.version() {
                 return Err(IndexError::SchemaMismatch {
@@ -129,6 +136,36 @@ pub fn open(path: &Path, kind: DbKind, access: Access) -> Result<Connection> {
         }
     }
     Ok(conn)
+}
+
+/// The one-line notice for a database of `kind` at schema `found` when that is newer than
+/// this binary supports: it is read, never written, and nothing indexes into it.
+pub fn newer_note(kind: DbKind, found: u32) -> Option<String> {
+    (found > kind.version()).then(|| {
+        format!(
+            "{}.db has schema version {found}, newer than cinelog {} supports ({}): read-only, not indexing; \
+             upgrade cinelog",
+            kind.name(),
+            env!("CARGO_PKG_VERSION"),
+            kind.version(),
+        )
+    })
+}
+
+/// Logs [`newer_note`] once per database file and process (readers open per request).
+fn warn_newer_once(path: &Path, kind: DbKind, found: u32) {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let first = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_owned());
+    if first && let Some(note) = newer_note(kind, found) {
+        tracing::warn!("{}: {note}", path.display());
+    }
 }
 
 /// A migrated in-memory database (tests and fakes).
@@ -321,6 +358,41 @@ mod tests {
             open(&meta, DbKind::Index, Access::ReadWrite),
             Err(IndexError::Schema(_))
         ));
+    }
+
+    #[test]
+    fn newer_schema_opens_read_only_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [DbKind::Index, DbKind::Meta] {
+            let path = dir.path().join(format!("{}.db", kind.name()));
+            open(&path, kind, Access::ReadWrite).unwrap();
+            {
+                let c = Connection::open(&path).unwrap();
+                c.pragma_update(None, "user_version", 99).unwrap();
+            }
+            assert!(matches!(
+                open(&path, kind, Access::ReadWrite),
+                Err(IndexError::NewerSchema { found: 99, .. })
+            ));
+            let ro = open(&path, kind, Access::ReadOnly).unwrap();
+            assert_eq!(user_version(&ro).unwrap(), 99);
+            assert!(ro.execute_batch("CREATE TABLE x(y)").is_err(), "read-only");
+            let note = newer_note(kind, 99).unwrap();
+            assert!(note.contains("version 99") && note.contains("read-only"), "{note}");
+            assert_eq!(newer_note(kind, kind.version()), None);
+
+            // A newer version without our application_id is still refused.
+            let foreign = dir.path().join(format!("foreign-{}.db", kind.name()));
+            {
+                let c = Connection::open(&foreign).unwrap();
+                c.execute_batch("CREATE TABLE t(x)").unwrap();
+                c.pragma_update(None, "user_version", 99).unwrap();
+            }
+            assert!(matches!(
+                open(&foreign, kind, Access::ReadOnly),
+                Err(IndexError::NewerSchema { found: 99, .. })
+            ));
+        }
     }
 
     fn insert_session(conn: &Connection, uuid: &str) -> i64 {

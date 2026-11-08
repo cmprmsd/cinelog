@@ -72,6 +72,8 @@ pub mod settings_keys {
     pub const CERT_FINGERPRINT: &str = "cert_fingerprint";
     /// ts of the last nightly meta backup.
     pub const LAST_BACKUP: &str = "last_backup";
+    /// Prefix of the playback span of a forgotten command: `forget_span/<uuid>/<seq>`.
+    pub const FORGET_SPAN_PREFIX: &str = "forget_span/";
 }
 
 // ------------------------------------------------------------------ locations

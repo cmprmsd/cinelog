@@ -41,6 +41,8 @@ pub enum Command {
     Status(StatusArgs),
     /// Compress finished casts older than `retention.compress_after_days` (never legacy casts)
     Compress(CompressArgs),
+    /// Write zstd copies of the legacy casts to another directory (the originals stay as they are)
+    ArchiveLegacy(ArchiveLegacyArgs),
     /// Legacy import report (aggregate numbers only)
     Import(ImportArgs),
     /// Export or import meta.db (annotations, tags, forget list, settings)
@@ -252,6 +254,17 @@ pub struct CompressArgs {
     #[arg(long)]
     pub now: bool,
     /// List the candidates without compressing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ArchiveLegacyArgs {
+    /// Directory for the copies (`<DIR>/<path below the logs directory>.zst`); not inside
+    /// the logs directory
+    #[arg(long, value_name = "DIR")]
+    pub to: PathBuf,
+    /// List what would be archived without writing anything
     #[arg(long)]
     pub dry_run: bool,
 }

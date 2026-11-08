@@ -126,6 +126,17 @@ Neither path changes or deletes a recording. Old casts are only ever read.
   `cinelog link` prints the current one.
 - **Your stashed edits** from step 1 are still in `git -C ~/.zim/modules/cinelog stash list`.
   Most old options are now config keys (see the [README](../README.md#configuration)).
+- **Disk space of the old casts.** 1.0 never compresses or rewrites old-plugin casts. To
+  shrink them, write compressed copies elsewhere and delete the originals yourself once
+  you have checked the copies:
+
+  ```zsh
+  cinelog archive-legacy --to /mnt/archive/cinelog --dry-run   # what would be written
+  cinelog archive-legacy --to /mnt/archive/cinelog             # <DIR>/<path below ~/logs>.zst
+  ```
+
+  The copies are plain zstd (`zstd -d` restores the cast). The target may not be inside
+  `~/logs`. A copy whose cast is still growing is written again on the next run.
 
 ### Rolling back
 
@@ -177,6 +188,12 @@ Protocol v1 and both database schemas (v1) are unchanged, so no data migration r
    `cinelog: …` line per mismatch, with the upgrade command. Any 1.x plugin, recorder and
    server work together ([STABILITY.md](STABILITY.md)), so the order of the upgrades does not
    matter.
+5. **Rolling back a release:** check out the older tag in the module and run its
+   `fetch.zsh`. Database migrations only move forward: if the newer release had migrated
+   `index.db` or `meta.db`, the older binary opens them read-only and says so in
+   `cinelog status` and the web UI's status. `cinelog serve` then serves the web UI without
+   indexing (logins are kept in memory), `search` and `show` work, and forget, annotations
+   and `cinelog index` refuse to write until you upgrade again.
 
 ## Where things are
 

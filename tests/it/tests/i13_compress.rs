@@ -336,6 +336,69 @@ fn i13_compress_now_keeps_search_slices_and_legacy_intact() {
     }
     let legacy_after: Vec<_> = legacy.iter().map(|p| stamp(p)).collect();
     assert_eq!(legacy_after, legacy_before, "legacy casts untouched by the rebuild");
+    drop(db);
+
+    // archive-legacy (§6.6, §15.10): zstd copies elsewhere; the originals keep their bytes,
+    // inode, mtime and atime (sha256 and stat checked), and no copy lands in the logs dir.
+    let into_logs = sb.logs.join("archive");
+    let refused = sb
+        .cinelog(&["archive-legacy", "--to", &into_logs.to_string_lossy()])
+        .unwrap()
+        .expect(&[2])
+        .unwrap();
+    assert!(refused.stderr.contains("inside the logs directory"), "{refused}");
+    assert!(!into_logs.exists());
+    let archive = sb.root.join("legacy-archive");
+    let to = archive.to_string_lossy().into_owned();
+    let dry = sb
+        .cinelog(&["archive-legacy", "--to", &to, "--dry-run"])
+        .unwrap()
+        .expect_ok()
+        .unwrap();
+    assert!(dry.stdout.contains("would archive 2 of 2 legacy casts"), "{dry}");
+    assert!(!archive.exists(), "--dry-run writes nothing");
+    let run = sb
+        .cinelog(&["archive-legacy", "--to", &to])
+        .unwrap()
+        .expect_ok()
+        .unwrap();
+    assert!(run.stdout.contains("archived 2 of 2 legacy casts"), "{run}");
+    // Compared by sha256 against the stamps: reading the originals here would move their atime.
+    let mut copies = 0;
+    for (p, before) in legacy.iter().zip(&legacy_before) {
+        if p.extension().is_none_or(|e| e != "cast") {
+            continue;
+        }
+        let copy = archive.join(format!("{}.zst", p.strip_prefix(&sb.logs).unwrap().display()));
+        let decoded = zstd::decode_all(&fs::read(&copy).unwrap()[..]).unwrap();
+        use sha2::Digest as _;
+        let sha: String = sha2::Sha256::digest(&decoded)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(sha, before.6, "{}: the copy decodes to the original", copy.display());
+        copies += 1;
+    }
+    assert_eq!(copies, 2);
+    let again = sb
+        .cinelog(&["archive-legacy", "--to", &to])
+        .unwrap()
+        .expect_ok()
+        .unwrap();
+    assert!(
+        again.stdout.contains("archived 0 of 2") && again.stdout.contains("2 already archived"),
+        "{again}"
+    );
+    let legacy_after: Vec<_> = legacy.iter().map(|p| stamp(p)).collect();
+    assert_eq!(
+        legacy_after, legacy_before,
+        "archive-legacy leaves the originals untouched"
+    );
+    let zst_in_logs = listing(&sb.logs)
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "zst"))
+        .count();
+    assert_eq!(zst_in_logs, originals.len(), "no archive copy in the logs directory");
 }
 
 #[test]

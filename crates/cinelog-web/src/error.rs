@@ -55,9 +55,12 @@ impl WebError {
             Self::UnsupportedMediaType => ErrorCode::UnsupportedMediaType,
             Self::TooManyRequests { .. } => ErrorCode::TooManyRequests,
             Self::Unavailable(_) => ErrorCode::Unavailable,
-            Self::Index(IndexError::Locked(_) | IndexError::Unavailable(_) | IndexError::SchemaMismatch { .. }) => {
-                ErrorCode::Unavailable
-            }
+            Self::Index(
+                IndexError::Locked(_)
+                | IndexError::Unavailable(_)
+                | IndexError::SchemaMismatch { .. }
+                | IndexError::NewerSchema { .. },
+            ) => ErrorCode::Unavailable,
             Self::Index(IndexError::Invalid(_)) => ErrorCode::BadRequest,
             Self::Index(IndexError::NotFound(_)) => ErrorCode::NotFound,
             Self::Index(_) | Self::Io(_) | Self::Internal(_) => ErrorCode::Internal,
@@ -74,6 +77,9 @@ impl WebError {
         // Index errors carry SQL and paths: only their class reaches the client.
         let generic = match (self.code(), self) {
             (ErrorCode::Internal, _) => "internal error (see the server log)",
+            (ErrorCode::Unavailable, Self::Index(IndexError::NewerSchema { .. })) => {
+                "read-only: the database was written by a newer cinelog"
+            }
             (ErrorCode::Unavailable, Self::Index(_)) => "the index is not available yet",
             (ErrorCode::NotFound, Self::Index(_)) => "not found",
             (ErrorCode::BadRequest, Self::Index(_)) => "invalid request",
@@ -121,6 +127,13 @@ mod tests {
             (nf.status(), nf.message().as_str()),
             (StatusCode::NOT_FOUND, "not found")
         );
+        let newer = WebError::Index(IndexError::NewerSchema {
+            path: "/root/db/meta.db".into(),
+            found: 2,
+            supported: 1,
+        });
+        assert_eq!(newer.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(newer.message().contains("newer cinelog") && !newer.message().contains("/root"));
         let r = WebError::TooManyRequests { retry_after_secs: 7 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(r.headers()[header::RETRY_AFTER], "7");

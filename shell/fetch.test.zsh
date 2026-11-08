@@ -543,19 +543,40 @@ t_cargo_without_host_triple_fails() {
   [[ ! -e $T/mod/bin/cinelog ]] || fail "installed something"
 }
 
-# A tag-pinned checkout never receives the checksum commit on main; say so instead of
-# implying that a later pull fixes it.
-t_pinned_checkout_warns_about_release_sums() {
+# A tag-pinned checkout never receives the checksum commit on main, and the release's own
+# SHA256SUMS comes from the same place as the binary: it is refused unless the user opts in.
+# The pinned source still builds; a checksum file copied from main makes the release usable.
+t_pinned_checkout_refuses_release_sums() {
   setup tag_checkout
   rm $T/mod/shell/checksums/v$VER.sha256
   mkdir -p $T/mod/.git
   print -r -- ${(l:40::a:)} > $T/mod/.git/HEAD
-  run_fetch || fail "$(<$T/err)" || return 1
-  contains $T/err "not in the repo yet" || return 1
+  run_fetch --no-cargo && { fail "installed a binary verified only by the release"; return 1 }
   contains $T/err "module is pinned" || return 1
+  contains $T/err "--trust-release-sums" || return 1
+  [[ ! -e $T/mod/bin/cinelog ]] || fail "installed something" || return 1
+
+  fake_cargo
+  run_fetch || fail "$(<$T/err)" || return 1
+  contains $T/mod/bin/cinelog "# built" || return 1
+  contains $T/log "cargo build --release --locked --bin cinelog" || return 1
+
   rm $T/mod/bin/cinelog
+  run_fetch --no-cargo --trust-release-sums || fail "$(<$T/err)" || return 1
+  assert_eq $(sha $T/mod/bin/cinelog) $(sha $T/rel/v$VER/cinelog-$TARGET) || return 1
+  contains $T/err "--trust-release-sums was given" || return 1
+
+  rm $T/mod/bin/cinelog
+  cp $T/rel/v$VER/SHA256SUMS $T/mod/shell/checksums/v$VER.sha256
+  run_fetch --no-cargo || fail "$(<$T/err)" || return 1
+  assert_eq $(sha $T/mod/bin/cinelog) $(sha $T/rel/v$VER/cinelog-$TARGET) || return 1
+  not_contains $T/err "module is pinned" || return 1
+
+  # Tracking a branch: the release's SHA256SUMS is used with a warning until the commit lands.
+  rm $T/mod/bin/cinelog $T/mod/shell/checksums/v$VER.sha256
   print -r -- "ref: refs/heads/main" > $T/mod/.git/HEAD
-  run_fetch || return 1
+  run_fetch --no-cargo || return 1
+  contains $T/err "not in the repo yet" || return 1
   not_contains $T/err "module is pinned"
 }
 

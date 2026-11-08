@@ -349,8 +349,9 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 | `cinelog show <uuid>[:<seq>\|@<t>] [--json] [--max-bytes N]` | the command (or session) header and its output text | 0; 1 not found |
 | `cinelog forget <uuid>[:<seq>] [--from S --to S]` | records the target in `meta.forgotten`; the writer deletes it from index.db; casts are never rewritten | 0 |
 | `cinelog index --once\|--rebuild [CAST…]` | one-shot discovery and backfill (only while the writer lock is free); `--rebuild` drops index.db first, meta.db is kept | 0; 1 some casts failed |
-| `cinelog status [--json]` | indexer lag per live session, backlog, legacy import progress, last error, server state | 0 |
+| `cinelog status [--json]` | indexer lag per live session, backlog, legacy import progress, last error, server state; a newer index.db/meta.db (after a rollback) is read and reported as the error `… read-only, not indexing` | 0 |
 | `cinelog compress --now\|--dry-run` | zstd-compresses finished non-legacy casts older than `retention.compress_after_days` | 0 |
+| `cinelog archive-legacy --to DIR [--dry-run]` | writes a zstd copy (the compressor's frame format) of every legacy cast the index knows to `DIR/<path below the logs dir>.zst` (tmp file, fsync, rename; 0600 files, 0700 dirs); originals are only read (`O_NOATIME`), never changed; a copy at the cast's current size is skipped; `DIR` inside the logs dir is refused; prints aggregate counts only | 0; 1 some casts failed; 2 error (no index, `DIR` refused) |
 | `cinelog import --report [--json]` | per legacy file: banners, log lines, aligned commands, mean confidence (aggregates only) | 0 |
 | `cinelog meta export\|import <FILE>` | meta.db as JSON Lines (`-` = stdout, `.zst` compressed) | 0 |
 

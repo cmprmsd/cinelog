@@ -2,7 +2,7 @@
 //! export/import behind the nightly backup and `cinelog meta export|import`.
 
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -15,13 +15,31 @@ use crate::schema::{self, Access, DbKind};
 
 pub(crate) struct SqliteMeta {
     conn: Connection,
+    /// Set when a newer cinelog wrote this meta.db (§10.3): it is read, every write fails.
+    newer: Option<(PathBuf, u32)>,
 }
 
 impl SqliteMeta {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            conn: schema::open(path, DbKind::Meta, Access::ReadWrite)?,
-        })
+        match schema::open(path, DbKind::Meta, Access::ReadWrite) {
+            Ok(conn) => Ok(Self { conn, newer: None }),
+            Err(IndexError::NewerSchema { found, .. }) => Ok(Self {
+                conn: schema::open(path, DbKind::Meta, Access::ReadOnly)?,
+                newer: Some((path.to_owned(), found)),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn writable(&self) -> Result<()> {
+        match &self.newer {
+            None => Ok(()),
+            Some((path, found)) => Err(IndexError::NewerSchema {
+                path: path.clone(),
+                found: *found,
+                supported: DbKind::Meta.version(),
+            }),
+        }
     }
 }
 
@@ -243,6 +261,7 @@ const KNOWN_TABLES: &[&str] = &["tags", "annotations", "forgotten", "settings"];
 
 impl MetaStore for SqliteMeta {
     fn forget(&mut self, target: &ForgetTarget, by: &str) -> Result<Forgotten> {
+        self.writable()?;
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let f = insert_forgotten(
             &tx,
@@ -270,6 +289,7 @@ impl MetaStore for SqliteMeta {
     }
 
     fn set_setting(&mut self, key: &str, value: Option<&str>) -> Result<()> {
+        self.writable()?;
         match value {
             Some(v) => self
                 .conn
@@ -286,6 +306,7 @@ impl MetaStore for SqliteMeta {
     }
 
     fn put_annotation(&mut self, a: &Annotation) -> Result<()> {
+        self.writable()?;
         if a.uuid.is_empty() || a.session_uuid.is_empty() {
             return Err(IndexError::Invalid("annotation without uuid or session uuid".into()));
         }
@@ -358,6 +379,7 @@ impl MetaStore for SqliteMeta {
     }
 
     fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo> {
+        self.writable()?;
         let name = name.trim();
         if name.is_empty() {
             return Err(IndexError::Invalid("empty tag name".into()));
@@ -415,6 +437,7 @@ impl MetaStore for SqliteMeta {
     }
 
     fn import_jsonl(&mut self, input: &mut dyn BufRead) -> Result<u64> {
+        self.writable()?;
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut n = 0u64;
         for (lineno, line) in input.lines().enumerate() {

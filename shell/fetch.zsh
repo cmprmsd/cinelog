@@ -4,7 +4,10 @@
 #
 #  1. Read VERSION and map `uname -m` to a release target.
 #  2. Expected sha256 comes from shell/checksums/v<VERSION>.sha256 in this repo (the trust
-#     anchor); when that file does not exist yet, the release's SHA256SUMS is used with a warning.
+#     anchor); when that file does not exist yet, the release's SHA256SUMS is used with a
+#     warning. A pinned checkout (detached HEAD, e.g. zmodule --tag) never receives that file,
+#     and the release's SHA256SUMS comes from the same place as the binary, so there it is only
+#     used with --trust-release-sums; otherwise the binary is built from the pinned source.
 #  3. Download to bin/cinelog.new, verify, run `--version`, then rename onto bin/cinelog.
 #     The old binary stays in place until the new one is verified.
 #  4. Fallback: `cargo build --release --locked` (then offline, then with the user's default
@@ -28,6 +31,8 @@ _clf_usage() {
   --force             download even if bin/cinelog is current
   --source            skip the download and build with cargo
   --no-cargo          never fall back to cargo
+  --trust-release-sums  in a pinned checkout without shell/checksums/v<VERSION>.sha256,
+                      accept the release's own SHA256SUMS
   --no-refresh        do not run 'cinelog install --refresh' now (the next run does)
   --background        detached, at most once a day, download only (non-root)
   --dir DIR           module directory (default: the parent of shell/)
@@ -178,6 +183,10 @@ _clf_expected_sum() {
     _clf_sum_src=repo
     return 0
   fi
+  if _clf_detached $dir && (( ! ${_clf_trust_release:-0} )); then
+    _clf_err "this module is pinned (detached HEAD, e.g. zmodule --tag) and has no shell/checksums/v$ver.sha256: the release's own SHA256SUMS comes from the same server as the binary, so it is not trusted on its own. Copy shell/checksums/v$ver.sha256 from the main branch into this checkout, or rerun with --trust-release-sums"
+    return 1
+  fi
   local tmp=${_clf_tmp:?}/SHA256SUMS
   if ! _clf_download $base/v$ver/SHA256SUMS $tmp 65536; then
     _clf_warn "no checksum for v$ver (repo file missing, release SHA256SUMS unreachable)"
@@ -186,7 +195,7 @@ _clf_expected_sum() {
   _clf_sum_for cinelog-$target < $tmp || { _clf_err "release SHA256SUMS has no entry for cinelog-$target"; return 1 }
   _clf_warn "shell/checksums/v$ver.sha256 not in the repo yet; verified against the release's SHA256SUMS"
   if _clf_detached $dir; then
-    _clf_warn "this module is pinned (detached HEAD, e.g. zmodule --tag): the checksum commit lands on main, so a pinned checkout never gets it and the release's SHA256SUMS stays the only check; track main to verify against the repo"
+    _clf_warn "this module is pinned (detached HEAD, e.g. zmodule --tag) and --trust-release-sums was given: the release's SHA256SUMS is the only check; copy shell/checksums/v$ver.sha256 from main or track main to verify against the repo"
   fi
   _clf_sum_src=release
 }
@@ -340,14 +349,14 @@ _clf_background() {
 
 _clf_main() {
   emulate -L zsh -o extended_glob
-  local -a o_help o_quiet o_force o_source o_nocargo o_norefresh o_bg o_nowait o_dir o_base o_arch
+  local -a o_help o_quiet o_force o_source o_nocargo o_norefresh o_bg o_nowait o_dir o_base o_arch o_trust
   zparseopts -D -E -F -- h=o_help -help=o_help q=o_quiet -quiet=o_quiet -force=o_force \
     -source=o_source -no-cargo=o_nocargo -no-refresh=o_norefresh -background=o_bg \
-    -bg-child=o_nowait -dir:=o_dir -base-url:=o_base -arch:=o_arch 2>/dev/null ||
+    -bg-child=o_nowait -dir:=o_dir -base-url:=o_base -arch:=o_arch -trust-release-sums=o_trust 2>/dev/null ||
     { _clf_usage >&2; return 2 }
   (( $# == 0 )) || { _clf_usage >&2; return 2 }
   (( $#o_help )) && { _clf_usage; return 0 }
-  local -i _clf_quiet=$#o_quiet
+  local -i _clf_quiet=$#o_quiet _clf_trust_release=$#o_trust
   # zparseopts keeps the '=' of GNU-style `--opt=value` in the value.
   local a
   for a in o_dir o_base o_arch; do
