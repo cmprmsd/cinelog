@@ -1,74 +1,86 @@
 # Cinelog
-Comprehensive logging of all terminal input and output for each session based on Asciinema and wild zsh + Python scripting.
 
-This tool is a strong modification of my former logging project https://github.com/cmprmsd/cLoggy with many features removed in order to focus on and extend the core features.
+Records every interactive zsh session exactly once, as an asciicast v3 file with a marker for
+every command (typed text, expansion, cwd, exit status). One static binary (`cinelog`) does the
+recording; a zim module (`cinelog.plugin.zsh`) starts it and emits the command markers.
 
-## Introduction
-
-Each terminal in the context of root will create a `.cast` file and a `.commands.log` file. 
-
-For each sudo user a directory will be created:
-![Logging directory](docs/file-structure.png)
-
-Each excecuted command will be logged and written to the commands.log file with the current timestamp of execution. All raw input and output will be streamed to the .cast file which contains escape sequences for every change in the terminal.
-
-## Search
-The main feature of this plugin is the log organization, search and web player.
-
-The search functionality can be used with `hist` e.g. `hist <term>` and hist `<terms with spaces>`.
-
-This will search the executed commands but not the output.
-It will output a dropdown selection menu that you can navigate with keyboard or mouse(wheel). 
-![Command search](docs/command-search.png)
-
-In order to search through both the executed commands and the terminal output you may specify `-a` as first argument.
-
-![Results for input and output](docs/input-output-search.png)
-
-You'll differentiate commands from output by the filename of each match.
-
-Once you press `enter` on a selection, the link to the `Cinelog Viewer` will be printed to the terminal.
-
-## Cinelog Viewer
-This feature is a simple webserver. Your selected cast will be viewed in this web player.
-
-I applied some magic to summon the ingestion of `chapter markers` to the video timeline for each executed command. That way, you can easily navigate between commands via `[` and `]`.
-
-![Cinelog Webplayer](docs/demo-webplayer.gif)
+Version 0.10 is the first release of the rewrite: recorder, plugin, `link`, `pause`/`resume`,
+`doctor` and `install`. Search (`cinelog search`) and indexing arrive in 0.11, the web UI in 0.12.
+The marker protocol and the shell/binary interface are specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Installation
 
-1. Download and install zsh zim framework: `curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh`
-2. Remove `compinit` from your .zshrc if needed
-3. Install asciinema `apt install asciinema python3-docopt`
-4. Edit .zimrc and add `zmodule cmprmsd/cinelog`
-5. Run `zimfw install` to download the plugin from GitHub
-6. Start a new terminal
-7. Verify installation with `tree logs` and verify if the `hist` command is available
-8. Check if the Python webserver is running on port 10000+uid
-9. For future updates `zimfw update` should suffice, if the settings don't introduce new variables
+1. Install zsh and the [zim framework](https://github.com/zimfw/zimfw).
+2. Add the module to `~/.zimrc`, with the download hook:
 
-## Extras
+   ```zsh
+   zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'
+   ```
 
-### Per Folder Logs
-By default for each cwd a history file will be created in `~/.zsh_history.d/`. Using the alias `here` the executed commands in this directory will be printed, which is helpful for less often used git repositories you don't know how you got working.
+3. Run `zimfw install`. `shell/fetch.zsh` downloads the release binary for your architecture
+   into `<module>/bin/cinelog` and verifies it against the checksum committed in
+   `shell/checksums/`. Without network access it builds the binary with `cargo` instead
+   (`cargo build --release --locked`).
+4. Optional, for the fastest start: make this the first line of `~/.zshrc`, above any instant
+   prompt:
 
-### Message of the day
-The terminal will by default output some information about the current networking stack, disk space and the log destination.
-![terminal banner](docs/motd.png)
+   ```zsh
+   [[ -r ${ZIM_HOME:-~/.zim}/modules/cinelog/shell/early.zsh ]] && source ${ZIM_HOME:-~/.zim}/modules/cinelog/shell/early.zsh
+   ```
 
-### Customization
-You can opt-out of several extra features by changing your config file in `.config/cinelog/cinelog-settings.conf`.
+5. Run `cinelog install` once (directories, config template, migration of the old settings),
+   open a new terminal and check it with `cinelog doctor`.
+
+`zimfw update` keeps the module and the binary in sync. Asciinema, Python and the old viewer
+port are no longer needed; stop the old `http_server.py` if it still runs (`doctor` warns).
+
+### Team (root) recording
+
+```zsh
+sudo ~/.zim/modules/cinelog/bin/cinelog install --team --system-zshrc
+```
+
+installs a root-owned copy of the binary and plugin and a guarded block in the system zshrc, so
+root shells (`sudo -s`, `sudo -i`, `su`, root logins) are recorded below `/root/logs/<user>/`.
+Always name the module's binary by its full path: under sudo's `secure_path` a bare `cinelog`
+is the installed (possibly older) team binary. Upgrades use `... install --team --upgrade`.
+Team recording is a convenience, not an audit control: pausing and leading-space commands stay
+allowed, and every pause or skip leaves a visible marker.
+
+## Usage
+
+| Command | |
+|---|---|
+| `cinelog link [--json]` | session uuid and cast path of the current shell |
+| `cinelog pause [--reason TEXT]`, `cinelog resume` | pause and resume the recording (a pause marker marks the gap); `resume` also continues a recording that stopped on a full disk |
+| `cinelog doctor` | checks the installation, the current shell and its terminal |
+| `cinelog install [--refresh]` | personal setup |
+
+Casts go to `~/logs/<YYYY-MM>/<host>_<time>_<id>.cast` (mode 0600). Commands that start with a
+space leave only a "hidden command" marker. Keystrokes are recorded except at password-like
+prompts (echo off, or a prompt ending in `password:`, `passphrase:`, `pin:`, `token:`).
+Configuration lives in `~/.config/cinelog/config.toml`; `cinelog install` writes a commented
+template. `touch ~/.config/cinelog/disable` switches recording off.
+
+## Behaviour notes
+
+- **tmux and terminal integration.** The recorder takes the place of the shell process. It
+  follows the shell's working directory, so `#{pane_current_path}` and "open new tab here"
+  keep working, and it mirrors the foreground command into its own command line, so tmux
+  automatic-rename shows `vim` or `sleep` rather than `cinelog`; `ps -o comm` still shows
+  `cinelog`. Set `record.mirror_cmdline = false` to turn the mirroring off.
+- **Multiplexers.** Each tmux, screen or zellij pane is recorded by its own recorder; the outer
+  recording pauses while a multiplexer client is in the foreground.
+- **Login shells.** The outer shell execs into the recorder while it reads `.zshrc`, and the
+  recorded inner shell is not a login shell, so `.zlogin` does not run. Move its content to
+  `.zshrc`.
+- **powerlevel10k instant prompt** above the module works, but sourcing `shell/early.zsh` at the
+  top of `.zshrc` stays the recommended setup.
+- **Failure never blocks a shell.** If recording cannot start (full or unwritable log directory,
+  broken config, missing binary) the shell starts unrecorded with one `cinelog: not recording`
+  warning and the reason in `~/.local/state/cinelog/rec.log`.
 
 ## Credits
-Thanks to 
-Marcin [ku1ik](https://github.com/ku1ik) for his awesome [asciinema suite](https://github.com/asciinema/)!
 
-## Changelog
-2025-08-05:
-- Add very rudimentary authentication and network access for shared access and history to one machine (***no userlevel separation as this is intented for shared working as root***)
-- Add authentication middleware
-- Dynamic ports (for sudo users)
-- Fix sanitization in parser
-- open cinelog viewer in browser depending on being in a SSH session
-- Add docopt dependency for `hist` command
+Thanks to Marcin [ku1ik](https://github.com/ku1ik) for the [asciinema suite](https://github.com/asciinema/),
+whose cast format and player cinelog builds on.

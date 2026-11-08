@@ -1,0 +1,219 @@
+name: release
+
+# On a tag v<VERSION>: build static musl binaries for x86_64 and aarch64 (each smoke-tested on
+# its native runner), publish them with SHA256SUMS, then commit shell/checksums/v<VERSION>.sha256
+# to main. That committed file is the trust anchor shell/fetch.zsh verifies against (plan §10.2).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  ZIG_VERSION: 0.15.2 # 0.16 fails to link musl (plan §3.2)
+  CARGO_ZIGBUILD_VERSION: 0.24.1
+  TARGETS: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+jobs:
+  meta:
+    name: tag, VERSION and Cargo.toml agree
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          ver=${GITHUB_REF_NAME#v}
+          file_ver=$(tr -d '[:space:]' < VERSION)
+          cargo_ver=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "tag=$ver VERSION=$file_ver Cargo.toml=$cargo_ver"
+          if ! printf '%s\n' "$ver" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'; then
+            echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1
+          fi
+          if [ "$ver" != "$file_ver" ] || [ "$ver" != "$cargo_ver" ]; then
+            echo "::error::tag ($ver), VERSION ($file_ver) and workspace version ($cargo_ver) differ"; exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          case $ver in *-*) echo prerelease=true ;; *) echo prerelease=false ;; esac >> "$GITHUB_OUTPUT"
+
+  web:
+    name: web/dist
+    needs: meta
+    runs-on: ubuntu-24.04
+    outputs:
+      present: ${{ steps.probe.outputs.present }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: probe
+        run: |
+          if [ -f web/package.json ]; then echo present=true >> "$GITHUB_OUTPUT"
+          else echo present=false >> "$GITHUB_OUTPUT"; echo "::notice::no web/ yet; the binary embeds the stub page"; fi
+      - if: steps.probe.outputs.present == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - if: steps.probe.outputs.present == 'true'
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web check
+          pnpm -C web build
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: [meta, web]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm } # native: smoke test runs
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - if: needs.web.outputs.present == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      # No build cache in release jobs: every release binary is built from a clean state.
+      - run: cargo zigbuild --release --locked --target "$TARGET" -p cinelog
+      - name: Smoke test on the native runner
+        run: |
+          bin="target/$TARGET/release/cinelog"
+          file "$bin"
+          if readelf -l "$bin" | grep -q INTERP; then echo "::error::$bin is not static"; exit 1; fi
+          test "$("$bin" --version)" = "cinelog $VERSION"
+          test "$("$bin" rec --protocol)" = 1
+          out=$("$bin" rec --check </dev/null); echo "rec --check without a tty: $out"
+          test "$out" = "skip not-a-tty"
+          out=$(script -qec "$bin rec --check" /dev/null | tr -d '\r'); echo "rec --check in a pty: $out"
+          case $out in start\ *|recorded\ *|skip\ disabled|skip\ hidepid) ;; *) echo "::error::unexpected: $out"; exit 1 ;; esac
+      - name: Stage asset
+        run: |
+          mkdir -p dist
+          cp "target/$TARGET/release/cinelog" "dist/cinelog-$TARGET"
+          (cd dist && sha256sum "cinelog-$TARGET" | tee "cinelog-$TARGET.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: GitHub release
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS (cross-checked against the build jobs)
+        working-directory: dist
+        run: |
+          read -ra targets <<< "$TARGETS"
+          for t in "${targets[@]}"; do sha256sum -c "cinelog-$t.sha256"; done
+          sha256sum "${targets[@]/#/cinelog-}" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release (never replaces published assets)
+        working-directory: dist
+        run: |
+          read -ra targets <<< "$TARGETS"
+          assets=("${targets[@]/#/cinelog-}" SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx SHA256SUMS; then
+              gh release download "$TAG" -p SHA256SUMS -O published.sums
+              if cmp -s published.sums SHA256SUMS; then echo "already published"; exit 0; fi
+              echo "::error::release $TAG already has different assets; delete the release to rebuild"; exit 1
+            fi
+            gh release upload "$TAG" "${assets[@]}"
+          else
+            flags=(--verify-tag --generate-notes --title "cinelog $VERSION")
+            [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+            gh release create "$TAG" "${assets[@]}" "${flags[@]}"
+          fi
+
+  checksums:
+    name: commit shell/checksums/v${{ needs.meta.outputs.version }}.sha256 to main
+    needs: [meta, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Verify the published assets
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel" && cd "$RUNNER_TEMP/rel"
+          gh release download "$TAG" -p SHA256SUMS -p 'cinelog-*-linux-musl'
+          sha256sum -c SHA256SUMS
+          read -ra targets <<< "$TARGETS"
+          for t in "${targets[@]}"; do grep -Eq "^[0-9a-f]{64}  cinelog-$t\$" SHA256SUMS || { echo "::error::no entry for $t"; exit 1; }; done
+      - name: Commit (append-only; a published checksum is never rewritten)
+        run: |
+          file="shell/checksums/v$VERSION.sha256"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch --depth=1 origin main
+            git reset -q --hard origin/main
+            if [ -e "$file" ]; then
+              if cmp -s "$file" "$RUNNER_TEMP/rel/SHA256SUMS"; then echo "$file is already on main"; exit 0; fi
+              echo "::error::$file on main differs from the release's SHA256SUMS"; exit 1
+            fi
+            mkdir -p shell/checksums
+            cp "$RUNNER_TEMP/rel/SHA256SUMS" "$file"
+            git add "$file"
+            git commit -q -m "checksums: v$VERSION" -m "Release assets of $TAG, written by the release workflow."
+            if git push origin refs/heads/main:refs/heads/main; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not push $file to main"; exit 1

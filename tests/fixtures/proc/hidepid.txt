@@ -1,0 +1,12 @@
+# /proc mounted with hidepid=invisible: other users' processes do not exist for us.
+# alice's shell was started by root's sshd-session, which is invisible (ppid 590 missing).
+hidepid invisible
+self 610
+user 1000 alice
+
+proc pid=610 ppid=590 comm=zsh tty=pts/2
+proc pid=611 ppid=610 comm=sleep tty=pts/2 pgrp=611
+
+expect check tty=pts:2 start=610 euid=1000 => start personal hidepid
+expect check tty=pts:2 start=610 euid=1000 fallback=skip => skip hidepid
+expect holder pts=2 start=610 => none

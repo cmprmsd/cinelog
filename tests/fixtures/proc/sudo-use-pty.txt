@@ -1,0 +1,40 @@
+# alice's recorded shell (pts/5, recorder 300) runs `sudo -s` with use_pty: sudo holds the
+# master of pts/6, root's zsh execs into the nested TEAM recorder 420, whose shell runs on
+# pts/8. The outer recorder must see the nested recorder in its foreground job.
+self 430
+user 0 root
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=100 comm=kitty exe=/usr/bin/kitty ptmx=30:4
+proc pid=300 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/4 ptmx=6:5 start=30000
+proc pid=310 ppid=300 comm=zsh tty=pts/5 pgrp=310 tpgid=400 loginuid=1000
+proc pid=400 ppid=310 ruid=1000 euid=0 comm=sudo exe=/usr/bin/sudo args=sudo|-s tty=pts/5 pgrp=400 sid=310 ptmx=4:6 loginuid=1000
+proc pid=410 ppid=400 uid=0 comm=sudo args=sudo|-s pgrp=410 sid=410 tty=pts/6 loginuid=1000
+proc pid=420 ppid=410 uid=0 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/6 pgrp=420 sid=420 ptmx=5:8 start=42000 loginuid=1000
+proc pid=430 ppid=420 uid=0 comm=zsh tty=pts/8 pgrp=430 sid=430 loginuid=1000 deny=fd
+registry pts=5 pid=300 uuid=01930a3e-0000-7000-8000-000000000005
+registry pts=8 pid=420 uuid=01930a3e-0000-7000-8000-000000000008 scope=team
+
+# root's shell before the nested recorder exists (rec --check from root's zsh on pts/6)
+expect check tty=pts:6 start=410 euid=0 => start team sudo
+expect holder pts=6 start=410 => pid=400 via=ancestor class=privrelay
+# the nested recorder's own shell (root): recorded, via root's registry
+expect check tty=pts:8 start=430 euid=0 => recorded 01930a3e-0000-7000-8000-000000000008
+# the outer shell itself
+expect check tty=pts:5 start=310 euid=1000 => recorded 01930a3e-0000-7000-8000-000000000005
+expect valid pts=5 => true
+expect valid pts=6 => false
+
+# outer recorder: the fg job is sudo, the nested recorder is a descendant
+expect foreground fg=400 shell=310 => recorder pid=420 start=42000
+expect nested fg=400 shell=310 pid=420 start=42000 => true
+expect nested fg=400 shell=310 pid=420 start=41999 => false
+expect nested fg=310 shell=310 pid=420 start=42000 => false
+expect nested fg=400 shell=310 pid=300 start=30000 => false
+expect nested fg=400 shell=310 pid=999 start=1 => false
+expect relay fg=400 => true
+expect relay fg=310 => false
+
+expect principal euid=0 start=420 claimed=alice => user=alice sudo_user=alice attribution=ancestor login_via=- claimed=alice
+expect principal euid=1000 start=300 => user=alice sudo_user=- attribution=none login_via=- claimed=-

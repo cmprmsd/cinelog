@@ -1,0 +1,69 @@
+# sudo_user attribution (§5.6): first ancestor with real uid != 0, then loginuid, then root
+# with login_via. $SUDO_USER is only the claimed user.
+user 0 root
+user 1000 alice
+user 1001 bob
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=50 uid=0 comm=sshd deny=fd
+
+# sudo su -: rec <- zsh(root) <- su(ruid 0) <- sudo(ruid alice) <- zsh(alice)
+proc pid=100 comm=sshd-session ptmx=7:1 loginuid=1000
+proc pid=110 ppid=100 comm=zsh tty=pts/1 loginuid=1000
+proc pid=120 ppid=110 ruid=1000 euid=0 comm=sudo args=sudo|su|- loginuid=1000
+proc pid=130 ppid=120 uid=0 comm=su args=su|- loginuid=1000
+proc pid=140 ppid=130 uid=0 comm=zsh loginuid=1000
+proc pid=150 ppid=140 uid=0 comm=cinelog loginuid=1000
+expect principal euid=0 start=150 claimed=bob => user=alice sudo_user=alice attribution=ancestor login_via=- claimed=bob
+
+# doas from bob
+proc pid=200 ppid=1 comm=zsh uid=1001 loginuid=1001
+proc pid=210 ppid=200 ruid=1001 euid=0 comm=doas loginuid=1001
+proc pid=220 ppid=210 uid=0 comm=cinelog loginuid=1001
+expect principal euid=0 start=220 => user=bob sudo_user=bob attribution=ancestor
+
+# direct root ssh: everything is root, loginuid 0
+proc pid=300 ppid=50 uid=0 comm=sshd-session loginuid=0
+proc pid=310 ppid=300 uid=0 comm=zsh loginuid=0
+proc pid=320 ppid=310 uid=0 comm=cinelog loginuid=0
+expect principal euid=0 start=320 claimed= => user=root sudo_user=root attribution=none login_via=sshd-session claimed=-
+
+# root process daemonized (reparented to pid 1) but with alice's audit loginuid
+proc pid=400 ppid=1 uid=0 comm=cinelog loginuid=1000
+expect principal euid=0 start=400 => user=alice attribution=loginuid login_via=-
+
+# run0 / machinectl shell: spawned by systemd, no loginuid
+proc pid=450 ppid=1 uid=0 comm=zsh
+proc pid=460 ppid=450 uid=0 comm=cinelog
+expect principal euid=0 start=460 => user=root attribution=none login_via=systemd
+
+# console login
+proc pid=470 ppid=1 uid=0 comm=login loginuid=0
+proc pid=480 ppid=470 uid=0 comm=cinelog loginuid=0
+expect principal euid=0 start=480 => user=root attribution=none login_via=login
+
+# shared root tmux server started by alice (loginuid 1000); bob attaches through sudo and
+# creates a pane: the pane belongs to the creating client
+proc pid=500 ppid=1 uid=0 comm="tmux: server" loginuid=1000
+proc pid=510 ppid=500 uid=0 comm=zsh loginuid=1000
+proc pid=520 ppid=510 uid=0 comm=cinelog loginuid=1000
+proc pid=600 ppid=1 comm=zsh uid=1001 loginuid=1001
+proc pid=610 ppid=600 ruid=1001 euid=0 comm=sudo loginuid=1001
+proc pid=620 ppid=610 uid=0 comm="tmux: client" loginuid=1001
+expect principal euid=0 start=520 client=620 => user=bob sudo_user=bob attribution=ancestor
+# creating client unknown or unattributable: the server's loginuid, marked inherited
+expect principal euid=0 start=520 => user=alice attribution=inherited login_via=-
+expect principal euid=0 start=520 client=300 => user=alice attribution=inherited
+# a root tmux server without any loginuid
+proc pid=700 ppid=1 uid=0 comm="tmux: server"
+proc pid=710 ppid=700 uid=0 comm=cinelog
+expect principal euid=0 start=710 => user=root attribution=none login_via=unknown
+
+# unknown uid: the number is the name
+proc pid=800 ppid=1 comm=zsh uid=1234
+proc pid=810 ppid=800 ruid=1234 euid=0 comm=sudo
+proc pid=820 ppid=810 uid=0 comm=cinelog
+expect principal euid=0 start=820 => user=1234 attribution=ancestor
+
+# PERSONAL: the euid's own name, for `sudo -u bob` too
+expect principal euid=1001 start=220 claimed=alice => user=bob sudo_user=- attribution=none login_via=- claimed=alice

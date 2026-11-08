@@ -1,4 +1,12 @@
+mod check;
 mod cli;
+mod ctx;
+mod doctor;
+mod install;
+mod link;
+mod module;
+mod pause;
+mod session;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +21,8 @@ fn main() -> ExitCode {
             println!("{}", cinelog_proto::PROTOCOL_VERSION);
             ExitCode::SUCCESS
         }
-        Command::Rec(args) if !args.check => {
+        Command::Rec(args) if args.check => check::run(),
+        Command::Rec(args) => {
             let mut it = args.command.into_iter();
             let shell = it.next().map(PathBuf::from).unwrap_or_else(default_shell);
             cinelog_rec::run(cinelog_rec::RecRequest {
@@ -21,13 +30,14 @@ fn main() -> ExitCode {
                 args: it.collect(),
             })
         }
+        Command::Link(args) => link::run(&args),
+        Command::Pause(args) => pause::run(pause::Action::Pause, args.reason),
+        Command::Resume => pause::run(pause::Action::Resume, None),
+        Command::Doctor(args) => doctor::run(args.json),
+        Command::Install(args) => install::run(&args),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "cinelog", &mut std::io::stdout());
             ExitCode::SUCCESS
-        }
-        other => {
-            eprintln!("cinelog: {other:?} is not available in this build yet");
-            ExitCode::from(2)
         }
     }
 }

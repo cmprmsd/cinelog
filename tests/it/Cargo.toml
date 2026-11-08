@@ -1,6 +1,6 @@
 [package]
 name = "cinelog-it"
-description = "cinelog integration tests (real zsh, tmux, PTY); see tests/it/README in this crate"
+description = "cinelog integration tests (real zsh, tmux, PTY); see tests/it/README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,26 +8,21 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The harness talks to cinelog only through the built binary, the plugin, the casts and the
+# registry files, exactly as a user would. It deliberately does not link the cinelog crates.
+
 [features]
 # Scenarios that need root or a real sudo prompt also require CINELOG_IT_ROOT=1 at runtime.
 root = []
 
 [dependencies]
-cinelog-proto.workspace = true
-cinelog-cast.workspace = true
 nix.workspace = true
 libc.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
 regex.workspace = true
 tempfile.workspace = true
 getrandom.workspace = true
 anyhow.workspace = true
-
-[dev-dependencies]
-assert_cmd.workspace = true
-predicates.workspace = true
 
 [lints]
 workspace = true

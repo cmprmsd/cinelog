@@ -2,11 +2,13 @@
 //!
 //! Frozen entry points used by the CLI: [`RecRequest`], [`run`], [`exec_unrecorded`].
 //! [`run`] never returns: it either records until the shell exits and then exits the
-//! process with the shell's status, or, on any failure before `forkpty`, execs the shell
+//! process with the shell's status, or, on any failure before the fork, execs the shell
 //! unrecorded through [`exec_unrecorded`].
 //!
-//! Until the recorder work package lands its implementation, [`run`] takes the documented
-//! fallback path (unrecorded shell with `CINELOG_FAILED` set), which keeps every shell usable.
+//! Layout: `setup` (preflight and start decision), `recorder` (the three threads),
+//! `control` (recording decisions under one lock), `pause`, `input`, `screen`, `seq`,
+//! `clockwatch`, `writer` (cast parts, rotation, degraded mode), `events` (bounded drop
+//! policy), `reg` (registry entry), `mirror` (cmdline), `tmux` (pane context), `pty`.
 
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -14,6 +16,24 @@ use std::path::PathBuf;
 
 use cinelog_core::logging::RecLog;
 use cinelog_proto::env;
+
+mod clockwatch;
+mod control;
+mod events;
+mod input;
+mod mirror;
+mod pause;
+mod pty;
+mod recorder;
+mod reg;
+mod screen;
+mod seq;
+mod setup;
+mod tmux;
+mod writer;
+
+#[cfg(test)]
+mod tests;
 
 /// What `cinelog rec -- <shell> [args…]` was asked to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +46,20 @@ pub struct RecRequest {
 
 /// Records `req` (or falls back to an unrecorded shell). Never returns.
 pub fn run(req: RecRequest) -> ! {
-    exec_unrecorded(&req, "recorder-unavailable", None)
+    let (launch, cast) = match setup::prepare(&req) {
+        Ok(prepared) => prepared,
+        Err(f) => exec_unrecorded(&req, &f.reason, f.log.as_ref()),
+    };
+    // Detection identifies recorders by comm, whatever the binary is called.
+    let _ = nix::sys::prctl::set_name(c"cinelog");
+    let log = launch.log.clone();
+    match recorder::record(launch) {
+        Ok(status) => std::process::exit(status),
+        Err(recorder::SpawnError(reason)) => {
+            let _ = std::fs::remove_file(&cast);
+            exec_unrecorded(&req, &reason, log.as_ref())
+        }
+    }
 }
 
 /// Execs the requested shell unrecorded (§5.1 "never fails the shell").
@@ -51,7 +84,7 @@ pub fn exec_unrecorded(req: &RecRequest, reason: &str, log: Option<&RecLog>) -> 
         for k in stale {
             std::env::remove_var(k);
         }
-        std::env::set_var(env::FAILED, reason);
+        std::env::set_var(env::FAILED, reason.replace('\n', " "));
         std::env::set_var(env::FAILED_TTY, tty);
         std::env::set_var(env::FAILED_PID, std::process::id().to_string());
     }

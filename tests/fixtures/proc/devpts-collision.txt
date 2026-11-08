@@ -1,0 +1,56 @@
+# devpts index collision: a container with its own devpts instance (device 2 here; the
+# host's is 1) also has a pts/3, held by processes that are not our ancestors. Masters of
+# another instance never count, whoever holds them.
+self 210
+user 0 root
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=100 comm=wezterm-gui exe=/usr/bin/wezterm-gui ptmx=11:3
+proc pid=210 ppid=100 comm=zsh tty=pts/3
+proc pid=900 uid=0 comm=conmon ptmx=6:3@2
+proc pid=910 ppid=900 comm=containerd-shim ptmx=8:3@2
+expect check tty=pts:3 start=210 euid=1000 => start personal terminal
+expect holder pts=3 start=210 => pid=100 via=ancestor
+
+# reparented shell (its terminal forked it and exited): full scan, only our instance counts
+proc pid=300 comm=zsh tty=pts/3
+expect holder pts=3 start=300 => pid=100 via=scan
+# also as root, although the foreign holder is root-owned
+expect holder euid=0 pts=3 start=300 => pid=100 via=scan
+expect check tty=pts:3 start=300 euid=0 => start team terminal
+
+# non-root ssh login: sshd-session is not dumpable (fds EACCES) and holds pts/0 invisibly.
+# Rootless podman's conmon (same uid) holds a container console that is also index 0. The
+# denied ancestor wins over the foreign same-uid holder.
+proc pid=1200 uid=0 comm=sshd-session ptmx=7:0 deny=fd,exe
+proc pid=1210 ppid=1200 comm=sshd-session deny=fd,exe
+proc pid=1220 ppid=1210 comm=zsh tty=pts/0
+proc pid=1300 comm=conmon ptmx=5:0@2
+expect holder pts=0 start=1220 => pid=1210 via=commfallback
+expect check tty=pts:0 start=1220 euid=1000 => start personal sshd
+# the same foreign holder being a cinelog with a registry entry is no `recorded`
+proc pid=1310 comm=cinelog exe=/usr/local/bin/cinelog ptmx=5:0@2
+registry pts=0 pid=1310 uuid=foreign-0
+expect check tty=pts:0 start=1220 euid=1000 => start personal sshd
+
+# a holder whose instance cannot be told is used only when nothing better exists: after a
+# denied ancestor, but before giving up
+proc pid=1400 uid=0 comm=sshd-session ptmx=7:6 deny=fd,exe
+proc pid=1410 ppid=1400 comm=zsh tty=pts/6
+proc pid=1420 comm=foot ptmx=5:6@-
+expect holder pts=6 start=1410 => pid=1400 via=commfallback
+proc pid=1430 comm=zsh tty=pts/6
+expect holder pts=6 start=1430 => pid=1420 via=scan
+# a slave of unknown instance: masters are not filtered (uid, then pid decides)
+proc pid=1500 uid=0 comm=conmon ptmx=6:9@2
+proc pid=1510 comm=wezterm-gui ptmx=6:9
+proc pid=1520 comm=zsh tty=pts/9 devpts=-
+expect holder pts=9 start=1520 => pid=1510 via=scan
+expect holder euid=0 pts=9 start=1520 => pid=1500 via=scan
+
+# an ancestor holding only a foreign master with our index is passed over
+proc pid=1600 uid=1000 comm=conmon ptmx=5:4@2
+proc pid=1610 ppid=1600 comm=zsh tty=pts/4
+proc pid=1620 comm=kitty ptmx=9:4
+expect holder pts=4 start=1610 => pid=1620 via=scan

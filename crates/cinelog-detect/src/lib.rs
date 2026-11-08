@@ -10,6 +10,18 @@
 //!   (`ProcDetector::new(proc: P, registry: R)`).
 //! - `pub fn tty_of_fd(fd: RawFd) -> TtyIdentity` (pts index from `st_rdev`, majors 136–143).
 
+mod classify;
+mod detector;
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixture;
+mod procfs;
+mod tty;
+
+pub use classify::{RECORDER_COMM, classify_holder};
+pub use detector::{NoRegistry, ProcDetector};
+pub use procfs::{RealProcFs, parse_fdinfo_tty_index, parse_hidepid, parse_loginuid, parse_stat, parse_status_uids};
+pub use tty::{foreground_pgrp, pts_index_of_rdev, tty_of_fd};
+
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -87,6 +99,14 @@ pub trait ProcFs {
     fn fds(&self, pid: Pid) -> io::Result<Vec<FdEntry>>;
     /// `tty-index:` line of `/proc/<pid>/fdinfo/<fd>`, `None` if absent.
     fn fdinfo_tty_index(&self, pid: Pid, fd: u32) -> io::Result<Option<u32>>;
+    /// Device number of the devpts instance the pty behind `/proc/<pid>/fd/<fd>` belongs to:
+    /// `st_dev` of a slave or of a master opened through `<devpts>/ptmx`, or of the devpts
+    /// mounted at `pts` beside a `/dev/ptmx` node in the holder's root. `None` when the fd is
+    /// no pty or the instance cannot be told (masters are then not filtered by instance).
+    fn devpts_dev(&self, pid: Pid, fd: u32) -> io::Result<Option<u64>> {
+        let _ = (pid, fd);
+        Ok(None)
+    }
     /// `/proc/sys/kernel/random/boot_id`.
     fn boot_id(&self) -> io::Result<String>;
     fn hidepid(&self) -> io::Result<Hidepid>;
@@ -273,9 +293,10 @@ pub enum Foreground {
     Shell,
     /// Some other job, no multiplexer or recorder found in it.
     Job { pgrp: Pid, leader_comm: String },
-    /// A pgrp member or descendant has a comm from `pause_on_multiplexer`.
+    /// A pgrp member or descendant has a comm from `pause_on_multiplexer`; takes priority
+    /// over `Recorder`, so a multiplexer below a nested recorder still pauses.
     Multiplexer { pid: Pid, comm: String, pgrp: Pid },
-    /// A descendant in the fg pgrp is a cinelog recorder.
+    /// A descendant in the fg pgrp has comm `cinelog` and no multiplexer is in the job.
     Recorder { pid: Pid, starttime: u64, pgrp: Pid },
 }
 
@@ -296,8 +317,10 @@ pub struct Principal {
     pub sudo_user: Option<String>,
     /// `$SUDO_USER` as found; never used for paths.
     pub claimed_user: Option<String>,
+    /// TEAM: how `sudo_user` was found. PERSONAL: always `None` (the euid is the user).
     pub attribution: Attribution,
-    /// comm of the nearest `sshd-session`, `login`, `systemd`, or `unknown`, when attribution is `None`.
+    /// TEAM with attribution `None`: comm of the nearest `sshd-session`, `login`, `systemd`,
+    /// or `unknown`.
     pub login_via: Option<String>,
 }
 

@@ -1,0 +1,6 @@
+# The mount table cannot be read: treated like hidepid, the configuration decides.
+hidepid unreadable
+self 610
+proc pid=610 ppid=590 comm=zsh tty=pts/2
+expect check tty=pts:2 start=610 euid=1000 => start personal hidepid
+expect check tty=pts:2 start=610 euid=1000 fallback=skip => skip hidepid

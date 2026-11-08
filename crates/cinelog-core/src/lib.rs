@@ -4,9 +4,12 @@
 pub mod clock;
 pub mod config;
 pub mod ids;
+pub mod location;
 pub mod logging;
 pub mod paths;
 pub mod registry;
+pub mod server;
+pub mod tty;
 
 pub use cinelog_proto::{Nonce, Scope};
 pub use config::Config;

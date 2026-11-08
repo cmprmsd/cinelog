@@ -1,0 +1,251 @@
+#compdef cinelog
+
+autoload -U is-at-least
+
+_cinelog() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_cinelog_commands" \
+"*::: :->cinelog" \
+&& ret=0
+    case $state in
+    (cinelog)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-command-$line[1]:"
+        case $line[1] in
+            (rec)
+_arguments "${_arguments_options[@]}" : \
+'(--protocol)--check[Print the start decision (\`start <scope> <reason>\`, \`recorded <uuid>\`, \`skip <reason>\`) and exit]' \
+'--protocol[Print the supported marker protocol version and exit]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::command -- Shell and its arguments (after `--`):_default' \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+'--json[Print JSON (\`{"uuid","cast","url"}\`) instead of text]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(pause)
+_arguments "${_arguments_options[@]}" : \
+'--reason=[Free-text reason stored in the pause marker]:REASON:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(resume)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+'--module=[With --team\: the cinelog module checkout to install the plugin from (default\: the one the running binary lives in)]:DIR:_files' \
+'--binary=[With --team\: the binary to install (default\: the module'\''s bin/cinelog, else the running binary if it is part of the module)]:PATH:_files' \
+'--prefix=[Write every system path below this directory instead of \`/\` (tests)]:DIR:_files' \
+'--team[System-wide TEAM install (root)\: binary, root-owned plugin copy, dirs]' \
+'--system-zshrc[With --team\: add the guarded block to the system zshrc]' \
+'--upgrade[With --team\: replace an existing team binary after verifying its checksum]' \
+'--allow-unverified[With --team\: install a binary that \`shell/checksums/\` does not list (local builds)]' \
+'(--team --uninstall)--refresh[Only refresh the ~/.local/bin symlink and restart the user unit if active]' \
+'--uninstall[Remove units, symlinks and the system zshrc block (casts are kept)]' \
+'--no-migrate[Skip reading the old cinelog-settings.conf]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':shell:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-help-command-$line[1]:"
+        case $line[1] in
+            (rec)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(pause)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resume)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_cinelog_commands] )) ||
+_cinelog_commands() {
+    local commands; commands=(
+'rec:Record a shell in a new PTY (normally exec'\''d by the zsh plugin)' \
+'link:Print the session id and cast path of the current recording' \
+'pause:Pause recording of the current session (leaves a visible pause marker)' \
+'resume:Resume a paused or degraded recording' \
+'doctor:Diagnose the installation and the current shell' \
+'install:Install or refresh cinelog for this user, or system-wide with --team' \
+'completions:Print a shell completion script' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__completions_commands] )) ||
+_cinelog__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog completions commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__doctor_commands] )) ||
+_cinelog__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog doctor commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help_commands] )) ||
+_cinelog__subcmd__help_commands() {
+    local commands; commands=(
+'rec:Record a shell in a new PTY (normally exec'\''d by the zsh plugin)' \
+'link:Print the session id and cast path of the current recording' \
+'pause:Pause recording of the current session (leaves a visible pause marker)' \
+'resume:Resume a paused or degraded recording' \
+'doctor:Diagnose the installation and the current shell' \
+'install:Install or refresh cinelog for this user, or system-wide with --team' \
+'completions:Print a shell completion script' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__completions_commands] )) ||
+_cinelog__subcmd__help__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help completions commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__doctor_commands] )) ||
+_cinelog__subcmd__help__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help doctor commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__help_commands] )) ||
+_cinelog__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__install_commands] )) ||
+_cinelog__subcmd__help__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help install commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__link_commands] )) ||
+_cinelog__subcmd__help__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help link commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__pause_commands] )) ||
+_cinelog__subcmd__help__subcmd__pause_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help pause commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__rec_commands] )) ||
+_cinelog__subcmd__help__subcmd__rec_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help rec commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__resume_commands] )) ||
+_cinelog__subcmd__help__subcmd__resume_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help resume commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__install_commands] )) ||
+_cinelog__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog install commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__link_commands] )) ||
+_cinelog__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog link commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__pause_commands] )) ||
+_cinelog__subcmd__pause_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog pause commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__rec_commands] )) ||
+_cinelog__subcmd__rec_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog rec commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__resume_commands] )) ||
+_cinelog__subcmd__resume_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog resume commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_cinelog" ]; then
+    _cinelog "$@"
+else
+    compdef _cinelog cinelog
+fi

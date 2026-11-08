@@ -1,0 +1,24 @@
+# terminator (a python3 script: exe is python3, comm is terminator) holds the masters of
+# two tabs, pts/3 and pts/4. Classification must come from comm, not exe.
+self 200
+user 0 root
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd exe=/usr/lib/systemd/systemd args=/sbin/init
+proc pid=90 comm=systemd exe=/usr/lib/systemd/systemd args=/usr/lib/systemd/systemd|--user
+proc pid=100 ppid=90 comm=terminator exe=/usr/bin/python3.13 args=/usr/bin/python3|/usr/bin/terminator ptmx=12:3,14:4 fds=0:/dev/null,1:/dev/null
+proc pid=200 ppid=100 comm=zsh exe=/usr/bin/zsh tty=pts/3 tpgid=200 fds=0:/dev/pts/3,1:/dev/pts/3,2:/dev/pts/3
+proc pid=201 ppid=100 comm=zsh exe=/usr/bin/zsh tty=pts/4 tpgid=201 fds=0:/dev/pts/4,1:/dev/pts/4,2:/dev/pts/4
+
+expect check tty=pts:3 start=200 euid=1000 => start personal terminal
+expect check tty=pts:4 start=201 euid=1000 => start personal terminal
+expect holder pts=3 start=200 => pid=100 via=ancestor class=other uid=1000 comm=terminator
+expect holder pts=4 start=201 => pid=100 via=ancestor class=other
+# a pts nobody holds, hidepid off: start, reason unknown
+expect check tty=pts:9 start=200 euid=1000 => start personal unknown
+expect holder pts=9 start=200 => none
+
+# non-pts ttys
+expect check tty=vt:/dev/tty1 start=200 euid=1000 => start personal vt
+expect check tty=vt:/dev/ttyS0 start=200 euid=0 => start team vt
+expect check tty=none start=200 euid=1000 => skip not-a-tty

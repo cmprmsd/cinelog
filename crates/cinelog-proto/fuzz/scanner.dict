@@ -1,0 +1,11 @@
+# Usage: cargo +nightly fuzz run scanner -- -dict=scanner.dict
+prefix="\x1b]7777;cinelog;"
+header_session="\x1b]7777;cinelog;1;5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a;b;"
+header_recorder="\x1b]7777;cinelog;1;-;j;"
+nonce="5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+st="\x1b\\"
+bel="\x07"
+can="\x18"
+sub="\x1a"
+skip_b64="eyJ2IjoxLCJrIjoic2tpcCIsInNoIjo1fQ"
+skip_json="{\"v\":1,\"k\":\"skip\",\"sh\":5}"

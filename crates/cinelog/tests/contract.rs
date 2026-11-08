@@ -21,9 +21,19 @@ fn protocol_line() {
     cinelog().args(["rec", "--protocol"]).assert().success().stdout("1\n");
 }
 
+/// The documented fallback, provoked with the kill switch in a throwaway environment (a
+/// real recording must never reach the developer's own `~/logs`).
 #[test]
 fn fallback_sets_failed_env_and_strips_other_cinelog_vars() {
-    cinelog()
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = cinelog();
+    cmd.env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("CINELOG_DISABLE", "1")
         .env("CINELOG_NONCE_FD", "9")
         .args([
             "rec",
@@ -34,7 +44,8 @@ fn fallback_sets_failed_env_and_strips_other_cinelog_vars() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::starts_with("recorder-unavailable|unset|pid-ok"));
+        .stdout(predicates::str::starts_with("disabled|unset|pid-ok"));
+    assert!(!dir.path().join("home/logs").exists(), "nothing was recorded");
 }
 
 #[test]

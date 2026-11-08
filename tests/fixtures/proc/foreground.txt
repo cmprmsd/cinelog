@@ -1,0 +1,69 @@
+# Foreground classification for the outer recorder's pause logic (§5.3). The recorded
+# shell is 200 (pgrp 200).
+user 1000 alice
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=100 comm=cinelog ptmx=5:2
+proc pid=200 ppid=100 comm=zsh tty=pts/2
+
+# `sh -c 'sleep 1; tmux a'` before and after tmux started (same pgrp, comm changes later)
+proc pid=300 ppid=200 pgrp=300 sid=200 comm=sh args=sh|-c|sleep|1;|tmux|a
+proc pid=301 ppid=300 pgrp=300 sid=200 comm=sleep
+expect foreground fg=300 shell=200 => job leader=sh
+proc pid=310 ppid=200 pgrp=310 sid=200 comm=sh
+proc pid=311 ppid=310 pgrp=310 sid=200 comm="tmux: client"
+expect foreground fg=310 shell=200 => multiplexer pid=311 comm="tmux: client"
+# screen and zellij from the default list, a custom list replaces it
+proc pid=320 ppid=200 pgrp=320 sid=200 comm=screen
+expect foreground fg=320 shell=200 => multiplexer pid=320
+expect foreground fg=320 shell=200 mux=zellij => job leader=screen
+proc pid=330 ppid=200 pgrp=330 sid=200 comm=zellij
+expect foreground fg=330 shell=200 => multiplexer pid=330
+# a multiplexer deeper in the job, in another pgrp (a child that called setpgid)
+proc pid=340 ppid=200 pgrp=340 sid=200 comm=make
+proc pid=341 ppid=340 pgrp=341 sid=200 comm=bash
+proc pid=342 ppid=341 pgrp=341 sid=200 comm="tmux: client"
+expect foreground fg=340 shell=200 => multiplexer pid=342
+
+# `exec tmux`: the shell's pid and pgrp now belong to the tmux client
+proc pid=250 ppid=100 comm="tmux: client" tty=pts/3
+expect foreground fg=250 shell=250 => multiplexer pid=250 comm="tmux: client"
+# fg pgrp back at the shell (also after a crash without nested-end): resume
+expect foreground fg=200 shell=200 => shell
+# the leader's comm is checked even when the fg pgrp is the shell's
+expect foreground fg=200 shell=200 mux=zsh => multiplexer pid=200
+
+# ordinary jobs; the leader exited, a member remains
+proc pid=360 ppid=200 pgrp=360 sid=200 comm=vim
+expect foreground fg=360 shell=200 => job leader=vim
+proc pid=371 ppid=1 pgrp=370 sid=200 comm=less
+expect foreground fg=370 shell=200 => job leader=less
+expect foreground fg=999 shell=200 => job leader=
+
+# a multiplexer below a nested recorder (`sudo -i`, then `tmux attach` in the root shell):
+# the multiplexer wins although the recorder is nearer, so the outer recorder pauses
+# whatever record.nested says and even without a corroborated claim
+proc pid=380 ppid=200 pgrp=380 sid=200 ruid=1000 euid=0 comm=sudo
+proc pid=381 ppid=380 pgrp=381 sid=381 uid=0 comm=cinelog start=38100
+proc pid=382 ppid=381 pgrp=382 sid=382 uid=0 comm=zsh
+proc pid=383 ppid=382 pgrp=383 sid=382 uid=0 comm="tmux: client"
+expect foreground fg=380 shell=200 => multiplexer pid=383 comm="tmux: client"
+# the same nested recorder without a multiplexer below it
+proc pid=385 ppid=200 pgrp=385 sid=200 ruid=1000 euid=0 comm=sudo
+proc pid=386 ppid=385 pgrp=386 sid=386 uid=0 comm=cinelog start=38600
+proc pid=387 ppid=386 pgrp=387 sid=386 uid=0 comm=zsh
+proc pid=388 ppid=387 pgrp=388 sid=386 uid=0 comm=vim
+expect foreground fg=385 shell=200 => recorder pid=386 start=38600
+# a non-recorder `cinelog` (e.g. `cinelog search | less`) next to a multiplexer
+proc pid=395 ppid=200 pgrp=395 sid=200 comm=cinelog
+proc pid=396 ppid=200 pgrp=395 sid=200 comm=screen
+expect foreground fg=395 shell=200 => multiplexer pid=396
+expect nested fg=380 shell=200 pid=381 start=38100 => true
+expect nested fg=360 shell=200 pid=381 start=38100 => false
+# a cinelog claim that is not a recorder comm
+expect nested fg=380 shell=200 pid=380 start=38000 => false
+
+# relays (input rule d), default list and custom list
+proc pid=390 ppid=200 pgrp=390 sid=200 comm=ssh args=ssh|host
+expect relay fg=390 => true
+expect relay fg=390 relays=mosh-client => false
+expect relay fg=360 => false

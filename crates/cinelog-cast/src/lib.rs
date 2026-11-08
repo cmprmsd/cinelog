@@ -1,20 +1,39 @@
 //! asciicast I/O for cinelog: v3 writer and reader, v2 reader, tolerant line parser,
 //! transparent zstd (`.cast.zst`, multi-frame) and rotation parts.
 //!
-//! This file holds the frozen M1 contract (types and traits). The cast work package adds,
-//! at the crate root:
-//!
-//! - `pub struct V3Writer<W: std::io::Write>` implementing [`CastWriter`] (`V3Writer::new(w)`),
-//!   and `pub fn create(path: &Path) -> Result<V3Writer<BufWriter<File>>, CastError>` which
-//!   creates the file with `O_EXCL`, mode 0600.
-//! - `pub fn open(path: &Path) -> Result<Box<dyn CastReader + Send>, CastError>`: v2 or v3,
-//!   plain or zstd (detected by magic, not by extension).
-//! - `pub fn parse_event_line(line: &[u8]) -> Option<RawLine<'_>>` (the tolerant parser).
-//! - `pub struct Utf8Accumulator` with `push(&mut self, bytes: &[u8], out: &mut String) -> u64`
-//!   (returns the number of invalid bytes replaced by U+FFFD, counted as `lossy_bytes`) and
-//!   `finish(&mut self, out: &mut String) -> u64`.
-//! - `pub struct ClockMap` (offset → epoch µs, piecewise linear between `clock` markers).
-//! - zstd frame index support and part stitching (`…_partN.cast`).
+//! - Writing: [`V3Writer`] implements [`CastWriter`]; [`create`] opens a new cast file
+//!   (`O_EXCL`, mode 0600). [`Utf8Accumulator`] turns PTY chunks into event text.
+//! - Reading: [`open`] / [`open_at`] return a tolerant [`CastReader`] for v2 or v3, plain or
+//!   zstd (detected by magic). [`parse_event_line`] is the allocation-free line splitter.
+//! - Time: [`ClockMap`] maps cast offsets to wall time from `session`/`clock` markers.
+//! - zstd: [`FrameEncoder`], [`scan_frames`] and [`compress_file`] (independent frames cut
+//!   at newlines, so a checkpoint offset can be reached by seeking to its frame).
+//! - Rotation: [`PartName`], [`find_parts`], [`PartsReader`] and [`RotationPolicy`].
+
+mod clock;
+mod header;
+mod json;
+mod line;
+mod parts;
+mod reader;
+mod utf8;
+mod writer;
+mod zst;
+
+pub use clock::{ClockAnchor, ClockMap};
+pub use header::parse_header;
+pub use json::decode_json_string;
+pub use line::parse_event_line;
+pub use parts::{
+    PartName, PartsReader, RotateTrigger, RotationPolicy, existing_part, find_parts, part_file_name, part_path,
+};
+pub use reader::{MAX_HEADER, MAX_LINE, Reader, ResumePoint, open, open_at, read_header};
+pub use utf8::Utf8Accumulator;
+pub use writer::{SyncFn, V3Writer, WRITE_BUFFER, create};
+pub use zst::{
+    CompressOptions, Compressed, DEFAULT_FRAME_BYTES, DEFAULT_LEVEL, FrameEncoder, ZSTD_MAGIC, ZstFrame, compress_file,
+    is_zstd_magic, scan_frames, tmp_path, verify_zst,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;

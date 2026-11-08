@@ -1,0 +1,19 @@
+# One sshd-session (connection multiplexing) holds several masters; the session shells
+# are its children. A root-owned privileged monitor holds nothing we need.
+self 610
+user 0 root
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=500 uid=0 comm=sshd exe=/usr/bin/sshd args="sshd: /usr/bin/sshd -D [listener] 0 of 10-100 startups" deny=fd,exe
+proc pid=590 ppid=500 uid=0 comm=sshd-session args="sshd-session: alice [priv]" deny=fd,exe
+proc pid=600 ppid=590 comm=sshd-session exe=/usr/lib/ssh/sshd-session args="sshd-session: alice@pts/1,pts/2,pts/7" ptmx=7:1,9:2,11:7
+proc pid=610 ppid=600 comm=zsh tty=pts/2 tpgid=610 loginuid=1000
+proc pid=620 ppid=600 comm=zsh tty=pts/7 tpgid=620 loginuid=1000
+
+expect check tty=pts:2 start=610 euid=1000 => start personal sshd
+expect check tty=pts:7 start=620 euid=1000 => start personal sshd
+expect holder pts=7 start=620 => pid=600 via=ancestor class=remote comm=sshd-session
+# a pts held by nobody visible below a denied sshd-session: comm fallback
+expect check tty=pts:8 start=610 euid=1000 => start personal sshd
+expect holder pts=8 start=610 => pid=590 via=commfallback class=remote uid=0

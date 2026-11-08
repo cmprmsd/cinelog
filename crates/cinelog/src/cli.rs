@@ -79,6 +79,17 @@ pub struct InstallArgs {
     /// With --team: replace an existing team binary after verifying its checksum
     #[arg(long, requires = "team")]
     pub upgrade: bool,
+    /// With --team: install a binary that `shell/checksums/` does not list (local builds)
+    #[arg(long, requires = "team")]
+    pub allow_unverified: bool,
+    /// With --team: the cinelog module checkout to install the plugin from (default: the one
+    /// the running binary lives in)
+    #[arg(long, requires = "team", value_name = "DIR")]
+    pub module: Option<PathBuf>,
+    /// With --team: the binary to install (default: the module's bin/cinelog, else the
+    /// running binary if it is part of the module)
+    #[arg(long, requires = "team", value_name = "PATH")]
+    pub binary: Option<PathBuf>,
     /// Write every system path below this directory instead of `/` (tests)
     #[arg(long, alias = "root", value_name = "DIR")]
     pub prefix: Option<PathBuf>,
@@ -110,5 +121,9 @@ mod tests {
         assert_eq!(r.command, ["/bin/zsh", "-i"]);
         assert!(Cli::try_parse_from(["cinelog", "install", "--system-zshrc"]).is_err());
         assert!(Cli::try_parse_from(["cinelog", "install", "--team", "--root", "/tmp/x"]).is_ok());
+        assert!(Cli::try_parse_from(["cinelog", "install", "--allow-unverified"]).is_err());
+        assert!(Cli::try_parse_from(["cinelog", "install", "--binary", "/x"]).is_err());
+        assert!(Cli::try_parse_from(["cinelog", "install", "--team", "--binary", "/x"]).is_ok());
+        assert!(Cli::try_parse_from(["cinelog", "install", "--refresh", "--team"]).is_err());
     }
 }

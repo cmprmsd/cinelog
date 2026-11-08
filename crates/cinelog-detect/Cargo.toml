@@ -16,7 +16,12 @@ nix.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# Test support: `fixture` materializes process-tree descriptions into fake /proc trees.
+fixtures = []
+
 [dev-dependencies]
+cinelog-detect = { workspace = true, features = ["fixtures"] }
 tempfile.workspace = true
 
 [lints]

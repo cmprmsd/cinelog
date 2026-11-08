@@ -65,6 +65,15 @@ of JSON costs about 1.2 ms.
 - Markers with nonce `-` are always accepted by the scanner; the recorder then decides
   (§4.5).
 - The sum of these counters is the session's `bad_markers`.
+- A sequence is released as soon as it can no longer be accepted, without waiting for a
+  terminator: bad `<ver>`/`<nonce>`/`<enc>` syntax, or a C0/DEL byte other than BEL, ESC,
+  CAN or SUB in the payload, is `malformed` at that byte; an ESC in the payload that is not
+  followed by `\` is `malformed` and is rescanned (it may start the next marker); a
+  version other than `1` is `unsupported_version` at the `;` after `<ver>`; a nonce
+  mismatch is `bad_nonce` at the `;` after `<nonce>`. Output stays byte-identical in all
+  cases. An unterminated marker at end of stream is released uncounted.
+- Invalid UTF-8 inside a decoded payload (zsh hands over command lines as raw bytes) is
+  replaced by U+FFFD before the JSON is parsed; it does not make the marker undecodable.
 
 ### 1.3 Other sequences the plugin emits
 
@@ -117,8 +126,8 @@ Fields marked *req* MUST be present; all others MAY be omitted and default to em
 each `cmd`, so the first command of every shell is `1`; `typed` (str, *req*): preexec `$1`;
 `expanded` (str): preexec `$3`; `cwd` (str); `user` (str); `euid` (u32); `host` (str);
 `pane` (str, `$TMUX_PANE`); `t` (f64); `trunc` (bool, present only when true): `typed` or
-`expanded` was cut at 16384 bytes (`MAX_COMMAND_TEXT`). Text is the exact bytes zsh
-provides (no `echo` interpretation, no exclusions).
+`expanded` was cut (§3). Text is the exact bytes zsh provides (no `echo` interpretation, no
+exclusions).
 
 **`skip`** — `sh` (u32, *req*); `t` (f64). Carries no command text. It produces a visible
 "hidden command" marker in the timeline (user decision: every skip is visible).
@@ -162,6 +171,15 @@ on the wire:  ESC]7777;cinelog;1;3f0c…(32 hex)…;b;eyJ2IjoxLCJrIjoiY21kIiwic2
 - JSON is built in pure zsh: `\` → `\\`, `"` → `\"`, every byte 0x00–0x1f and 0x7f →
   `\u00XX`. Budget: p95 under 2 ms for commands of 200 bytes or less, under 5 ms for any
   command.
+- **Size bound:** the encoded payload of every marker MUST be at most 65536 bytes, or the
+  recorder drops it as `oversized`. Emitters cap `typed` and `expanded` at 16384 bytes each
+  (`MAX_COMMAND_TEXT`), cut on UTF-8 boundaries. Escaping can still grow them (a C0 byte
+  becomes 6 bytes), so if the encoded payload would exceed the bound they cut both further
+  by escaped length until it fits, and set `trunc:true` whenever text was cut. Any rule
+  with that result is valid; `Cmd::fit_to_wire` in `cinelog-proto` is the reference (a
+  field whose escaped form fits in half of the remaining budget is kept whole, the other
+  gets the rest), the plugin halves both caps until the escaped texts fit. Lengths are
+  counted in bytes (`setopt nomultibyte`).
 
 ---
 
@@ -172,7 +190,8 @@ on the wire:  ESC]7777;cinelog;1;3f0c…(32 hex)…;b;eyJ2IjoxLCJrIjoiY21kIiwic2
 1. The scanner (§1.2) finds the marker at an exact byte offset of the output stream.
 2. If accepted, the marker is **stripped** from the terminal output (default,
    `record.strip_markers = true`; with `false` the bytes stay in both terminal output and
-   `o` events) and becomes an `m` event at exactly that offset: `o` data before it is
+   `o` events, with the nonce field of the copy in the `o` event scrubbed as in §5.1) and
+   becomes an `m` event at exactly that offset: `o` data before it is
    flushed as its own `o` event first.
 3. The payload is decoded (`enc`) and parsed (`WireMessage::from_json`). Undecodable
    payloads and payloads with a version other than 1 are dropped and counted in
@@ -193,6 +212,9 @@ A `done` is matched to the most recent open `cmd` with the same `(sh, n)` and ca
 Markers are still parsed (so the recorder can resume and link), but nothing except `r`
 (resize) events, `pause`/`resume`/`nested`/`clock` markers and the `x` exit event is written.
 No `o` and no `i` events are recorded while paused; passthrough to the terminal continues.
+A session-nonce marker (`hello`/`cmd`/`done`/`skip`) that arrives during a multiplexer or
+nested pause makes the recorder check the foreground at once, so the `done` after
+`tmux attach` is recorded right after the `resume` instead of up to 250 ms later.
 
 ### 4.4 Pause triggers (process-based)
 
@@ -231,6 +253,16 @@ sequence is simply ignored by the terminal.
 allowed in both scopes: TEAM recording is a convenience, not an audit control, and every
 pause leaves a visible `pause` marker.
 
+The recorder confirms through its registry entry (§6.5): `user-pause` leads to
+`state:"paused"` with `state_reason` `user` or `user: <reason>`; `user-resume` leads to
+`state:"live"`; a resume from `degraded` leads to `state:"live"` with `part` incremented.
+`cinelog pause`/`resume` poll the entry (same `pid`) for up to 1.5 s and print
+`paused <uuid>` / `resumed <uuid>`, or a note on stderr when no confirmation arrived. If the
+session is already paused for another reason, or degraded, the marker is still sent and the
+CLI prints that state instead of claiming a confirmation; `resume` of a multiplexer or
+nested pause says that it ends by itself. An overlong `--reason` (one that would exceed the
+§1 payload bound) is an error and nothing is sent.
+
 ---
 
 ## 5. The cast
@@ -263,6 +295,13 @@ The data string of every cinelog `m` event is compact JSON with `"cl":1` and `"k
 first two keys. **The nonce never appears in a cast, export or DB.** `m` events without a
 `cl` key are foreign labels and are ignored by cinelog readers.
 
+Every `o`, `i` and `m` data string passes through `scrub_nonce` before it is written,
+whatever `record.strip_markers` says: a nonce the shell prints (say, `cat` of the registry)
+appears as `<cinelog-nonce>`. A nonce split across master reads is caught too: a trailing
+run of at most 31 lowercase hex characters of `o` text is held back and written with its
+own timestamp at the next non-`o` event or once it is 1 s old. Not caught: a nonce whose
+halves arrive more than 1 s apart, or one interleaved with other bytes.
+
 | `k` | Written | Fields |
 |---|---|---|
 | `session` | t=0 of every cast and every part | `uuid`, `part` (1…), `continues` (file name of the previous part), `start_epoch_us`, `boottime_us`, `tz` (IANA), `tz_offset_s`, `scope`, `host`, `user`, `uid`, `euid`, `sudo_user`, `claimed_user`, `attribution` (`ancestor`/`loginuid`/`inherited`/`none`/`legacy`), `login_via`, `tty`, `holder_comm`, `holder_pid`, `rec_pid`, `rec_starttime`, `boot_id`, `shell_pid`, `tmux` (`socket`, `server_pid`, `server_start`, `session_id`, `pane`), `parent_uuid`, `input` (bool), `rec_version`, `protocol` |
@@ -278,7 +317,8 @@ first two keys. **The nonce never appears in a cast, export or DB.** `m` events 
 | `ctx` | pane recorders: at start and on change (checked every 30 s) | `session_name`, `window_index`, `window_name`, `pane_index`, `pane_id` |
 | `gap` | after the writer queue overflowed | `dropped_bytes`, `from_t`, `to_t` (cast seconds) |
 | `rotate` | last event of a part | `part` (the ending part), `next` (file name), `reason` (`size`/`age`/`resume`) |
-| `error` | writer I/O error | `error` (`enospc`/`eio`/`edquot`/`write`), `detail`, `degraded` (bool) |
+| `error` | writer I/O error; in the failing part if it still fits, else right after the `session` marker of the continuation part | `error` (`enospc`/`eio`/`edquot`/`write`), `detail`, `degraded` (bool) |
+| `stats` | last part only, right before `x` | `bad_markers` (scanner counters + undecodable payloads + uncorroborated `nested-start`), `dropped_bytes` (queue overflow), `lossy_bytes` (invalid UTF-8), `parts` (parts opened) |
 
 Wall time of any event: piecewise-linear mapping of its offset between `session` and
 `clock` markers (intervals use `CLOCK_BOOTTIME`, so suspend time counts).
@@ -299,10 +339,14 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 | `cinelog rec --check` | one line, §6.3 | 0 (also for `skip`) |
 | `cinelog rec -- <shell> [args…]` | records; on any init failure execs `<shell>` unrecorded (§6.4) | the shell's status |
 | `cinelog link [--json]` | text: `session <uuid>`, `cast <path>` and, once a server exists, `url <url>`, one per line; JSON: `{"uuid","cast","url","state"}` | 1 if not in a recorded session |
-| `cinelog pause [--reason TEXT]` / `cinelog resume` | writes a `user-pause`/`user-resume` marker to `/dev/tty` with the registry nonce (§6.5); `resume` also leaves degraded mode by opening the next part | 1 if not in a recorded session |
+| `cinelog pause [--reason TEXT]` / `cinelog resume` | writes a `user-pause`/`user-resume` marker to `/dev/tty` with the registry nonce (§6.5); `resume` also leaves degraded mode by opening the next part; prints `paused <uuid>`/`resumed <uuid>` once confirmed (§4.6) | 0 once the marker is written; 1 if not in a recorded session, `/dev/tty` is not writable or the reason is too long |
 | `cinelog doctor [--json]` | diagnostics | 0 ok, 1 problems found |
-| `cinelog install [--team [--system-zshrc] [--upgrade]] [--prefix DIR] [--refresh] [--uninstall] [--no-migrate]` | install; `--prefix` (alias `--root`) writes every system path below DIR | 0 ok |
+| `cinelog install [--team [--system-zshrc] [--upgrade] [--binary PATH] [--module DIR] [--allow-unverified]] [--prefix DIR] [--refresh] [--uninstall] [--no-migrate]` | install; `--prefix` (alias `--root`) writes every system path below DIR. TEAM: the binary is `--binary`, else `<module>/bin/cinelog`, else the running binary if it lies inside the module; it is verified against `shell/checksums/v<module VERSION>.sha256` unless `--allow-unverified`; `--upgrade` from the installed team binary itself is refused. `--module` defaults to the checkout found up to 4 levels above the running binary. `--refresh` is idempotent | 0 ok |
 | `cinelog completions zsh` | completion script (committed as `shell/completions/_cinelog`) | 0 |
+
+Upgrade hints name the full path of the user's binary (`sudo ~/.zim/modules/cinelog/bin/cinelog
+install --team --upgrade`): under sudo's `secure_path` a bare `cinelog` is usually the old team
+binary.
 
 ### 6.2 Recorder → inner shell
 
@@ -349,7 +393,7 @@ skip <reason>
 | `not-a-tty` | fd 0 is not a terminal |
 | `disabled` | kill switch present |
 | `hidepid` | holder invisible, `record.hidepid_fallback = "skip"` |
-| `error` | internal error (details in `rec.log`) |
+| `error` | internal error or unreadable config (details in `rec.log`, written only when a recorder would start; a tty that is already recorded still answers `recorded <uuid>`) |
 
 `CINELOG_REC_PID`/`CINELOG_TTY` from the environment are a cache only, honoured only when
 they match `$PPID`/`$TTY` and the registry validates. At EUID 0 every inherited
@@ -358,7 +402,8 @@ they match `$PPID`/`$TTY` and the registry validates. At EUID 0 every inherited
 
 ### 6.4 Fallback (never fail the shell)
 
-On any error before `forkpty` (unwritable or full log dir, bad config, registry dir, …) the
+On any error before `forkpty` (unwritable log dir, a log dir with less than 64 KiB free
+space or no free inodes (`statvfs`), bad config, registry dir, …) the
 recorder appends the reason to `rec.log`, removes every `CINELOG_*` variable, sets
 
 | Variable | Value |
@@ -381,11 +426,14 @@ this tty" (exec-loop guard), prints one warning and unsets the variables.
 - Content: compact JSON (no whitespace) with keys in this order: `format` (1), `pid`,
   `starttime`, `boot_id`, `uuid`, `nonce`, `scope`, `cast`, `pts`, `host_tty`, `shell_pid`,
   `parent_uuid` (optional), `state` (`live`/`paused`/`degraded`), `state_reason`
-  (optional), `part`, `version`. The plugin MAY extract `"nonce":"<hex>"`, `"uuid":"…"` and
-  `"state":"…"` by pattern matching.
-- Written atomically (temp file + rename) at start and on every state change; removed on
-  exit. Shells detect changes from the mtime alone (`zstat`, no fork) and print one
-  warning when `state` becomes `degraded`.
+  (optional), `part`, `version`, `opts` (optional: the exact `CINELOG_OPTS` value, §6.6,
+  for shells that attach through the registry and never saw the variable). The plugin MAY
+  extract `"nonce":"<hex>"`, `"uuid":"…"`, `"cast":"…"`, `"state":"…"`,
+  `"state_reason":"…"` and `"opts":"…"` by pattern matching.
+- Written atomically (temp file + rename, so every write gets a new inode) at start and on
+  every state change (pause, resume, degrade, rotation); removed on exit. Shells detect
+  changes from `inode:mtime:size` of one `zstat -L` (no fork; mtime alone has 1 s
+  resolution) and print one warning when `state` becomes `degraded`.
 - Valid only if `pid` runs with that `starttime` and `boot_id` matches; same-uid readers
   also check that `pid` holds the master of that pts.
 - `cinelog pause/resume/link` and subshells (`recorded <uuid>`) find their entry through

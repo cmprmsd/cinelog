@@ -1,0 +1,38 @@
+# Own-recorder verification: comm cinelog, exe equal to our own exe (` (deleted)` allowed
+# after an upgrade), and a registry entry matching pid, starttime and boot_id.
+self 701
+selfexe /usr/local/bin/cinelog
+boot 9d9d9d9d-0000-4000-8000-000000000001
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=100 comm=ghostty exe=/usr/bin/ghostty ptmx=3:1,4:2,5:3,6:4,7:10
+# upgraded binary: exe reads "(deleted)"
+proc pid=700 ppid=100 comm=cinelog exe="/usr/local/bin/cinelog (deleted)" tty=pts/1 ptmx=5:11 start=7000
+proc pid=701 ppid=700 comm=zsh tty=pts/11
+registry pts=11 pid=700 uuid=01930a3e-0000-7000-8000-000000000011
+# registry entry with a stale starttime (pid reused)
+proc pid=710 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/2 ptmx=5:12 start=7100
+proc pid=711 ppid=710 comm=zsh tty=pts/12
+registry pts=12 pid=710 start=1234 uuid=01930a3e-0000-7000-8000-000000000012
+# registry entry from before a reboot
+proc pid=720 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/3 ptmx=5:13 start=7200
+proc pid=721 ppid=720 comm=zsh tty=pts/13
+registry pts=13 pid=720 boot=11111111-0000-4000-8000-000000000000 uuid=01930a3e-0000-7000-8000-000000000013
+# forged comm: a python program renamed itself to cinelog
+proc pid=730 ppid=100 comm=cinelog exe=/usr/bin/python3.13 tty=pts/4 ptmx=5:14 start=7300
+proc pid=731 ppid=730 comm=zsh tty=pts/14
+registry pts=14 pid=730 uuid=01930a3e-0000-7000-8000-000000000014
+# no registry entry at all
+proc pid=740 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/10 ptmx=5:15 start=7400
+proc pid=741 ppid=740 comm=zsh tty=pts/15
+
+expect check tty=pts:11 start=701 euid=1000 => recorded 01930a3e-0000-7000-8000-000000000011
+expect holder pts=11 start=701 => pid=700 class=own-same via=ancestor
+expect check tty=pts:12 start=711 euid=1000 => start personal unknown
+expect valid pts=12 => false
+expect check tty=pts:13 start=721 euid=1000 => start personal unknown
+expect valid pts=13 => false
+expect check tty=pts:14 start=731 euid=1000 => start personal unknown
+expect holder pts=14 start=731 => pid=730 class=other
+expect check tty=pts:15 start=741 euid=1000 => start personal unknown

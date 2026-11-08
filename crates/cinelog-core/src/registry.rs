@@ -42,6 +42,16 @@ impl TtyKey {
         (!name.is_empty() && !name.contains("..")).then(|| Self::Tty(name.replace('/', "-")))
     }
 
+    /// Inverse of [`TtyKey::file_name`]; temp files and foreign names give `None`.
+    pub fn from_file_name(name: &str) -> Option<Self> {
+        let stem = name.strip_suffix(".json")?;
+        if let Some(n) = stem.strip_prefix("pts-") {
+            return n.parse().ok().map(Self::Pts);
+        }
+        let tty = stem.strip_prefix("tty-")?;
+        (!tty.is_empty() && !tty.contains(['/', '.'])).then(|| Self::Tty(tty.to_owned()))
+    }
+
     pub fn file_name(&self) -> String {
         match self {
             Self::Pts(n) => format!("pts-{n}.json"),
@@ -115,6 +125,10 @@ pub struct RegistryEntry {
     pub part: u32,
     #[serde(default)]
     pub version: String,
+    /// The `CINELOG_OPTS` value the shell was started with, for shells that attach through
+    /// the registry instead of inheriting the environment (PROTOCOL §6.5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub opts: String,
 }
 
 fn format_version() -> u32 {
@@ -131,10 +145,37 @@ pub enum RegistryError {
     Insecure(PathBuf),
 }
 
+/// One file of [`Registry::entries`]: its key and its entry or why it could not be read.
+pub type KeyedEntry = (TtyKey, Result<RegistryEntry, RegistryError>);
+
 /// Liveness probe used to validate entries: returns the starttime of a running pid.
 pub trait ProcessProbe {
     fn starttime(&self, pid: u32) -> Option<u64>;
     fn boot_id(&self) -> Option<String>;
+}
+
+/// [`ProcessProbe`] backed by `/proc`. Only world-readable files are used (`stat`,
+/// `boot_id`), so it also works for the team server without extra capabilities.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemProbe;
+
+/// Field 22 (`starttime`) of a `/proc/<pid>/stat` line.
+pub fn starttime_from_stat(stat: &str) -> Option<u64> {
+    // Fields restart after the last ')' because comm may contain spaces and parentheses.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_ascii_whitespace().nth(19)?.parse().ok()
+}
+
+impl ProcessProbe for SystemProbe {
+    fn starttime(&self, pid: u32) -> Option<u64> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        starttime_from_stat(&stat)
+    }
+
+    fn boot_id(&self) -> Option<String> {
+        let id = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        Some(id.trim().to_owned())
+    }
 }
 
 impl RegistryEntry {
@@ -221,6 +262,36 @@ impl Registry {
             .map_err(|source| RegistryError::Malformed { path, source })
     }
 
+    /// All readable entries with their keys, sorted by key file name. Unreadable,
+    /// insecure or malformed files are returned as errors so `doctor` can report them.
+    pub fn entries(&self) -> Result<Vec<KeyedEntry>, RegistryError> {
+        let rd = match fs::read_dir(&self.dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(RegistryError::Io {
+                    path: self.dir.clone(),
+                    source,
+                });
+            }
+        };
+        let mut out: Vec<_> = rd
+            .filter_map(Result::ok)
+            .filter_map(|de| TtyKey::from_file_name(de.file_name().to_str()?))
+            .map(|key| {
+                let entry = self.read(&key).and_then(|e| {
+                    e.ok_or_else(|| RegistryError::Io {
+                        path: self.path_for(&key),
+                        source: std::io::ErrorKind::NotFound.into(),
+                    })
+                });
+                (key, entry)
+            })
+            .collect();
+        out.sort_by_key(|(k, _)| k.file_name());
+        Ok(out)
+    }
+
     /// Removes the entry if it still belongs to `pid` (a newer recorder may own the key).
     pub fn remove_if_owner(&self, key: &TtyKey, pid: u32) -> Result<(), RegistryError> {
         match self.read(key) {
@@ -266,6 +337,7 @@ mod tests {
             state_reason: None,
             part: 1,
             version: crate::VERSION.into(),
+            opts: String::new(),
         }
     }
 
@@ -298,12 +370,71 @@ mod tests {
     }
 
     #[test]
+    fn opts_are_stored_only_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        let path = reg.write(&TtyKey::Pts(3), &entry()).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("\"opts\""));
+        let mut e = entry();
+        e.opts = "motd=0,title=1".into();
+        let path = reg.write(&TtyKey::Pts(3), &e).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains(r#""opts":"motd=0,title=1""#)
+        );
+        assert_eq!(reg.read(&TtyKey::Pts(3)).unwrap(), Some(e));
+    }
+
+    #[test]
     fn insecure_mode_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path());
         let path = reg.write(&TtyKey::Pts(1), &entry()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(reg.read(&TtyKey::Pts(1)), Err(RegistryError::Insecure(_))));
+    }
+
+    #[test]
+    fn file_names_roundtrip() {
+        for key in [
+            TtyKey::Pts(12),
+            TtyKey::Tty("tty1".into()),
+            TtyKey::Tty("ttyUSB0".into()),
+        ] {
+            assert_eq!(TtyKey::from_file_name(&key.file_name()), Some(key));
+        }
+        assert_eq!(TtyKey::from_file_name(".pts-1.json.42.tmp"), None);
+        assert_eq!(TtyKey::from_file_name("server.json"), None);
+        assert_eq!(TtyKey::from_file_name("tty-..json"), None);
+    }
+
+    #[test]
+    fn entries_lists_valid_and_broken_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        reg.write(&TtyKey::Pts(2), &entry()).unwrap();
+        fs::write(dir.path().join("pts-5.json"), b"{").unwrap();
+        fs::set_permissions(dir.path().join("pts-5.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(dir.path().join("serve.lock"), b"").unwrap();
+        let all = reg.entries().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, TtyKey::Pts(2));
+        assert!(all[0].1.is_ok());
+        assert!(matches!(all[1].1, Err(RegistryError::Malformed { .. })));
+        assert!(Registry::new(dir.path().join("missing")).entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn system_probe_sees_this_process() {
+        let me = std::process::id();
+        let st = SystemProbe.starttime(me).expect("own starttime");
+        assert!(st > 0);
+        assert_eq!(SystemProbe.boot_id().map(|b| b.len()), Some(36));
+        assert_eq!(
+            starttime_from_stat("1 (x) y) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 77 0 0"),
+            Some(77)
+        );
     }
 
     #[test]

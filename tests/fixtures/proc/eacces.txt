@@ -1,0 +1,36 @@
+# Root-owned masters seen without privileges, and the reverse.
+self 230
+user 0 root
+user 1000 alice
+
+proc pid=1 ppid=0 uid=0 comm=systemd
+proc pid=100 comm=foot exe=/usr/bin/foot ptmx=9:1
+
+# (a) alice's recorder on pts/2; `su` without a PTY: root's zsh shares pts/2.
+#     Root sees a cinelog of another uid holding the master: nested-uid.
+proc pid=200 ppid=100 comm=cinelog exe=/home/alice/.zim/modules/cinelog/bin/cinelog tty=pts/1 ptmx=5:2 start=20000
+proc pid=210 ppid=200 comm=zsh tty=pts/2
+proc pid=220 ppid=210 ruid=1000 euid=0 comm=su tty=pts/2 deny=fd,fdinfo
+proc pid=230 ppid=220 uid=0 comm=zsh tty=pts/2
+expect check tty=pts:2 start=230 euid=0 => start team nested-uid
+expect holder pts=2 start=230 => pid=200 class=own-other via=ancestor uid=1000
+
+# (b) root's TEAM recorder (fds and exe unreadable to alice) on pts/3; root runs `su alice`
+#     without a PTY: alice's zsh shares pts/3. Nothing is visible; the nearest denied
+#     ancestor with a known comm (su) classifies.
+proc pid=300 ppid=100 uid=0 comm=cinelog tty=pts/1 ptmx=5:3 deny=fd,fdinfo,exe start=30000
+proc pid=310 ppid=300 uid=0 comm=zsh tty=pts/3 deny=fd
+proc pid=320 ppid=310 uid=0 comm=su tty=pts/3 deny=fd,exe
+proc pid=330 ppid=320 comm=zsh tty=pts/3
+expect check tty=pts:3 start=330 euid=1000 => start personal su
+expect holder euid=1000 pts=3 start=330 => pid=320 via=commfallback class=privrelay uid=0
+
+# (c) the same root recorder with alice's shell directly below it (no su in between)
+proc pid=340 ppid=300 comm=zsh tty=pts/3
+expect check tty=pts:3 start=340 euid=1000 => start personal nested-uid
+expect holder euid=1000 pts=3 start=340 => pid=300 via=commfallback class=own-other uid=0
+
+# (d) a denied ancestor without a known comm is not guessed at
+proc pid=400 ppid=1 uid=0 comm=weird-term ptmx=3:4 deny=fd
+proc pid=410 ppid=400 comm=zsh tty=pts/4
+expect check tty=pts:4 start=410 euid=1000 => start personal unknown

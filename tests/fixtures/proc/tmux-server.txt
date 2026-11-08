@@ -1,0 +1,28 @@
+# A recorded shell (pts/2, held by its cinelog recorder) runs a tmux client; the tmux
+# server holds the pane masters pts/5 and pts/6. Each pane gets its own cast.
+self 500
+user 1000 alice
+boot 0f4b8c2e-1111-4222-8333-444455556666
+
+proc pid=1 ppid=0 uid=0 comm=systemd exe=/usr/lib/systemd/systemd
+proc pid=100 comm=alacritty exe=/usr/bin/alacritty ptmx=20:1
+proc pid=110 ppid=100 comm=cinelog exe=/home/alice/.zim/modules/cinelog/bin/cinelog args=zsh tty=pts/1 ptmx=5:2 start=11000
+proc pid=120 ppid=110 comm=zsh exe=/usr/bin/zsh tty=pts/2 tpgid=130
+proc pid=130 ppid=120 comm="tmux: client" exe=/usr/bin/tmux args=tmux|attach tty=pts/2 tpgid=130
+proc pid=400 comm="tmux: server" exe=/usr/bin/tmux args="tmux: server (/tmp/tmux-1000/default)" ptmx=7:5,9:6 sid=400
+proc pid=500 ppid=400 comm=zsh exe=/usr/bin/zsh tty=pts/5 tpgid=500
+proc pid=510 ppid=400 comm=zsh exe=/usr/bin/zsh tty=pts/6 tpgid=510
+registry pts=2 pid=110 uuid=01930a3e-0000-7000-8000-0000000000aa
+
+expect check tty=pts:5 start=500 euid=1000 => start personal tmux-server
+expect check tty=pts:6 start=510 euid=1000 => start personal tmux-server
+expect holder pts=5 start=500 => pid=400 via=ancestor class=multiplexer comm="tmux: server"
+# the outer shell is already recorded by our recorder
+expect check tty=pts:2 start=120 euid=1000 => recorded 01930a3e-0000-7000-8000-0000000000aa
+expect holder pts=2 start=120 => pid=110 via=ancestor class=own-same
+expect valid pts=2 => true
+# the outer recorder pauses while the tmux client is in the foreground
+expect foreground fg=130 shell=120 => multiplexer pid=130 comm="tmux: client"
+expect foreground fg=120 shell=120 => shell
+# the alacritty tab itself
+expect check tty=pts:1 start=110 euid=1000 => start personal terminal

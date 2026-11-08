@@ -2,7 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Size above which `rec.log` is moved to `rec.log.1` before the next append.
@@ -31,8 +31,12 @@ impl RecLog {
     }
 
     /// Appends one line `<rfc3339> pid=<pid> <msg>`. Never panics; errors are returned so
-    /// the caller can ignore them (logging must never break a shell).
+    /// the caller can ignore them (logging must never break a shell). The parent directory
+    /// is created (0700) if needed.
     pub fn append(&self, msg: &str) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+        }
         if std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= self.cap) {
             let mut old = self.path.clone().into_os_string();
             old.push(".1");
@@ -60,13 +64,13 @@ mod tests {
     #[test]
     fn appends_and_rotates() {
         let dir = tempfile::tempdir().unwrap();
-        let log = RecLog::with_cap(dir.path().join("rec.log"), 64);
+        let log = RecLog::with_cap(dir.path().join("state/rec.log"), 64);
         log.append("first\nline").unwrap();
         let s = std::fs::read_to_string(log.path()).unwrap();
         assert!(s.ends_with("first line\n"), "{s}");
         log.append(&"x".repeat(80)).unwrap();
         log.append("after").unwrap();
-        assert!(dir.path().join("rec.log.1").exists());
+        assert!(dir.path().join("state/rec.log.1").exists());
         assert!(std::fs::read_to_string(log.path()).unwrap().contains("after"));
     }
 }

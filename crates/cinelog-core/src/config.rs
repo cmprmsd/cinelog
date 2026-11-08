@@ -1,6 +1,9 @@
 //! `config.toml` (PERSONAL) and `/etc/cinelog/team.toml` (TEAM), plan §10.5.
 //! Every key is optional; missing keys take the defaults below.
 
+pub mod legacy;
+pub mod template;
+
 use std::path::Path;
 
 use cinelog_proto::{NestedMode, ShellOpts};

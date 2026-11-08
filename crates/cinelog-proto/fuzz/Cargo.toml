@@ -1,0 +1,30 @@
+[package]
+name = "cinelog-proto-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cinelog-proto = { path = ".." }
+
+# Not part of the cinelog workspace (excluded in the root Cargo.toml).
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false

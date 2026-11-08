@@ -1,0 +1,280 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *" # nightly: fuzz and benchmarks
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  ZIG_VERSION: 0.15.2 # 0.16 fails to link musl (plan §3.2)
+  CARGO_ZIGBUILD_VERSION: 0.24.1
+
+jobs:
+  rust:
+    name: fmt, clippy, unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --exclude cinelog-it --locked
+      - name: Committed zsh completions are current
+        if: hashFiles('shell/completions/_cinelog') != ''
+        run: cargo run --quiet --locked -p cinelog -- completions zsh | diff -u shell/completions/_cinelog -
+
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the rust-version from Cargo.toml
+        run: |
+          msrv=$(sed -n '/^\[workspace.package\]/,/^\[/s/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --all-targets --locked
+
+  musl:
+    name: static musl build (x86_64)
+    runs-on: ubuntu-24.04
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+      - run: cargo zigbuild --release --locked --target "$TARGET" -p cinelog
+      - name: Smoke test
+        run: |
+          bin="target/$TARGET/release/cinelog"
+          ver=$(tr -d '[:space:]' < VERSION)
+          file "$bin"
+          if readelf -l "$bin" | grep -q INTERP; then echo "::error::$bin is not static"; exit 1; fi
+          test "$("$bin" --version)" = "cinelog $ver"
+          test "$("$bin" rec --protocol)" = 1
+          out=$("$bin" rec --check </dev/null); echo "rec --check without a tty: $out"
+          test "$out" = "skip not-a-tty"
+          out=$(script -qec "$bin rec --check" /dev/null | tr -d '\r'); echo "rec --check in a pty: $out"
+          case $out in start\ *|recorded\ *|skip\ disabled|skip\ hidepid) ;; *) echo "::error::unexpected: $out"; exit 1 ;; esac
+
+  shell:
+    name: zsh plugin and fetch.zsh
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh jq
+      - name: zsh -n
+        run: for f in cinelog.plugin.zsh shell/*.zsh shell/tests/*.zsh; do echo "$f"; zsh -n "$f"; done
+      - run: zsh -f shell/fetch.test.zsh -v
+      - name: Plugin tests (unit + interactive zsh on zpty)
+        run: zsh shell/tests/plugin_test.zsh -v
+
+  web:
+    name: web (svelte-check, vitest, build)
+    runs-on: ubuntu-24.04
+    outputs:
+      present: ${{ steps.probe.outputs.present }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: probe
+        run: |
+          if [ -f web/package.json ]; then echo present=true >> "$GITHUB_OUTPUT"
+          else echo present=false >> "$GITHUB_OUTPUT"; echo "::notice::web/ does not exist yet (M3); skipping"; fi
+      - if: steps.probe.outputs.present == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web install --frozen-lockfile
+      - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web check
+      - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web test
+      - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web build
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 3
+
+  integration:
+    name: integration (zsh, tmux, sudo, screen, fzf)
+    needs: rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install test tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends zsh tmux screen fzf openssh-server openssh-client util-linux
+      - name: Prepare the runner for the root and namespace scenarios
+        run: |
+          # `sudo -i` / `sudo su -` start root's login shell; an existing .zshrc keeps
+          # zsh-newuser-install from blocking.
+          sudo chsh -s /usr/bin/zsh root
+          sudo touch /root/.zshrc
+          # I8 full disk and I15 need unprivileged user + mount namespaces.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Password-requiring sudo user for I6
+        run: |
+          pw=$(openssl rand -hex 16)
+          echo "::add-mask::$pw"
+          sudo useradd --create-home --shell /usr/bin/zsh clpw
+          echo "clpw:$pw" | sudo chpasswd
+          echo 'clpw ALL=(ALL:ALL) ALL' | sudo tee /etc/sudoers.d/cinelog-clpw >/dev/null
+          sudo chmod 0440 /etc/sudoers.d/cinelog-clpw
+          sudo visudo -cf /etc/sudoers.d/cinelog-clpw
+          { echo CINELOG_IT_PW_USER=clpw; echo "CINELOG_IT_PW_PASS=$pw"; } >> "$GITHUB_ENV"
+      # The harness uses these binaries instead of building its own (tests/it/src/binary.rs).
+      - name: Build the binaries under test
+        run: |
+          cargo build --locked -p cinelog --bin cinelog
+          cargo build --locked -p cinelog --bin cinelog --features testhooks --target-dir target/testhooks
+      - run: cargo test --locked -p cinelog-it --features root
+        env:
+          CINELOG_IT_ROOT: "1"
+          CINELOG_IT_REQUIRE: "1"
+          CINELOG_IT_BIN: ${{ github.workspace }}/target/debug/cinelog
+          CINELOG_IT_BIN_TESTHOOKS: ${{ github.workspace }}/target/testhooks/debug/cinelog
+
+  e2e:
+    name: Playwright E2E
+    needs: [rust, web]
+    if: needs.web.outputs.present == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - id: probe
+        run: |
+          if ls web/playwright.config.* >/dev/null 2>&1; then echo present=true >> "$GITHUB_OUTPUT"
+          else echo present=false >> "$GITHUB_OUTPUT"; echo "::notice::no Playwright config yet; skipping"; fi
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: web/dist
+      - if: steps.probe.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.probe.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.probe.outputs.present == 'true'
+        run: cargo build --locked -p cinelog
+      - if: steps.probe.outputs.present == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - if: steps.probe.outputs.present == 'true'
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web exec playwright install --with-deps chromium
+      - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web e2e
+        env:
+          CINELOG_BIN: ${{ github.workspace }}/target/debug/cinelog
+      - if: failure() && steps.probe.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7
+
+  fuzz:
+    name: nightly fuzz (cinelog-proto)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - id: probe
+        run: |
+          if [ -f crates/cinelog-proto/fuzz/Cargo.toml ]; then echo present=true >> "$GITHUB_OUTPUT"
+          else echo present=false >> "$GITHUB_OUTPUT"; echo "::notice::no fuzz targets yet; skipping"; fi
+      - if: steps.probe.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@nightly
+      - if: steps.probe.outputs.present == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - if: steps.probe.outputs.present == 'true'
+        working-directory: crates/cinelog-proto
+        run: |
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::fuzz $t"
+            cargo +nightly fuzz run "$t" -- -max_total_time=300
+            echo "::endgroup::"
+          done
+      - if: failure() && steps.probe.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: crates/cinelog-proto/fuzz/artifacts
+
+  bench:
+    name: nightly benchmarks B1/B2 (non-blocking)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh tmux
+      # Benchmarks must measure the optimised recorder, not the harness's own debug build.
+      - name: Build the release binaries under test
+        run: |
+          cargo build --release --locked -p cinelog --bin cinelog
+          cargo build --release --locked -p cinelog --bin cinelog --features testhooks --target-dir target/testhooks
+      - run: cargo test --release --locked -p cinelog-it -- --ignored --test-threads=1 bench_
+        env:
+          CINELOG_IT_BIN: ${{ github.workspace }}/target/release/cinelog
+          CINELOG_IT_BIN_TESTHOOKS: ${{ github.workspace }}/target/testhooks/release/cinelog

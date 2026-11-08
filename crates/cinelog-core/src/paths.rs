@@ -14,6 +14,7 @@ use crate::ids::SessionId;
 
 /// Fixed TEAM locations, relative to the [`SystemRoot`].
 pub mod team {
+    pub const CONFIG_DIR: &str = "/etc/cinelog";
     pub const CONFIG: &str = "/etc/cinelog/team.toml";
     pub const DISABLE: &str = "/etc/cinelog/disable";
     pub const TLS_DIR: &str = "/etc/cinelog/tls";
@@ -217,6 +218,24 @@ impl Paths {
         }
     }
 
+    /// Kill switch, TEAM: only the file. PERSONAL: the file or a non-empty
+    /// `$CINELOG_DISABLE` (`env_disable`, read by the caller; ignored at EUID 0).
+    pub fn is_disabled(&self, env_disable: Option<&std::ffi::OsStr>) -> bool {
+        let env = self.scope == Scope::Personal && env_disable.is_some_and(|v| !v.is_empty());
+        env || self.disable_file.exists()
+    }
+
+    /// `server.json` of this scope's server.
+    pub fn server_json(&self) -> PathBuf {
+        crate::server::ServerInfo::path(&self.runtime_dir)
+    }
+
+    /// Port carried over from the old `cinelog-settings.conf` by `install`. `serve` moves it
+    /// into `meta.settings` (the persisted port, §7.1) on its first start.
+    pub fn migrated_port_file(&self) -> PathBuf {
+        self.db_dir.join("migrated-port")
+    }
+
     /// Directory for a new cast: `<logs>/YYYY-MM` or, TEAM, `<logs>/<sudo_user>/YYYY-MM`.
     pub fn cast_dir(&self, sudo_user: Option<&str>, start: &jiff::Zoned) -> PathBuf {
         let base = match self.scope {
@@ -344,6 +363,25 @@ mod tests {
             p.cast_dir(Some("../bob"), &start),
             Path::new("/tmp/t/root/logs/..-bob/2024-11")
         );
+    }
+
+    #[test]
+    fn kill_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = env(1000);
+        e.xdg_config_home = Some(dir.path().into());
+        let p = Paths::personal(&e, &PathsConfig::default(), "h");
+        assert!(!p.is_disabled(None));
+        assert!(!p.is_disabled(Some("".as_ref())));
+        assert!(p.is_disabled(Some("1".as_ref())));
+        std::fs::create_dir_all(p.disable_file.parent().unwrap()).unwrap();
+        std::fs::write(&p.disable_file, b"").unwrap();
+        assert!(p.is_disabled(None));
+
+        let root = SystemRoot::prefixed(dir.path().join("sys"));
+        let t = Paths::team(&root, &PathsConfig::default(), Path::new("/root"));
+        assert!(!t.is_disabled(Some("1".as_ref())), "root ignores CINELOG_DISABLE");
+        assert_eq!(t.server_json(), dir.path().join("sys/run/cinelog/server.json"));
     }
 
     #[test]
