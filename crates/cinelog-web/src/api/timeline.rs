@@ -41,7 +41,7 @@ const IDLE_MIN: f64 = 600.0;
 /// Room kept around a point mark (skip, nested) so it never sits inside an idle break.
 const POINT_PAD: f64 = 60.0;
 /// Characters of `typed` sent as hover text.
-const TYPED_MAX: usize = 200;
+pub(crate) const TYPED_MAX: usize = 200;
 /// Marker kinds the timeline reads (the rest is playback's business).
 const MARKER_KINDS: &str = "'pause', 'resume', 'skip', 'nested', 'gap', 'clock'";
 
@@ -135,7 +135,7 @@ fn short(uuid: &str) -> &str {
 }
 
 /// First line of `typed`, at most [`TYPED_MAX`] characters.
-fn first_line(typed: &str) -> String {
+pub(crate) fn first_line(typed: &str) -> String {
     let line = typed.split('\n').next().unwrap_or_default().trim_end_matches('\r');
     line.chars().take(TYPED_MAX).collect()
 }
@@ -201,9 +201,7 @@ impl Sess {
 
     /// ts of session second `t`.
     fn ts(&self, t: f64) -> f64 {
-        self.clock
-            .epoch_secs(secs_to_us(t))
-            .unwrap_or(self.row.session.started_at + t)
+        wall_ts(&self.clock, self.row.session.started_at, t)
     }
 }
 
@@ -338,19 +336,30 @@ fn num(d: &serde_json::Map<String, Value>, k: &str) -> Option<f64> {
     d.get(k).and_then(Value::as_f64).filter(|v| v.is_finite())
 }
 
-/// Adds the `clock` markers to the session's cast-time → ts map; the end of a session that
-/// was never closed (its indexed length) moves with them.
-fn add_clock(s: &mut Sess, list: &[im::MarkerRow]) {
+/// ts of second `t` of a session that started at `started_at`, through its cast-time → ts
+/// map.
+pub(crate) fn wall_ts(clock: &ClockMap, started_at: f64, t: f64) -> f64 {
+    clock.epoch_secs(secs_to_us(t)).unwrap_or(started_at + t)
+}
+
+/// Adds the `clock` markers of `list` (other kinds are skipped) to a cast-time → ts map.
+pub(crate) fn add_clock_anchors(clock: &mut ClockMap, list: &[im::MarkerRow]) {
     for m in list.iter().filter(|m| m.kind == "clock") {
         let d = data_of(m);
         if let Some(epoch_us) = d.get("epoch_us").and_then(Value::as_i64) {
-            s.clock.insert(ClockAnchor {
+            clock.insert(ClockAnchor {
                 t_us: secs_to_us(m.t),
                 epoch_us,
                 step: d.get("reason").and_then(Value::as_str) == Some("step"),
             });
         }
     }
+}
+
+/// Adds the `clock` markers to the session's cast-time → ts map; the end of a session that
+/// was never closed (its indexed length) moves with them.
+fn add_clock(s: &mut Sess, list: &[im::MarkerRow]) {
+    add_clock_anchors(&mut s.clock, list);
     let x = &s.row.session;
     if !s.live() && x.ended_at.is_none() {
         s.end = s.ts(x.duration.unwrap_or(0.0)).max(x.started_at);

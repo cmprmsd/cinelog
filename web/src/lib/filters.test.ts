@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { chips, clearFilter, dateBounds, EMPTY, normalizeExit, stateFromQuery, stateToQuery, toSearchParams } from './filters';
+import {
+  addTag,
+  chips,
+  clearFilter,
+  dateBounds,
+  EMPTY,
+  fromLocalInput,
+  normalizeExit,
+  parseTags,
+  stateFromQuery,
+  stateToQuery,
+  toLocalInput,
+  toSearchParams,
+} from './filters';
 
 const q = (s: string) => new URLSearchParams(s);
 
@@ -59,5 +72,39 @@ describe('filters', () => {
     expect(clearFilter(s, 'user').user).toBe('');
     expect(clearFilter(s, 'date')).toMatchObject({ date: 'any', from: null, to: null });
     expect(clearFilter(s, 'hidden').hidden).toBe(false);
+  });
+
+  it('parses, sends and clears annotation tags', () => {
+    const s = stateFromQuery(q('tag=Ops,%20deploy,,ops,bad%20tag,x%3Cy'));
+    expect(s.tags).toEqual(['deploy', 'ops']);
+    expect(stateToQuery(s).get('tag')).toBe('deploy,ops');
+    expect(stateFromQuery(stateToQuery(s))).toEqual(s);
+    expect(toSearchParams(s, new Date()).tag).toBe('deploy,ops');
+    expect(toSearchParams(EMPTY, new Date())).not.toHaveProperty('tag');
+    expect(chips(s, String).filter((c) => c.key === 'tag')).toEqual([
+      { key: 'tag', label: '#deploy', value: 'deploy' },
+      { key: 'tag', label: '#ops', value: 'ops' },
+    ]);
+    expect(clearFilter(s, 'tag', 'ops').tags).toEqual(['deploy']);
+    expect(clearFilter(s, 'tag').tags).toEqual([]);
+    // A session link keeps the tag filter of the search it came from.
+    expect(stateToQuery(s, q('cmd=3&tag=old')).toString()).toBe('cmd=3&tag=deploy%2Cops');
+  });
+
+  it('adds tags in order, at most 16', () => {
+    expect(addTag(['b'], ' A ')).toEqual(['a', 'b']);
+    expect(addTag(['a'], 'a')).toEqual(['a']);
+    expect(addTag(['a'], 'no spaces')).toEqual(['a']);
+    const many = Array.from({ length: 16 }, (_, i) => `t${String(i).padStart(2, '0')}`);
+    expect(addTag(many, 'zz')).toEqual(many);
+    expect(parseTags([...many, 'zz'].join(','))).toHaveLength(16);
+  });
+
+  it('converts datetime-local values', () => {
+    const ts = Math.floor(new Date(2026, 10, 8, 9, 5).getTime() / 1000);
+    expect(toLocalInput(ts)).toBe('2026-11-08T09:05');
+    expect(fromLocalInput('2026-11-08T09:05')).toBe(ts);
+    expect(fromLocalInput('')).toBeNull();
+    expect(toLocalInput(null)).toBe('');
   });
 });

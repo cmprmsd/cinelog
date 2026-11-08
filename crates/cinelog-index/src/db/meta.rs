@@ -184,6 +184,18 @@ fn upsert_annotation(conn: &Connection, a: &Annotation, only_if_newer: bool) -> 
 
 /// Annotations selected and ordered by `tail` (`WHERE … ORDER BY …`).
 fn read_annotations(conn: &Connection, tail: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Annotation>> {
+    read_annotations_where(conn, tail, args, |_| true, 0)
+}
+
+/// The rows of `tail` that `keep` accepts, in its order, at most `limit` (0: all). Rows are
+/// read lazily, so a Rust-side filter stops at the limit; tags are loaded for kept rows only.
+fn read_annotations_where(
+    conn: &Connection,
+    tail: &str,
+    args: &[&dyn rusqlite::ToSql],
+    keep: impl Fn(&Annotation) -> bool,
+    limit: usize,
+) -> Result<Vec<Annotation>> {
     let mut st = conn.prepare_cached(&format!(
         "SELECT id, uuid, session_uuid, cmd_seq, t_from, t_to, author, body, created_at, updated_at, deleted_at
          FROM annotations {tail}"
@@ -206,7 +218,16 @@ fn read_annotations(conn: &Connection, tail: &str, args: &[&dyn rusqlite::ToSql]
             },
         ))
     })?;
-    let mut out = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::new();
+    for row in rows {
+        let row = row?;
+        if keep(&row.1) {
+            out.push(row);
+            if out.len() == limit {
+                break;
+            }
+        }
+    }
     let mut tags = conn.prepare_cached(
         "SELECT t.name FROM annotation_tags a JOIN tags t ON t.id = a.tag_id WHERE a.annotation_id = ?1 ORDER BY t.name",
     )?;
@@ -214,6 +235,54 @@ fn read_annotations(conn: &Connection, tail: &str, args: &[&dyn rusqlite::ToSql]
         a.tags = tags.query_map([*id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     }
     Ok(out.into_iter().map(|(_, a)| a).collect())
+}
+
+/// `annotations.id IN (…)` of the annotations carrying the tag bound at `?{n}`.
+fn has_tag(n: usize) -> String {
+    format!("id IN (SELECT x.annotation_id FROM annotation_tags x JOIN tags t ON t.id = x.tag_id WHERE t.name = ?{n})")
+}
+
+/// What a non-deleted annotation is attached to, for the search tag filter.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TagTarget {
+    Command { session: String, seq: u64 },
+    Span { session: String, t_from: f64, t_to: f64 },
+}
+
+/// The targets of the newest `limit` non-deleted annotations carrying every tag of `tags`
+/// (exact names, at least one), and whether there were more.
+pub(crate) fn tag_targets(conn: &Connection, tags: &[String], limit: usize) -> Result<(Vec<TagTarget>, bool)> {
+    let clauses: Vec<String> = (1..=tags.len()).map(has_tag).collect();
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT session_uuid, cmd_seq, t_from, t_to FROM annotations
+         WHERE deleted_at IS NULL AND {} ORDER BY created_at DESC, uuid DESC LIMIT {}",
+        clauses.join(" AND "),
+        limit + 1
+    ))?;
+    let rows = st.query_map(rusqlite::params_from_iter(tags), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            super::opt_u64_at(r, 1)?,
+            r.get::<_, Option<f64>>(2)?,
+            r.get::<_, Option<f64>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    let mut capped = false;
+    // The cap counts annotations, usable targets or not.
+    for (seen, row) in rows.enumerate() {
+        if seen == limit {
+            capped = true;
+            break;
+        }
+        out.push(match row? {
+            (session, Some(seq), _, _) => TagTarget::Command { session, seq },
+            (session, None, Some(t_from), Some(t_to)) => TagTarget::Span { session, t_from, t_to },
+            // Neither a command nor a span: attached to nothing searchable.
+            _ => continue,
+        });
+    }
+    Ok((out, capped))
 }
 
 /// Tags by name with their live usage count; `only` selects one name (empty: all).
@@ -329,12 +398,6 @@ impl MetaStore for SqliteMeta {
     }
 
     fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
-        // Contract only (annotations overview): implemented by the backend work package.
-        if q.uuid.is_some() || q.text.is_some() || q.since.is_some() || q.until.is_some() || q.newest_first {
-            return Err(IndexError::Invalid(
-                "annotation filters uuid, text, since, until and newest_first are not implemented yet".into(),
-            ));
-        }
         let mut clauses = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let mut arg = |clause: &str, value: Box<dyn rusqlite::ToSql>| {
@@ -350,34 +413,66 @@ impl MetaStore for SqliteMeta {
         if let Some(seq) = q.cmd_seq {
             arg("cmd_seq = ?", Box::new(U64(seq)));
         }
-        for tag in &q.tags {
+        if !q.commands.is_empty() {
             arg(
-                "id IN (SELECT a.annotation_id FROM annotation_tags a JOIN tags t ON t.id = a.tag_id WHERE t.name = ?)",
-                Box::new(tag.clone()),
+                "(session_uuid, cmd_seq) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))",
+                Box::new(serde_json::to_string(&q.commands)?),
             );
         }
+        if let Some(uuid) = &q.uuid {
+            arg("uuid = ?", Box::new(uuid.clone()));
+        }
+        if let Some(v) = q.since {
+            arg("created_at >= ?", Box::new(v));
+        }
+        if let Some(v) = q.until {
+            arg("created_at <= ?", Box::new(v));
+        }
+        for tag in &q.tags {
+            args.push(Box::new(tag.clone()));
+            clauses.push(has_tag(args.len()));
+        }
         if let Some(author) = &q.author {
-            arg("author = ?", Box::new(author.clone()));
+            args.push(Box::new(author.clone()));
+            clauses.push(format!("author = ?{}", args.len()));
         }
         if !q.include_deleted {
             clauses.push("deleted_at IS NULL".to_owned());
         }
+        let (cmp, dir) = if q.newest_first { ("<", " DESC") } else { (">", "") };
         if let Some((created_at, uuid)) = &q.after {
             args.push(Box::new(*created_at));
             args.push(Box::new(uuid.clone()));
             let (c, u) = (args.len() - 1, args.len());
-            clauses.push(format!("(created_at > ?{c} OR (created_at = ?{c} AND uuid > ?{u}))"));
+            clauses.push(format!(
+                "(created_at {cmp} ?{c} OR (created_at = ?{c} AND uuid {cmp} ?{u}))"
+            ));
         }
         let mut tail = String::new();
         if !clauses.is_empty() {
             tail = format!("WHERE {}", clauses.join(" AND "));
         }
-        tail.push_str(" ORDER BY created_at, uuid");
-        if q.limit > 0 {
-            tail.push_str(&format!(" LIMIT {}", q.limit));
-        }
+        tail.push_str(&format!(" ORDER BY created_at{dir}, uuid{dir}"));
         let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
-        read_annotations(&self.conn, &tail, &refs)
+        // SQLite's lower() folds ASCII only: the body filter runs here, on the ordered rows.
+        match &q.text {
+            Some(text) => {
+                let needle = text.to_lowercase();
+                read_annotations_where(
+                    &self.conn,
+                    &tail,
+                    &refs,
+                    |a| a.body.to_lowercase().contains(&needle),
+                    q.limit,
+                )
+            }
+            None => {
+                if q.limit > 0 {
+                    tail.push_str(&format!(" LIMIT {}", q.limit));
+                }
+                read_annotations(&self.conn, &tail, &refs)
+            }
+        }
     }
 
     fn tags(&self) -> Result<Vec<TagInfo>> {

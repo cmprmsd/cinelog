@@ -40,6 +40,9 @@ pub const CANDIDATE_CAP: usize = 5000;
 pub const MIN_TRIGRAM_CHARS: usize = 3;
 /// Time limit of the newest-first scan for short terms (§6.5).
 pub const SHORT_TERM_SCAN: Duration = Duration::from_millis(500);
+/// Most annotations a search tag filter considers, newest first (docs/API.md §5.4): more
+/// set [`SearchPage::capped`].
+pub const TAG_FILTER_CAP: usize = 10_000;
 
 /// Live indexing commit interval (§6.4).
 pub const COMMIT_INTERVAL: Duration = Duration::from_secs(2);
@@ -861,6 +864,9 @@ pub struct AnnotationQuery {
     /// Only annotations of these sessions; empty means every session.
     pub sessions: Vec<String>,
     pub cmd_seq: Option<Seq>,
+    /// Only annotations of these `(session, seq)` commands; empty means no filter.
+    #[serde(default)]
+    pub commands: Vec<(String, Seq)>,
     /// Only annotations carrying every one of these tags (exact names); empty: no filter.
     pub tags: Vec<String>,
     pub author: Option<String>,
@@ -1087,7 +1093,8 @@ pub struct SearchPage {
     pub next: Option<Cursor>,
     /// The short-term scan hit its time limit: there may be more (older) matches.
     pub partial: bool,
-    /// More than [`CANDIDATE_CAP`] candidates: refine the query.
+    /// More than [`CANDIDATE_CAP`] candidates, or more than [`TAG_FILTER_CAP`] annotations
+    /// matching the tag filter: refine the query.
     pub capped: bool,
 }
 

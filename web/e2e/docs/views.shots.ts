@@ -121,6 +121,14 @@ test('team timeline', async ({ page, theme }) => {
   await shoot(page, 'timeline', theme);
 });
 
+test('annotations overview', async ({ page, theme }) => {
+  await page.setViewportSize({ width: 1440, height: 760 });
+  await page.goto('/annotations');
+  await expect(page.getByTestId('anno-row')).toHaveCount(3);
+  await expect(page.getByTestId('anno-target').first()).not.toBeEmpty();
+  await shoot(page, 'annotations', theme);
+});
+
 test('live view', async ({ page, theme }) => {
   await page.goto(`/live/${DEMO.live}`);
   await expect(page.getByTestId('live-badge')).toHaveText(/live/i);

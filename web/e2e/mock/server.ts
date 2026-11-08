@@ -40,7 +40,7 @@ import type {
   TreeNode,
 } from '../../src/lib/api/types.ts';
 import { buildFixtures, FIX, OUTPUT_DELAY, sessionEvents, toCommand, type CastEvent, type FixSession } from './fixtures.ts';
-import { handle as annotationsMock } from './m4/annotations.ts';
+import { handle as annotationsMock, liveAnnotations, parseTagList } from './m4/annotations.ts';
 import type { MockContext, MockHandler } from './m4/context.ts';
 import { handle as liveMock, recorderOf } from './m4/live.ts';
 import { handle as timelineMock } from './m4/timeline.ts';
@@ -197,6 +197,18 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
     const from = sp.get('from') !== null ? Number(sp.get('from')) : null;
     const to = sp.get('to') !== null ? Number(sp.get('to')) : null;
     const match = (s: string | null) => s !== null && (cs ? s.includes(q) : s.toLowerCase().includes(q.toLowerCase()));
+    // Tag filter (docs/API.md §5.4): one annotation carrying every tag, on the command or a
+    // span of the session over the hit; hit tags are those of the command's annotations.
+    const tagFilter = parseTagList(m4, sp.get('tag'));
+    const notes = liveAnnotations(m4);
+    const tagged = notes.filter((a) => tagFilter.every((t) => a.tags.includes(t)));
+    const tagOk = (uuid: string, seq: number, from: number, to: number) =>
+      !tagFilter.length ||
+      tagged.some(
+        (a) => a.session === uuid && (a.cmd_seq === seq || (a.cmd_seq === null && a.t_from !== null && a.t_to !== null && a.t_from <= to && a.t_to >= from)),
+      );
+    const tagsOf = (uuid: string, seq: number) =>
+      [...new Set(notes.filter((a) => a.session === uuid && a.cmd_seq === seq).flatMap((a) => a.tags))].sort();
     const hits: SearchHit[] = [];
     for (const f of visible()) {
       const s = f.session;
@@ -227,13 +239,14 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
           approx: c.approx ?? false,
           confidence: c.confidence ?? null,
           legacy: s.legacy,
-          tags: [] as string[],
+          tags: tagsOf(s.uuid, c.seq),
         };
-        if (mode !== 'out' && (!q || match(c.typed) || match(c.cwd))) {
+        if (mode !== 'out' && (!q || match(c.typed) || match(c.cwd)) && tagOk(s.uuid, c.seq, c.t_start, c.t_end)) {
           hits.push({ ...common, id: `c:${s.uuid}:${c.seq}`, kind: 'command', t: c.t_start, snippet: markMatches(c.typed, q, cs), chunk_kind: null });
         }
         const out = c.output.join('\n');
-        if (mode !== 'cmd' && q && match(out)) {
+        const tOut = c.t_start + OUTPUT_DELAY;
+        if (mode !== 'cmd' && q && match(out) && tagOk(s.uuid, c.seq, tOut, tOut)) {
           hits.push({
             ...common,
             id: `o:${s.uuid}:${c.seq}`,

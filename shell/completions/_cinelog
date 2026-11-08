@@ -99,6 +99,7 @@ _arguments "${_arguments_options[@]}" : \
 '--exit=[Exit status\: a number, \`ok\` or \`fail\`]:STATUS:_default' \
 '--cwd=[Commands run in this directory or below it (\`.\` is the current one)]:DIR:_default' \
 '--pane=[tmux pane id (e.g. \`%3\`)]:PANE:_default' \
+'*--tag=[Only commands and output an annotation with this tag is attached to; repeat or separate with commas\: one annotation must carry all of them]:TAG:_default' \
 '--limit=[Maximum number of results]:LIMIT:_default' \
 '(--out)-a[Also search command output]' \
 '(--out)--all[Also search command output]' \

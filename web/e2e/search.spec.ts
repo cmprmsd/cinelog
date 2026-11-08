@@ -46,9 +46,15 @@ test.describe('search', () => {
     const rows = page.getByTestId('results').getByRole('listitem');
     await expect(rows.filter({ hasText: 'cat evil.html' })).toHaveCount(1);
     await expect(rows.filter({ hasText: 'echo hello' })).toHaveCount(0);
+    const count = page.getByTestId('result-count');
+    await expect(count).not.toContainText('…');
+    const failed = (await count.textContent())!;
     await page.getByRole('button', { name: 'Remove filter exit ≠0' }).click();
     await expect(page).not.toHaveURL(/exit=/);
-    await expect(rows.filter({ hasText: 'echo hello' })).toHaveCount(1);
+    // The list is virtualised and `echo hello` may sit below the rendered rows: compare counts.
+    await expect(count).not.toContainText('…');
+    await expect(count).not.toHaveText(failed);
+    await expect(count).toHaveText(/^\d+\+? hits$/);
   });
 
   test('marks legacy and approximate hits', async ({ page }) => {

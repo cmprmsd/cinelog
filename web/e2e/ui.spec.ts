@@ -56,10 +56,10 @@ test.describe('shell', () => {
     await expect(page.getByTestId('search-input')).not.toBeFocused();
     await page.keyboard.press('j');
     await expect(page.locator('[data-testid="results"] .row.active')).toHaveCount(1);
-    const first = await page.locator('[data-testid="results"] .row.active').innerText();
+    const first = await page.locator('[data-testid="results"] .row.active').getAttribute('data-hit');
     await page.keyboard.press('j');
     await page.keyboard.press('k');
-    await expect(page.locator('[data-testid="results"] .row.active')).toHaveText(first);
+    await expect(page.locator('[data-testid="results"] .row.active')).toHaveAttribute('data-hit', first!);
     await page.keyboard.press('Enter');
     await waitForPlayer(page);
     const start = await settledPlayerTime(page);

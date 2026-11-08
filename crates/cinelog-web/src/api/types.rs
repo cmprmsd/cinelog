@@ -1648,9 +1648,8 @@ pub fn normalize_color(color: &str) -> Result<String, AnnotationRequestError> {
     }
 }
 
-/// Normalised, sorted and de-duplicated tag names.
 /// A `tag=` filter: comma-separated names, each normalised ([`normalize_tag`]), sorted and
-/// without duplicates; empty items are skipped. At most [`MAX_TAGS`].
+/// without duplicates; empty items are skipped. At most [`MAX_TAGS`] different names.
 pub fn parse_tag_list(list: &str) -> Result<Vec<String>, AnnotationRequestError> {
     let names: Vec<String> = list
         .split(',')
@@ -1660,6 +1659,7 @@ pub fn parse_tag_list(list: &str) -> Result<Vec<String>, AnnotationRequestError>
     normalize_tags(&names)
 }
 
+/// Normalised, sorted and de-duplicated tag names (at most [`MAX_TAGS`] different ones).
 pub fn normalize_tags(tags: &[String]) -> Result<Vec<String>, AnnotationRequestError> {
     let mut out = tags.iter().map(|t| normalize_tag(t)).collect::<Result<Vec<_>, _>>()?;
     out.sort();

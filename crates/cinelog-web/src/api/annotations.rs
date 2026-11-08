@@ -16,7 +16,7 @@
 //! principal may add tags. Annotations of forgotten sessions and commands are treated as
 //! absent. Every change is published on the bus after its commit.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
 use axum::Json;
@@ -24,6 +24,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, patch};
+use cinelog_cast::ClockMap;
 use cinelog_index::MetaStore;
 use cinelog_index::model::{self as im, AnnotationQuery};
 
@@ -31,10 +32,11 @@ use super::db::{Forgets, IndexDb, blocking, parse_uuid};
 use super::extract::{ApiJson, ApiPath, ApiQuery};
 use super::search::limit;
 use super::sessions::visible_session;
+use super::timeline::{TYPED_MAX, add_clock_anchors, first_line, wall_ts};
 use super::types::{
-    Annotation, AnnotationCreate, AnnotationEvent, AnnotationPage, AnnotationParams, AnnotationPatch,
-    AnnotationRequestError, Author, AuthorList, BusEvent, ChangeOp, SortOrder, Tag, TagList, TagRequest,
-    parse_tag_list,
+    Annotation, AnnotationCommand, AnnotationContext, AnnotationCreate, AnnotationEvent, AnnotationPage,
+    AnnotationParams, AnnotationPatch, AnnotationRequestError, Author, AuthorList, BusEvent, ChangeOp, SortOrder, Tag,
+    TagList, TagRequest, parse_tag_list,
 };
 use crate::bus::Bus;
 use crate::error::{Result, WebError};
@@ -275,6 +277,7 @@ fn query_of(p: &AnnotationParams) -> Result<AnnotationQuery> {
     Ok(AnnotationQuery {
         sessions: session.into_iter().collect(),
         cmd_seq: p.cmd_seq,
+        commands: Vec::new(),
         tags: p
             .tag
             .as_deref()
@@ -317,29 +320,144 @@ fn list_page(ctx: &WebContext, p: &AnnotationParams) -> Result<AnnotationPage> {
         }
         .encode()
     });
-    let mut annotations = Vec::with_capacity(rows.len());
-    for a in &rows {
-        if !vis.hidden(a)? {
-            annotations.push(Annotation::from(a));
+    let mut visible = Vec::with_capacity(rows.len());
+    for a in rows {
+        if !vis.hidden(&a)? {
+            visible.push(a);
         }
     }
-    // Contract only: `context=true` is filled by the backend work package.
+    let contexts = match (p.context.unwrap_or(false), &vis.index) {
+        (true, Some(db)) => contexts(db, &visible)?,
+        _ => BTreeMap::new(),
+    };
     Ok(AnnotationPage {
-        annotations,
+        annotations: visible.iter().map(Annotation::from).collect(),
         next,
-        contexts: Default::default(),
+        contexts,
     })
 }
 
-/// Every author with the number of annotations they wrote.
-// Contract only: leaving out annotations gone with a forgotten session or command (as
-// `tag_list` does) is the backend work package's.
+/// Where each annotation of `list` sits, by annotation uuid, in three batched queries
+/// (sessions, commands, `clock` markers of span sessions) under one snapshot. Annotations of
+/// sessions index.db does not have get no entry.
+fn contexts(db: &IndexDb, list: &[im::Annotation]) -> Result<BTreeMap<String, AnnotationContext>> {
+    let mut out = BTreeMap::new();
+    if list.is_empty() {
+        return Ok(out);
+    }
+    let _snapshot = db.snapshot()?;
+    let mut uuids: Vec<&str> = list.iter().map(|a| a.session_uuid.as_str()).collect();
+    uuids.sort_unstable();
+    uuids.dedup();
+    let sessions = db.session_briefs(&uuids)?;
+    let mut keys = Vec::new();
+    let mut span_sessions = Vec::new();
+    for a in list {
+        let Some(s) = sessions.get(&a.session_uuid) else {
+            continue;
+        };
+        match a.cmd_seq {
+            Some(seq) => keys.push((s.id, seq)),
+            None => span_sessions.push(s.id),
+        }
+    }
+    let commands = if keys.is_empty() {
+        HashMap::new()
+    } else {
+        db.command_briefs(&keys, TYPED_MAX)?
+    };
+    span_sessions.sort_unstable();
+    span_sessions.dedup();
+    let markers = if span_sessions.is_empty() {
+        HashMap::new()
+    } else {
+        db.clock_markers(&span_sessions)?
+    };
+    let mut clocks: HashMap<i64, ClockMap> = HashMap::new();
+    for a in list {
+        let Some(s) = sessions.get(&a.session_uuid) else {
+            continue;
+        };
+        let (command, ts_from, ts_to) = match (a.cmd_seq, a.t_from, a.t_to) {
+            (Some(seq), _, _) => match commands.get(&(s.id, seq)) {
+                Some(c) => (
+                    Some(AnnotationCommand {
+                        typed: first_line(&c.typed),
+                        exit: c.exit,
+                        cwd: c.cwd.clone(),
+                    }),
+                    c.ts_start,
+                    c.ts_end,
+                ),
+                None => (None, s.started_at, None),
+            },
+            (None, Some(from), Some(to)) => {
+                let clock = clocks.entry(s.id).or_insert_with(|| {
+                    let mut clock = ClockMap::with_start((s.started_at * 1e6).round() as i64);
+                    add_clock_anchors(&mut clock, markers.get(&s.id).map_or(&[], Vec::as_slice));
+                    clock
+                });
+                let ts_from = wall_ts(clock, s.started_at, from);
+                (
+                    None,
+                    ts_from,
+                    Some(wall_ts(clock, s.started_at, to.max(from)).max(ts_from)),
+                )
+            }
+            _ => (None, s.started_at, None),
+        };
+        out.insert(
+            a.uuid.clone(),
+            AnnotationContext {
+                user: s.user.clone(),
+                host: s.host.clone(),
+                pane: s.pane.clone(),
+                tmux_session: s.tmux_session.clone(),
+                started_at: s.started_at,
+                command,
+                ts_from,
+                ts_to,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// The non-deleted annotations that are gone with a forgotten session or command.
+fn gone(meta: &dyn MetaStore, vis: &mut Visibility) -> Result<Vec<im::Annotation>> {
+    let sessions: Vec<String> = vis.forgets.touched().map(str::to_owned).collect();
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = AnnotationQuery {
+        sessions,
+        ..AnnotationQuery::default()
+    };
+    let mut out = Vec::new();
+    for a in meta.find_annotations(&query)? {
+        if vis.hidden(&a)? {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+/// Every author with the number of annotations they wrote, leaving out the ones that are
+/// gone with a forgotten session or command (as the list does) and authors left with none.
 fn author_list(ctx: &WebContext) -> Result<AuthorList> {
     let meta = cinelog_index::db::open_meta(&ctx.db)?;
+    let mut authors = meta.authors()?;
+    let mut by: HashMap<String, u64> = HashMap::new();
+    for a in gone(meta.as_ref(), &mut Visibility::load(ctx)?)? {
+        *by.entry(a.author).or_default() += 1;
+    }
+    for a in &mut authors {
+        a.count = a.count.saturating_sub(by.get(&a.name).copied().unwrap_or(0));
+    }
     Ok(AuthorList {
-        authors: meta
-            .authors()?
+        authors: authors
             .into_iter()
+            .filter(|a| a.count > 0)
             .map(|a| Author {
                 name: a.name,
                 count: a.count,
@@ -353,24 +471,14 @@ fn author_list(ctx: &WebContext) -> Result<AuthorList> {
 fn tag_list(ctx: &WebContext) -> Result<TagList> {
     let meta = cinelog_index::db::open_meta(&ctx.db)?;
     let mut tags = meta.tags()?;
-    let mut vis = Visibility::load(ctx)?;
-    let sessions: Vec<String> = vis.forgets.touched().map(str::to_owned).collect();
-    if !sessions.is_empty() {
-        let query = AnnotationQuery {
-            sessions,
-            ..AnnotationQuery::default()
-        };
-        let mut gone: HashMap<String, u64> = HashMap::new();
-        for a in meta.find_annotations(&query)? {
-            if vis.hidden(&a)? {
-                for t in a.tags {
-                    *gone.entry(t).or_default() += 1;
-                }
-            }
+    let mut by: HashMap<String, u64> = HashMap::new();
+    for a in gone(meta.as_ref(), &mut Visibility::load(ctx)?)? {
+        for t in a.tags {
+            *by.entry(t).or_default() += 1;
         }
-        for t in &mut tags {
-            t.count = t.count.saturating_sub(gone.get(&t.name).copied().unwrap_or(0));
-        }
+    }
+    for t in &mut tags {
+        t.count = t.count.saturating_sub(by.get(&t.name).copied().unwrap_or(0));
     }
     Ok(TagList {
         tags: tags.into_iter().map(Tag::from).collect(),
@@ -496,7 +604,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::api::testkit::{Cast, Kit, Meta, uuid};
+    use crate::api::testkit::{Cast, Kit, Meta, START_US, uuid};
 
     /// Session 1: three commands; session 2: one command. Returns the cast paths.
     fn fixture(kit: &Kit) -> [std::path::PathBuf; 2] {
@@ -1028,6 +1136,343 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// Creates an annotation as `who` with `created_at` fixed to `at`; returns its uuid.
+    fn note_at(kit: &Kit, who: &str, at: f64, body: Value) -> String {
+        let req: AnnotationCreate = serde_json::from_value(body).unwrap();
+        create_annotation(kit.ctx(), &kit.state.bus, &req, who, || at)
+            .unwrap()
+            .uuid
+    }
+
+    /// The overview's queries: order, tag lists, author, body text, time range, uuid, the
+    /// keyset cursor in both orders, and the 400s.
+    #[tokio::test]
+    async fn overview_filters_order_and_pages() {
+        let kit = Kit::new(8);
+        fixture(&kit);
+        let (u1, u2) = (uuid(1), uuid(2));
+        let n1 = note_at(
+            &kit,
+            "alice",
+            100.0,
+            json!({"session_uuid": u1, "cmd_seq": 1, "body": "Disk full on the DB host", "tags": ["db", "ops"]}),
+        );
+        let n2 = note_at(
+            &kit,
+            "bob",
+            200.0,
+            json!({"session_uuid": u1, "cmd_seq": 2, "body": "deploy: viel ÄRGER", "tags": ["ops"]}),
+        );
+        let n3 = note_at(
+            &kit,
+            "alice",
+            200.0,
+            json!({"session_uuid": u1, "t_from": 0.5, "t_to": 2.25, "body": "span", "tags": ["db"]}),
+        );
+        let n4 = note_at(
+            &kit,
+            "bob",
+            300.0,
+            json!({"session_uuid": u2, "cmd_seq": 1, "body": "fine"}),
+        );
+        // Equal created_at: uuid breaks the tie (descending with order=desc).
+        let (lo, hi) = if n2 < n3 { (&n2, &n3) } else { (&n3, &n2) };
+        let desc = [n4.clone(), hi.clone(), lo.clone(), n1.clone()];
+        let k = &kit;
+        let list = move |q: &str| {
+            let uri = format!("/annotations?{q}");
+            async move { uuids(&get(k, &uri).await) }
+        };
+        assert_eq!(list("order=desc").await, desc);
+        assert_eq!(
+            list("order=asc").await,
+            [n1.clone(), lo.clone(), hi.clone(), n4.clone()]
+        );
+        assert_eq!(list("tag=ops,db").await, [n1.as_str()], "every tag on one annotation");
+        assert_eq!(list("tag=DB,,ops").await, [n1.as_str()]);
+        assert_eq!(list("tag=db&order=desc").await, [n3.clone(), n1.clone()]);
+        assert!(list("tag=ops,nope").await.is_empty());
+        assert_eq!(list("author=bob&order=desc").await, [n4.clone(), n2.clone()]);
+        assert_eq!(list("q=%C3%A4rger").await, [n2.as_str()], "Unicode case-insensitive");
+        assert_eq!(list("q=%20DB%20").await, [n1.as_str()], "trimmed");
+        assert_eq!(list("q=%20%20&order=desc").await, desc, "blank: no filter");
+        assert_eq!(list("from=200&to=200").await, [lo.clone(), hi.clone()], "inclusive");
+        assert_eq!(list("from=200.5").await, [n4.as_str()]);
+        assert_eq!(list("to=199.9").await, [n1.as_str()]);
+        assert_eq!(list(&format!("uuid={}", n3.to_uppercase())).await, [n3.as_str()]);
+        assert!(list(&format!("uuid={n3}&author=bob")).await.is_empty());
+
+        // The keyset follows the order; pages of one equal the full list.
+        for (order, want) in [("desc", desc.to_vec()), ("asc", desc.iter().rev().cloned().collect())] {
+            let mut seen = Vec::new();
+            let mut uri = format!("/annotations?order={order}&limit=1");
+            loop {
+                let page = get(&kit, &uri).await;
+                seen.extend(uuids(&page));
+                match page["next"].as_str() {
+                    Some(next) => uri = format!("/annotations?order={order}&limit=1&cursor={}", urlencode(next)),
+                    None => break,
+                }
+            }
+            assert_eq!(seen, want, "{order}");
+        }
+        // A row written after the first page never shifts the next ones.
+        let first = get(&kit, "/annotations?order=desc&limit=2").await;
+        note_at(
+            &kit,
+            "carol",
+            400.0,
+            json!({"session_uuid": u2, "cmd_seq": 1, "body": "late"}),
+        );
+        let rest = get(
+            &kit,
+            &format!(
+                "/annotations?order=desc&limit=2&cursor={}",
+                urlencode(first["next"].as_str().unwrap())
+            ),
+        )
+        .await;
+        assert_eq!(uuids(&rest), desc[2..]);
+
+        let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+        for bad in [
+            format!("/annotations?q={}", "x".repeat(201)),
+            "/annotations?from=300&to=200".into(),
+            "/annotations?from=inf".into(),
+            "/annotations?to=NaN".into(),
+            "/annotations?uuid=garbage".into(),
+            format!("/annotations?tag={}", many.join(",")),
+            "/annotations?tag=ops,no%20way".into(),
+            "/annotations?order=sideways".into(),
+            "/annotations?context=maybe".into(),
+        ] {
+            assert_eq!(
+                call(&kit, "GET", &bad, "alice", None).await.0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        assert_eq!(list(&format!("q={}", "x".repeat(200))).await.len(), 0);
+    }
+
+    /// `context=true`: the session, the command (or the span in wall time, through the
+    /// session's clock markers), and the fallbacks for what index.db does not have.
+    #[tokio::test]
+    async fn overview_contexts() {
+        let kit = Kit::new(8);
+        fixture(&kit);
+        let dir = kit.dir.path();
+        // Session 3: a clock step at t=20 to `step`.
+        let mut c = Cast::new(dir, 3, 80, 24, &Meta::default());
+        let t = c.command(1.0, 1, "printf 'one\ntwo'", &["one", "two"], 3);
+        let step = START_US + 1_000_000_000;
+        c.m(
+            20.0,
+            &format!(r#"{{"cl":1,"k":"clock","epoch_us":{step},"boottime_us":0,"reason":"step"}}"#),
+        );
+        c.exit(t + 30.0);
+        kit.index(&c.path, None);
+        let (u1, u3) = (uuid(1), uuid(3));
+        let on_cmd = note_at(
+            &kit,
+            "alice",
+            1.0,
+            json!({"session_uuid": u3, "cmd_seq": 1, "body": "c"}),
+        );
+        let early = note_at(
+            &kit,
+            "alice",
+            2.0,
+            json!({"session_uuid": u3, "t_from": 0.5, "t_to": 2.0, "body": "s"}),
+        );
+        let late = note_at(
+            &kit,
+            "alice",
+            3.0,
+            json!({"session_uuid": u3, "t_from": 25.0, "t_to": 26.0, "body": "s"}),
+        );
+        // What index.db lacks: a command (rebuilt index) and a whole session.
+        let mut meta = cinelog_index::db::open_meta(&kit.ctx().db).unwrap();
+        let mut raw = |uuid: &str, session: &str, seq| {
+            meta.put_annotation(&im::Annotation {
+                uuid: uuid.into(),
+                session_uuid: session.into(),
+                cmd_seq: Some(seq),
+                t_from: None,
+                t_to: None,
+                author: "alice".into(),
+                body: "raw".into(),
+                tags: vec![],
+                created_at: 4.0,
+                updated_at: 4.0,
+                deleted_at: None,
+            })
+            .unwrap();
+        };
+        let no_cmd = "0193a1b2-0000-7000-8000-00000000aaaa";
+        let no_session = "0193a1b2-0000-7000-8000-00000000bbbb";
+        raw(no_cmd, &u1, 42);
+        raw(no_session, &uuid(9), 1);
+
+        let page = get(&kit, "/annotations?context=true").await;
+        assert_eq!(page["annotations"].as_array().unwrap().len(), 5);
+        let ctx = &page["contexts"];
+        assert_eq!(ctx.as_object().unwrap().len(), 4, "{ctx}");
+        assert!(ctx[no_session].is_null(), "a session index.db does not have: no entry");
+        let db = IndexDb::open(kit.ctx()).unwrap();
+        let s3 = db.session(&u3).unwrap().unwrap();
+        let c1 = db.command(s3.id, 1).unwrap().unwrap();
+        let started = s3.session.started_at;
+        assert_eq!(
+            ctx[&on_cmd],
+            json!({
+                "user": "u", "host": "testhost", "pane": "%3", "tmux_session": s3.session.tmux.session,
+                "started_at": started,
+                "command": {"typed": "printf 'one", "exit": 3, "cwd": "/tmp"},
+                "ts_from": c1.ts_start, "ts_to": c1.ts_end,
+            })
+        );
+        let close = |v: &Value, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-3;
+        let e = &ctx[&early];
+        assert!(e["command"].is_null());
+        assert!(
+            close(&e["ts_from"], started + 0.5) && close(&e["ts_to"], started + 2.0),
+            "{e}"
+        );
+        let l = &ctx[&late];
+        let stepped = step as f64 / 1e6;
+        assert!(
+            close(&l["ts_from"], stepped + 5.0) && close(&l["ts_to"], stepped + 6.0),
+            "clock step: {l}"
+        );
+        let n = &ctx[no_cmd];
+        let s1 = db.session(&u1).unwrap().unwrap().session;
+        assert_eq!(n["command"], Value::Null);
+        assert_eq!(n["ts_from"].as_f64(), Some(s1.started_at));
+        assert_eq!(n["ts_to"], Value::Null);
+        assert_eq!(n["user"], "u");
+
+        assert_eq!(
+            get(&kit, "/annotations").await["contexts"],
+            json!({}),
+            "only with context=true"
+        );
+        let one = get(&kit, &format!("/annotations?uuid={late}&context=true")).await;
+        assert_eq!(uuids(&one), [late.as_str()]);
+        assert_eq!(one["contexts"].as_object().unwrap().keys().collect::<Vec<_>>(), [&late]);
+    }
+
+    #[tokio::test]
+    async fn authors_leave_out_forgotten_targets() {
+        let kit = Kit::new(8);
+        fixture(&kit);
+        let (u1, u2) = (uuid(1), uuid(2));
+        for (who, body) in [
+            ("alice", json!({"session_uuid": u1, "cmd_seq": 2, "body": "a"})),
+            ("alice", json!({"session_uuid": u1, "cmd_seq": 3, "body": "b"})),
+            (
+                "bob",
+                json!({"session_uuid": u2, "t_from": 0.0, "t_to": 1.0, "body": "c"}),
+            ),
+            ("carol", json!({"session_uuid": u1, "cmd_seq": 1, "body": "d"})),
+        ] {
+            assert_eq!(post(&kit, who, body).await.0, StatusCode::CREATED);
+        }
+        let carol = get(&kit, "/annotations?author=carol").await;
+        let id = carol["annotations"][0]["uuid"].as_str().unwrap().to_owned();
+        assert_eq!(
+            call(&kit, "DELETE", &format!("/annotations/{id}"), "carol", None)
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            get(&kit, "/annotations/authors").await,
+            json!({"authors": [{"name": "alice", "count": 2}, {"name": "bob", "count": 1}]}),
+            "deleted ones do not count"
+        );
+        kit.cli_forget(im::ForgetTarget::Command {
+            uuid: u1.clone(),
+            seq: 2,
+        });
+        kit.cli_forget(im::ForgetTarget::Session { uuid: u2.clone() });
+        assert_eq!(
+            get(&kit, "/annotations/authors").await,
+            json!({"authors": [{"name": "alice", "count": 1}]})
+        );
+    }
+
+    /// `GET /search?tag=`: commands and output with a matching annotation, the tags of
+    /// annotated hits, and an empty page for an unknown tag.
+    #[tokio::test]
+    async fn search_by_tag_and_hit_tags() {
+        let kit = Kit::new(8);
+        fixture(&kit);
+        let (u1, u2) = (uuid(1), uuid(2));
+        for body in [
+            json!({"session_uuid": u1, "cmd_seq": 2, "tags": ["deploy", "ops"]}),
+            json!({"session_uuid": u1, "cmd_seq": 2, "tags": ["Prod"]}),
+            json!({"session_uuid": u2, "t_from": 0.0, "t_to": 1.0, "tags": ["ops"]}),
+        ] {
+            assert_eq!(post(&kit, "alice", body).await.0, StatusCode::CREATED);
+        }
+        let hits = |v: &Value| -> Vec<(String, Value, Value)> {
+            v["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    (
+                        h["id"].as_str().unwrap()[..1].to_owned(),
+                        h["cmd_seq"].clone(),
+                        h["tags"].clone(),
+                    )
+                })
+                .collect()
+        };
+        let all = kit.json("/search").await;
+        let tagged: Vec<_> = hits(&all).into_iter().filter(|h| h.2 != json!([])).collect();
+        assert_eq!(
+            tagged,
+            [("c".to_owned(), json!(2), json!(["deploy", "ops", "prod"]))],
+            "command annotations only, merged"
+        );
+        // The span in session 2 (0–1 s) overlaps its only command (`id`, at 0.5 s).
+        let r = kit.json("/search?tag=OPS").await;
+        assert_eq!(
+            hits(&r),
+            [
+                ("c".to_owned(), json!(2), json!(["deploy", "ops", "prod"])),
+                ("c".to_owned(), json!(1), json!([]))
+            ]
+        );
+        assert_eq!(r["hits"][1]["session"], u2);
+        assert_eq!(hits(&kit.json("/search?tag=ops,deploy").await).len(), 1);
+        assert!(
+            hits(&kit.json("/search?tag=ops,prod").await).is_empty(),
+            "AND within one annotation"
+        );
+        let r = kit.json("/search?q=done&in=out&tag=deploy").await;
+        assert_eq!(hits(&r), [("o".to_owned(), json!(2), json!(["deploy", "ops", "prod"]))]);
+        // Every hit of an annotated command carries its tags, not only the first.
+        let r = kit.json("/search?q=d&in=both&tag=deploy").await;
+        let mut got = hits(&r);
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            [
+                ("c".to_owned(), json!(2), json!(["deploy", "ops", "prod"])),
+                ("o".to_owned(), json!(2), json!(["deploy", "ops", "prod"]))
+            ]
+        );
+        let r = kit.json("/search?tag=nope").await;
+        assert_eq!((r["hits"].clone(), r["next"].clone()), (json!([]), Value::Null));
+        let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+        for bad in ["/search?tag=no%20way", &format!("/search?tag={}", many.join(","))] {
+            assert_eq!(kit.get(bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
     }
 
     /// A write that took the clock before a racing write committed still stores (and

@@ -198,6 +198,27 @@ impl SessionCursor {
 /// `(tmux pane, tmux session name, legacy)` of a session.
 pub(crate) type HitContext = (Option<String>, Option<String>, bool);
 
+/// What an annotation context shows of its session.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SessionBrief {
+    pub id: i64,
+    pub user: String,
+    pub host: String,
+    pub pane: Option<String>,
+    pub tmux_session: Option<String>,
+    pub started_at: f64,
+}
+
+/// What an annotation context shows of its command (`typed` cut to `typed_max` characters).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CommandBrief {
+    pub ts_start: f64,
+    pub ts_end: Option<f64>,
+    pub typed: String,
+    pub exit: Option<i32>,
+    pub cwd: Option<String>,
+}
+
 /// A read-only index.db connection with the queries of the API.
 pub(crate) struct IndexDb {
     conn: Connection,
@@ -328,6 +349,76 @@ impl IndexDb {
             {
                 out.insert((*u).to_owned(), v);
             }
+        }
+        Ok(out)
+    }
+
+    /// [`SessionBrief`]s of the given sessions that index.db has (tombstones left out), by
+    /// uuid: one query.
+    pub fn session_briefs(&self, uuids: &[&str]) -> DbResult<HashMap<String, SessionBrief>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT s.uuid, s.id, s.user, s.host, s.tmux_pane, s.tmux_session, s.started_at
+             FROM json_each(?1) j CROSS JOIN sessions s ON s.uuid = j.value WHERE s.attribution IS NOT ?2",
+        )?;
+        let rows = st.query_map(params![serde_json::to_string(uuids)?, TOMBSTONE], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                SessionBrief {
+                    id: r.get(1)?,
+                    user: r.get(2)?,
+                    host: r.get(3)?,
+                    pane: r.get(4)?,
+                    tmux_session: r.get(5)?,
+                    started_at: r.get(6)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// [`CommandBrief`]s of `(session id, seq)` pairs, by pair: one query.
+    pub fn command_briefs(&self, keys: &[(i64, u64)], typed_max: usize) -> DbResult<HashMap<(i64, u64), CommandBrief>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT c.session_id, c.seq, c.ts_start, c.ts_end, substr(c.typed, 1, ?2), c.exit, c.cwd
+             FROM json_each(?1) j CROSS JOIN commands c ON c.session_id = j.value ->> 0 AND c.seq = j.value ->> 1",
+        )?;
+        let keys: Vec<(i64, i64)> = keys.iter().map(|&(s, q)| (s, i64_of(q))).collect();
+        let rows = st.query_map(params![serde_json::to_string(&keys)?, typed_max as i64], |r| {
+            Ok((
+                (r.get::<_, i64>(0)?, u64_at(r, 1)?),
+                CommandBrief {
+                    ts_start: r.get(2)?,
+                    ts_end: r.get(3)?,
+                    typed: r.get(4)?,
+                    exit: r.get(5)?,
+                    cwd: r.get(6)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The `clock` markers of the given sessions, by session id, `t` order: one query.
+    pub fn clock_markers(&self, session_ids: &[i64]) -> DbResult<HashMap<i64, Vec<im::MarkerRow>>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT m.session_id, m.t, m.ts, m.kind, m.data_json FROM markers m
+             WHERE m.kind = 'clock' AND m.session_id IN (SELECT value FROM json_each(?1)) ORDER BY m.session_id, m.t, m.id",
+        )?;
+        let rows = st.query_map([serde_json::to_string(session_ids)?], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                im::MarkerRow {
+                    t: r.get(1)?,
+                    ts: r.get(2)?,
+                    kind: r.get(3)?,
+                    data_json: r.get(4)?,
+                },
+            ))
+        })?;
+        let mut out: HashMap<i64, Vec<im::MarkerRow>> = HashMap::new();
+        for row in rows {
+            let (id, m) = row?;
+            out.entry(id).or_default().push(m);
         }
         Ok(out)
     }

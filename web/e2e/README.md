@@ -23,7 +23,11 @@
 
 Some specs reshape responses with `page.route` instead of adding fixtures: cursor pages of a
 session's hits (`n`/`N`), a failing next result page, `PlayInfo.ready=false` build progress, and
-the metadata 404 of a live session the indexer has not caught up with yet. They run unchanged against a real server. The live specs that grow, pause, crash or end the
+the metadata 404 of a live session the indexer has not caught up with yet. They run unchanged against a real server.
+`annotations-overview.spec.ts` creates annotations by a second author through the mock-only
+`POST /api/_mock/annotations` (an `AnnotationCreate` plus `author`) and skips those steps
+against a real server; `CINELOG_E2E_SHOTS=<dir>` saves its screenshots (light and dark,
+desktop, 390×844 and 904×1000 touch) there. The live specs that grow, pause, crash or end the
 recorder through the mock's control endpoint skip there; the real recorder path is covered by
 the Rust integration test `tests/it/tests/i23_live_web.rs`. The forget spec changes server state, so run it once
 per fresh fixture set (a CI retry of that spec fails).

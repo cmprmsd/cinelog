@@ -10,6 +10,7 @@
   import LivePage from '../live/LivePage.svelte';
   import { liveHref, type Route } from '../route';
   import { router } from '../router.svelte';
+  import AnnotationsPage from '../../routes/annotations/AnnotationsPage.svelte';
   import TimelinePage from '../../routes/timeline/TimelinePage.svelte';
   import SearchBar from './SearchBar.svelte';
   import SearchPage from './SearchPage.svelte';
@@ -224,9 +225,14 @@
   );
 
   // On a session page, submitting the search goes to the result list with the same query.
-  function submitSearch(): void {
+  // The annotations overview's URL has its own `q` and `tag`: the bar is detached there and
+  // hands over the search to run.
+  const detached = $derived(route.name === 'annotations');
+
+  function submitSearch(query?: URLSearchParams): void {
     if (route.name === 'search') return;
-    const qs = new URLSearchParams([...router.query].filter(([k]) => k !== 't' && k !== 'cmd')).toString();
+    const sp = query ?? new URLSearchParams([...router.query].filter(([k]) => k !== 't' && k !== 'cmd'));
+    const qs = sp.toString();
     router.goto(`/${qs ? `?${qs}` : ''}`);
   }
 
@@ -248,12 +254,18 @@
     >
     <a class="brand" href="/" onclick={router.link}>cinelog</a>
     <div class="search">
-      <SearchBar bind:this={searchBar} onsubmit={submitSearch} />
+      <SearchBar bind:this={searchBar} onsubmit={submitSearch} {detached} />
     </div>
     <nav class="tabs" aria-label="Views">
       <a href="/" onclick={router.link} aria-current={route.name === 'search' ? 'page' : undefined}>Search</a>
       <a href="/timeline" onclick={router.link} aria-current={route.name === 'timeline' ? 'page' : undefined} data-testid="nav-timeline"
         >Timeline</a
+      >
+      <a
+        href="/annotations"
+        onclick={router.link}
+        aria-current={route.name === 'annotations' ? 'page' : undefined}
+        data-testid="nav-annotations">Annotations</a
       >
     </nav>
     <button
@@ -338,6 +350,8 @@
         <SessionPage uuid={route.uuid} />
       {:else if route.name === 'timeline'}
         <TimelinePage />
+      {:else if route.name === 'annotations'}
+        <AnnotationsPage />
       {:else if route.name === 'live'}
         <LivePage uuid={route.uuid} />
       {:else}

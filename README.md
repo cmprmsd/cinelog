@@ -28,8 +28,9 @@ It is one static binary (`cinelog`) and a thin [zim](https://github.com/zimfw/zi
   sessions that are still running. Use `cinelog search` with fzf in the terminal, or the
   search page in the browser.
 - **Web UI:** search with a split player and chapters per command, a timeline across panes
-  and users, live view, annotations and tags, and `.cast`/`.txt`/`.html` export. It runs on
-  your LAN over TLS, with a one-time token and an HttpOnly cookie.
+  and users, live view, annotations and tags (with an overview of all annotations and a tag
+  filter for search), and `.cast`/`.txt`/`.html` export. It runs on your LAN over TLS, with a
+  one-time token and an HttpOnly cookie.
 - **Team recording for root shells.** `sudo -i`, `sudo -s`, `su` and root logins are
   recorded below `/root/logs/<member>/`. A system unit serves them, and each member has
   their own token.
@@ -157,6 +158,7 @@ stay allowed. Every pause or skip leaves a visible mark in the timeline.
 |---|---|
 | `cinelog search [-a] [TERM]` | Searches commands (and with `-a` also their output) in fzf. The preview shows the command and its output. Enter prints the web link, and opens it on a local desktop. `--print` and `--json` skip fzf |
 | `cinelog search --cwd . TERM` | Only commands run in this directory and below. Also takes `--user`, `--host`, `--since 2d`, `--until`, `--exit fail`, `--pane %3` |
+| `cinelog search --tag ops TERM` | Only commands and output an annotation tagged `ops` is attached to (a note on the command, or a marked time span). Repeat `--tag` or separate with commas: one annotation must carry all of them |
 | `cinelog search --team TERM` | Searches the team server's history over HTTPS (after `cinelog token team-login`) |
 | `cinelog show <id>` | Prints one command with its output (`<uuid>:<seq>`), or a whole session |
 | `cinelog link [--json]` | Prints the session uuid, cast path and web URL of the current shell |
@@ -201,6 +203,7 @@ server's host (for the team server, `install --team` printed it too).
 | Search: hits in commands and output, the session at the hit, chapters per command | [![search, light](docs/screenshots/search-light.png)](docs/screenshots/search-light.png) | [![search, dark](docs/screenshots/search-dark.png)](docs/screenshots/search-dark.png) |
 | Session: pause and nested-session bands, the command strip, annotations with tags | [![session, light](docs/screenshots/session-light.png)](docs/screenshots/session-light.png) | [![session, dark](docs/screenshots/session-dark.png)](docs/screenshots/session-dark.png) |
 | Timeline: one row per pane or shell, coloured by exit status, pauses hatched, idle time collapsed | [![timeline, light](docs/screenshots/timeline-light.png)](docs/screenshots/timeline-light.png) | [![timeline, dark](docs/screenshots/timeline-dark.png)](docs/screenshots/timeline-dark.png) |
+| Annotations: every note of the server, newest first, with its command or time span; filter by tag, author, text and time | [![annotations, light](docs/screenshots/annotations-light.png)](docs/screenshots/annotations-light.png) | [![annotations, dark](docs/screenshots/annotations-dark.png)](docs/screenshots/annotations-dark.png) |
 | Live: a running shell, read-only; a late joiner sees the current screen | [![live, light](docs/screenshots/live-light.png)](docs/screenshots/live-light.png) | [![live, dark](docs/screenshots/live-dark.png)](docs/screenshots/live-dark.png) |
 | Keyboard: everything works without a mouse (`?`) | [![shortcuts, light](docs/screenshots/shortcuts-light.png)](docs/screenshots/shortcuts-light.png) | [![shortcuts, dark](docs/screenshots/shortcuts-dark.png)](docs/screenshots/shortcuts-dark.png) |
 | Login: token once, then an HttpOnly session cookie; the certificate fingerprint to compare | [![login, light](docs/screenshots/login-light.png)](docs/screenshots/login-light.png) | [![login, dark](docs/screenshots/login-dark.png)](docs/screenshots/login-dark.png) |

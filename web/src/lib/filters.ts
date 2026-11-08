@@ -1,6 +1,7 @@
 // Search state <-> URL query (shareable links) <-> API `SearchParams`.
 
 import type { SearchIn, SearchParams } from './api/types';
+import { normalizeTag } from './annotations/annotations';
 
 export type DatePreset = 'any' | 'today' | '7d' | '30d' | 'custom';
 
@@ -19,6 +20,8 @@ export interface SearchState {
   cwd: string;
   pane: string;
   hidden: boolean;
+  /** Annotation tags (normalised, sorted): only hits whose command or span carries them all. */
+  tags: string[];
 }
 
 export const EMPTY: SearchState = {
@@ -34,6 +37,7 @@ export const EMPTY: SearchState = {
   cwd: '',
   pane: '',
   hidden: false,
+  tags: [],
 };
 
 const MODES: readonly SearchIn[] = ['cmd', 'out', 'both'];
@@ -43,6 +47,29 @@ export function normalizeExit(v: string | null | undefined): string {
   const s = (v ?? '').trim().toLowerCase();
   if (s === 'ok' || s === 'fail') return s;
   return /^-?\d{1,10}$/.test(s) ? String(Number(s)) : '';
+}
+
+/** At most this many tags in a filter (`api::types::parse_tag_list`). */
+export const MAX_FILTER_TAGS = 16;
+
+/**
+ * A comma-separated tag list from the URL: normalised, sorted, without duplicates; names the
+ * server would refuse and anything past the 16th are dropped.
+ */
+export function parseTags(v: string | null): string[] {
+  const out = new Set<string>();
+  for (const raw of (v ?? '').split(',')) {
+    const n = normalizeTag(raw);
+    if (n) out.add(n);
+  }
+  return [...out].sort().slice(0, MAX_FILTER_TAGS);
+}
+
+/** `tags` with `tag` added (sorted); unchanged when it is invalid, present or one too many. */
+export function addTag(tags: readonly string[], tag: string): string[] {
+  const n = normalizeTag(tag);
+  if (!n || tags.includes(n) || tags.length >= MAX_FILTER_TAGS) return [...tags];
+  return [...tags, n].sort();
 }
 
 function epoch(v: string | null): number | null {
@@ -67,6 +94,7 @@ export function stateFromQuery(sp: URLSearchParams): SearchState {
     cwd: sp.get('cwd') ?? '',
     pane: sp.get('pane') ?? '',
     hidden: sp.get('hidden') === '1',
+    tags: parseTags(sp.get('tag')),
   };
   if (s.date !== 'custom') {
     s.from = null;
@@ -100,13 +128,14 @@ export function stateToQuery(s: SearchState, keep?: URLSearchParams): URLSearchP
   if (s.cwd) sp.set('cwd', s.cwd);
   if (s.pane) sp.set('pane', s.pane);
   if (s.hidden) sp.set('hidden', '1');
+  if (s.tags.length) sp.set('tag', s.tags.join(','));
   return sp;
 }
 
-const SEARCH_KEYS = new Set(['q', 'in', 'case', 'user', 'host', 'date', 'from', 'to', 'exit', 'cwd', 'pane', 'hidden']);
+const SEARCH_KEYS = new Set(['q', 'in', 'case', 'user', 'host', 'date', 'from', 'to', 'exit', 'cwd', 'pane', 'hidden', 'tag']);
 
-/** Absolute `ts` bounds for the date filter, relative to `now`. */
-export function dateBounds(s: SearchState, now: Date): { from?: number; to?: number } {
+/** Absolute bounds for a date filter (the search's `ts`, the annotations' `created_at`), relative to `now`. */
+export function dateBounds(s: Pick<SearchState, 'date' | 'from' | 'to'>, now: Date): { from?: number; to?: number } {
   const secs = (d: Date) => Math.floor(d.getTime() / 1000);
   switch (s.date) {
     case 'today': {
@@ -135,14 +164,17 @@ export function toSearchParams(s: SearchState, now: Date, extra: Partial<SearchP
   if (s.cwd) p.cwd = s.cwd;
   if (s.pane) p.pane = s.pane;
   if (s.hidden) p.hidden = true;
+  if (s.tags.length) p.tag = s.tags.join(',');
   return p;
 }
 
-export type FilterKey = 'user' | 'host' | 'date' | 'exit' | 'cwd' | 'pane' | 'hidden';
+export type FilterKey = 'user' | 'host' | 'date' | 'exit' | 'cwd' | 'pane' | 'hidden' | 'tag';
 
 export interface Chip {
   key: FilterKey;
   label: string;
+  /** The tag of a `tag` chip (one chip per tag). */
+  value?: string;
 }
 
 const DATE_LABELS: Record<DatePreset, string> = {
@@ -175,18 +207,37 @@ export function chips(s: SearchState, fmt: (ts: number) => string): Chip[] {
   if (s.cwd) out.push({ key: 'cwd', label: `cwd: ${s.cwd}` });
   if (s.pane) out.push({ key: 'pane', label: `pane: ${s.pane}` });
   if (s.hidden) out.push({ key: 'hidden', label: 'incl. hidden' });
+  for (const t of s.tags) out.push({ key: 'tag', label: `#${t}`, value: t });
   return out;
 }
 
-export function clearFilter(s: SearchState, key: FilterKey): SearchState {
+/** `s` without the filter; for `tag` without that one tag (all of them when `value` is absent). */
+export function clearFilter(s: SearchState, key: FilterKey, value?: string): SearchState {
   switch (key) {
     case 'date':
       return { ...s, date: 'any', from: null, to: null };
     case 'hidden':
       return { ...s, hidden: false };
+    case 'tag':
+      return { ...s, tags: value === undefined ? [] : s.tags.filter((t) => t !== value) };
     default:
       return { ...s, [key]: '' };
   }
 }
 
 export { DATE_LABELS };
+
+/** A `datetime-local` value (local time) for epoch seconds; the URL keeps epoch seconds. */
+export function toLocalInput(ts: number | null): string {
+  if (ts === null) return '';
+  const d = new Date(ts * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Epoch seconds of a `datetime-local` value; null when empty or invalid. */
+export function fromLocalInput(v: string): number | null {
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}

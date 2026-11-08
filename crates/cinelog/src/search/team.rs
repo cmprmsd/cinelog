@@ -645,6 +645,7 @@ mod tests {
             exit: Some(ExitFilter::Failure),
             cwd: Some("/etc".into()),
             include_hidden: true,
+            tags: vec!["db".into(), "ops".into()],
             ..SearchFilters::default()
         };
         let all = list::collect(&*reader, query, 10).unwrap();
@@ -673,6 +674,7 @@ mod tests {
         assert_eq!(get("exit").as_deref(), Some("fail"));
         assert_eq!(get("cwd").as_deref(), Some("/etc"));
         assert_eq!(get("hidden").as_deref(), Some("true"));
+        assert_eq!(get("tag").as_deref(), Some("db,ops"));
         assert_eq!(get("limit").as_deref(), Some("10"));
         assert_eq!(get("cursor"), None);
         assert!(

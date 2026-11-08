@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { knownTags } from '../annotations/tags.svelte';
   import { api, errorText, isAbort } from '../api/client';
   import type { SearchHit } from '../api/types';
-  import { stateFromQuery, toSearchParams } from '../filters';
+  import { addTag, stateFromQuery, stateToQuery, toSearchParams } from '../filters';
   import { useKeys } from '../keymap';
   import { appendHits, removeHits, type HitGroup } from '../results';
   import { router } from '../router.svelte';
@@ -94,6 +95,16 @@
     groups = removeHits(groups, (h) => h.session === session && h.cmd_seq === seq);
   }
 
+  /** A result's tag chip narrows the search to that tag. */
+  function filterTag(tag: string): void {
+    router.setQuery(stateToQuery({ ...search, tags: addTag(search.tags, tag) }, router.query), { replace: true });
+  }
+
+  // Chip colours: the known tags, once annotated results show up.
+  $effect(() => {
+    if (groups.some((g) => g.head.tags.length || g.rest.some((h) => h.tags.length))) void knownTags.load();
+  });
+
   function openHit(hit: SearchHit): void {
     open = { hit, target: { t: hit.t, cmd: hit.cmd_seq } };
   }
@@ -156,7 +167,11 @@
       <p class="banner">More than 5000 candidates. Refine the query or add filters.</p>
     {/if}
     {#if !error && !loading && groups.length === 0}
-      <p class="muted empty">{search.q ? 'No matches.' : 'Nothing indexed yet.'}</p>
+      <p class="muted empty" data-testid="no-results">
+        {#if search.tags.length}No {search.q ? 'matches' : 'commands'} annotated {search.tags.map((t) => `#${t}`).join(' ')}.{:else}{search.q
+            ? 'No matches.'
+            : 'Nothing indexed yet.'}{/if}
+      </p>
     {/if}
     <div class="list">
       <Results
@@ -168,6 +183,8 @@
         onopen={openHit}
         onactive={(i) => (active = i)}
         onmore={more}
+        ontag={filterTag}
+        filtered={search.tags}
       />
     </div>
   </section>

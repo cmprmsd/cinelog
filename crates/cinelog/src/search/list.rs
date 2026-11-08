@@ -665,6 +665,19 @@ mod tests {
         assert!(out.contains("bob@box"));
     }
 
+    /// `--tag` repeats or takes a comma list; names are normalised, sorted, deduplicated.
+    #[test]
+    fn tags_reach_the_query() {
+        let q = build_query(&args(&["--tag", "Ops,db", "--tag", "x", "--tag", "ops"]), &env()).unwrap();
+        assert_eq!(q.filters.tags, ["db", "ops", "x"]);
+        assert!(build_query(&args(&[]), &env()).unwrap().filters.tags.is_empty());
+        let err = build_query(&args(&["--tag", "two words"]), &env()).unwrap_err();
+        assert!(err.to_string().contains("--tag"), "{err}");
+        // The store has no annotations: nothing carries the tag.
+        let (c, out, _) = run(&["--tag", "ops"], Ui::Plain);
+        assert_eq!((c, out.as_str()), (1, ""));
+    }
+
     #[test]
     fn no_match_exits_1() {
         let (c, out, err) = run(&["does-not-exist"], Ui::Plain);

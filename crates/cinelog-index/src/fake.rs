@@ -75,6 +75,31 @@ impl State {
         })
     }
 
+    /// The targets of the newest [`TAG_FILTER_CAP`] non-deleted annotations carrying every
+    /// tag of `tags` (`None`: no tag filter), and whether there were more.
+    fn tagged(&self, tags: &[String]) -> (Option<Tagged>, bool) {
+        if tags.is_empty() {
+            return (None, false);
+        }
+        let mut found: Vec<&Annotation> = self
+            .annotations
+            .values()
+            .filter(|a| a.deleted_at.is_none() && tags.iter().all(|t| a.tags.contains(t)))
+            .collect();
+        found.sort_by(|a, b| b.created_at.total_cmp(&a.created_at).then_with(|| b.uuid.cmp(&a.uuid)));
+        let capped = found.len() > TAG_FILTER_CAP;
+        found.truncate(TAG_FILTER_CAP);
+        let mut t = Tagged::default();
+        for a in found {
+            match (a.cmd_seq, a.t_from, a.t_to) {
+                (Some(seq), _, _) => t.commands.push((a.session_uuid.clone(), seq)),
+                (None, Some(from), Some(to)) => t.spans.push((a.session_uuid.clone(), from, to)),
+                _ => {}
+            }
+        }
+        (Some(t), capped)
+    }
+
     fn session_forgotten(&self, uuid: &str) -> bool {
         self.forgotten_applied
             .iter()
@@ -444,6 +469,32 @@ fn snippet(text: &str, needle: &str, case_sensitive: bool) -> Option<String> {
     Some(s)
 }
 
+/// What a search tag filter admits: annotated commands and annotated spans.
+#[derive(Debug, Default)]
+struct Tagged {
+    commands: Vec<(String, Seq)>,
+    spans: Vec<(String, f64, f64)>,
+}
+
+impl Tagged {
+    fn command(&self, uuid: &str, c: &Command) -> bool {
+        self.commands.iter().any(|(u, s)| u == uuid && *s == c.seq)
+            || self
+                .spans
+                .iter()
+                .any(|(u, from, to)| u == uuid && c.t_start <= *to && c.t_end.is_none_or(|e| e >= *from))
+    }
+
+    fn chunk(&self, uuid: &str, ch: &Chunk) -> bool {
+        ch.cmd_seq
+            .is_some_and(|seq| self.commands.iter().any(|(u, s)| u == uuid && *s == seq))
+            || self
+                .spans
+                .iter()
+                .any(|(u, from, to)| u == uuid && ch.t >= *from && ch.t <= *to)
+    }
+}
+
 fn passes(f: &SearchFilters, s: &SessionMeta, ts: f64, cmd: Option<&Command>) -> bool {
     let eq = |want: &Option<String>, have: Option<&str>| want.as_deref().is_none_or(|w| have == Some(w));
     (f.include_hidden || !s.hidden)
@@ -459,13 +510,8 @@ fn passes(f: &SearchFilters, s: &SessionMeta, ts: f64, cmd: Option<&Command>) ->
 
 impl Searcher for MemIndex {
     fn search(&self, q: &SearchQuery) -> Result<SearchPage> {
-        if !q.filters.tags.is_empty() {
-            // Contract only: implemented by the backend work package.
-            return Err(IndexError::Invalid(
-                "the search tag filter is not implemented yet".into(),
-            ));
-        }
         let st = self.st();
+        let (tagged, tags_capped) = st.tagged(&q.filters.tags);
         let needle = fold(&q.term, q.case_sensitive);
         let mut hits = Vec::new();
         let by_seq = |uuid: &str, seq: Option<Seq>| seq.and_then(|s| st.commands.get(&(uuid.to_owned(), s)));
@@ -477,7 +523,11 @@ impl Searcher for MemIndex {
                     .iter()
                     .flatten()
                     .any(|h| fold(h, q.case_sensitive).contains(&needle));
-                if hit && passes(&q.filters, s, c.ts_start, Some(c)) && !st.command_forgotten(uuid, c.seq) {
+                if hit
+                    && passes(&q.filters, s, c.ts_start, Some(c))
+                    && !st.command_forgotten(uuid, c.seq)
+                    && tagged.as_ref().is_none_or(|t| t.command(uuid, c))
+                {
                     hits.push(SearchHit {
                         kind: HitKind::Command,
                         id: *id,
@@ -505,6 +555,7 @@ impl Searcher for MemIndex {
                 if !fold(&ch.text, q.case_sensitive).contains(&needle)
                     || !passes(&q.filters, s, ch.ts, cmd)
                     || st.chunk_forgotten(uuid, ch)
+                    || tagged.as_ref().is_some_and(|t| !t.chunk(uuid, ch))
                 {
                     continue;
                 }
@@ -539,7 +590,7 @@ impl Searcher for MemIndex {
                 k.0 < ck.0 || (k.0 == ck.0 && (k.1, k.2) < (ck.1, ck.2))
             });
         }
-        let capped = hits.len() > CANDIDATE_CAP;
+        let capped = hits.len() > CANDIDATE_CAP || tags_capped;
         let more = hits.len() > q.limit;
         hits.truncate(q.limit);
         let next = more.then(|| hits.last()).flatten().map(|h| Cursor {
@@ -753,29 +804,41 @@ impl MetaStore for MemIndex {
     }
 
     fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
-        // Contract only (annotations overview): implemented by the backend work package.
-        if q.uuid.is_some() || q.text.is_some() || q.since.is_some() || q.until.is_some() || q.newest_first {
-            return Err(IndexError::Invalid(
-                "annotation filters uuid, text, since, until and newest_first are not implemented yet".into(),
-            ));
-        }
         let st = self.st();
+        let needle = q.text.as_ref().map(|t| t.to_lowercase());
+        let key = |a: &Annotation| (a.created_at, a.uuid.clone());
+        let after = |a: &Annotation| {
+            q.after.as_ref().is_none_or(|(c, u)| {
+                let ord = a.created_at.total_cmp(c).then_with(|| a.uuid.as_str().cmp(u));
+                if q.newest_first { ord.is_lt() } else { ord.is_gt() }
+            })
+        };
         let mut v: Vec<Annotation> = st
             .annotations
             .values()
             .filter(|a| q.sessions.is_empty() || q.sessions.contains(&a.session_uuid))
             .filter(|a| q.cmd_seq.is_none_or(|s| a.cmd_seq == Some(s)))
+            .filter(|a| {
+                q.commands.is_empty()
+                    || a.cmd_seq
+                        .is_some_and(|s| q.commands.iter().any(|(u, n)| *u == a.session_uuid && *n == s))
+            })
+            .filter(|a| q.uuid.as_ref().is_none_or(|u| a.uuid == *u))
             .filter(|a| q.tags.iter().all(|t| a.tags.contains(t)))
             .filter(|a| q.author.as_ref().is_none_or(|w| a.author == *w))
+            .filter(|a| needle.as_ref().is_none_or(|n| a.body.to_lowercase().contains(n)))
+            .filter(|a| q.since.is_none_or(|v| a.created_at >= v) && q.until.is_none_or(|v| a.created_at <= v))
             .filter(|a| q.include_deleted || a.deleted_at.is_none())
-            .filter(|a| {
-                q.after
-                    .as_ref()
-                    .is_none_or(|(c, u)| a.created_at > *c || (a.created_at == *c && a.uuid.as_str() > u.as_str()))
-            })
+            .filter(|a| after(a))
             .cloned()
             .collect();
-        v.sort_by(|a, b| a.created_at.total_cmp(&b.created_at).then_with(|| a.uuid.cmp(&b.uuid)));
+        v.sort_by(|a, b| {
+            let (a, b) = (key(a), key(b));
+            a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+        });
+        if q.newest_first {
+            v.reverse();
+        }
         if q.limit > 0 {
             v.truncate(q.limit);
         }

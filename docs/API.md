@@ -230,14 +230,16 @@ parent's `children`. Filters: `from`/`to` (sessions active in the window: starte
   annotation (also an unknown tag) is an empty page with `next: null`, not an error. It
   combines with `q` and every other filter (empty `q`: the newest annotated commands).
   The searcher resolves the matching annotations from meta.db once per request (the
-  read-only connection it already holds for `meta.forgotten`) and restricts the index.db
-  candidates to their sessions and targets (a JSON parameter through `json_each`; no
+  read-only connection it already holds for `meta.forgotten`) into index.db command ids and
+  spans and restricts the candidates to them (JSON parameters through `json_each`; no
   `ATTACH`, no cross-database join), so the p95 of a tagged search stays that of an untagged
-  one. At most the newest 10 000 matching annotations are considered; beyond that `capped`
-  is `true`. Cursors are unchanged (`ts`, kind, id); the set is resolved again for every
-  page, so an annotation added or removed between pages can add or drop later hits but never
-  repeats one. `cinelog search --tag TAG` (repeatable or comma-separated, same semantics)
-  applies it to the local database and, with `--team`, sends it as `tag=`.
+  one. A short-term scan (terms under 3 characters) looks the admitted rows up instead of
+  walking the `ts` index when the filter admits at most 5000 of them. At most the newest
+  10 000 matching annotations are considered; beyond that `capped` is `true`. Cursors are
+  unchanged (`ts`, kind, id); the set is resolved again for every page, so an annotation
+  added or removed between pages can add or drop later hits but never repeats one.
+  `cinelog search --tag TAG` (repeatable or comma-separated, same semantics) applies it to
+  the local database and, with `--team`, sends it as `tag=`.
 - `limit` 1–500, default 50; `cursor`.
 - Order: newest `ts` first. `partial`: a term under 3 characters ran the 500 ms
   newest-first scan and stopped early. `capped`: more than 5000 candidates, refine.
@@ -550,7 +552,7 @@ Stored in meta.db (authoritative, keyed by session uuid and command seq, so they
     none, while `next` is not `null`: keep following `next`.
 - `GET /api/annotations/authors` → `AuthorList`: every author of a non-deleted
   annotation, by name, `count` like `Tag.count` (annotations gone with a forgotten session or
-  command left out). The overview's author picker.
+  command left out; an author left with none is not listed). The overview's author picker.
 - `POST /api/annotations` (`AnnotationCreate`, validated by `AnnotationCreate::validate`):
   `author` is the principal, `uuid` a new UUIDv7. 404 when the session is unknown or
   forgotten or `cmd_seq` is not one of its commands. 201 with the `Annotation`.
@@ -609,7 +611,10 @@ comes from `Content-Disposition`. `e` opens the menu.
   annotation and `sessionHref(session, {t: t_from})` for a span (no search state kept).
   Keys: `j`/`k` move, `Enter` opens, `o` opens in a new tab (the result actions of
   `lib/keys.ts`). Empty state (no annotations at all vs. none matching the filters, with
-  a reset) and an error state with retry.
+  a reset) and an error state with retry. The header search field keeps its own state on
+  this page (the overview owns `q`, `tag` and `date` there); `Enter` in it opens `/?<search>`.
+  The tag and author pickers (`/api/tags`, `/api/annotations/authors`) reload after bus
+  `annotation`, `forgotten` and fresh `hello` events; a `tag` event updates the tag list.
 - **Search tag filter URL:** `tag=<a,b>` on `/` (`lib/filters.ts` `SearchState.tags`,
   sent as `SearchParams.tag`); tag chips on annotated results (`SearchHit.tags`) add their
   tag to the filter.
@@ -635,9 +640,12 @@ event a handler or `forget` publishes) and hands every other request, before the
 check, to the M4 handlers in `web/e2e/mock/m4/` (`MockHandler`, `MockContext` in
 `context.ts`): `live.ts` (M4-D), `timeline.ts` (M4-B), `annotations.ts` (M4-C). Each work
 package writes its own specs (`e2e/live.spec.ts`, `e2e/export.spec.ts` M4-D,
-`e2e/timeline.spec.ts` M4-B, `e2e/annotations.spec.ts` M4-C). The Playwright config does not
-override the User-Agent (Chromium drops the override on some navigations while an
-EventSource is open, and sessions are bound to the User-Agent).
+`e2e/timeline.spec.ts` M4-B, `e2e/annotations.spec.ts` M4-C,
+`e2e/annotations-overview.spec.ts` the overview tab and the search tag filter). The mock-only
+`POST /api/_mock/annotations` (an `AnnotationCreate` plus `author`) creates an annotation as
+another principal; specs skip the steps that use it against a real server. The Playwright
+config does not override the User-Agent (Chromium drops the override on some navigations
+while an EventSource is open, and sessions are bound to the User-Agent).
 
 ## 10. Implementation map (development history)
 

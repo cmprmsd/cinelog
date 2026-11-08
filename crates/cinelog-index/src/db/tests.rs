@@ -7,7 +7,7 @@ use cinelog_core::config::IndexConfig;
 use cinelog_proto::Scope;
 use rusqlite::Connection;
 
-use super::query::{SqliteSearcher, candidate_sql, scan_sql};
+use super::query::{SqliteSearcher, candidate_sql, scan_sql, tagged_outputs_sql};
 use super::writer::REDACTED;
 use super::*;
 use crate::api::{IndexWriter, MetaStore, Searcher};
@@ -588,12 +588,37 @@ fn explain_query_plans() {
                 );
             }
         }
-        let p = plan(&scan_sql(kind, "LIKE", " AND s.hidden = 0"));
+        let p = plan(&scan_sql(kind, "LIKE", " AND s.hidden = 0", true));
         assert!(
             p.iter().all(|l| !l.contains("TEMP B-TREE")),
             "{kind:?} scan sorts: {p:?}"
         );
         assert!(p.iter().any(|l| l.contains("_ts")), "{kind:?} scan: {p:?}");
+    }
+    // A tag filter: the trigram lookups still drive the candidates; a short-term scan of a
+    // small admitted set looks the rows up by id instead of walking a table.
+    for kind in [HitKind::Command, HitKind::Output] {
+        let tagged = match kind {
+            HitKind::Command => " AND c.id IN (SELECT value FROM json_each(?2))".to_owned(),
+            HitKind::Output => format!(" AND o.id IN ({})", tagged_outputs_sql("?2", "?3")),
+        };
+        let p = plan(&candidate_sql(kind, "LIKE", &format!(" WHERE s.hidden = 0{tagged}")));
+        assert!(
+            p.iter().any(|l| trigram.is_match(l)) && p.iter().all(|l| !table_scan.is_match(l)),
+            "{kind:?} tagged candidates: {p:?}"
+        );
+        let p = plan(&scan_sql(kind, "LIKE", &tagged, false));
+        assert!(p.iter().all(|l| !table_scan.is_match(l)), "{kind:?} tagged scan: {p:?}");
+        assert!(
+            p.iter().any(|l| l.contains("USING INTEGER PRIMARY KEY (rowid=?)")),
+            "{kind:?} tagged scan: {p:?}"
+        );
+        if kind == HitKind::Output {
+            assert!(
+                p.iter().any(|l| l.contains("outputs_cmd")) && p.iter().any(|l| l.contains("outputs_sess")),
+                "{p:?}"
+            );
+        }
     }
     // The defect the rules exist for: a LIKE on the table name is a full scan (`INDEX 0:`).
     let bad = plan("SELECT rowid FROM cmd_fts WHERE cmd_fts LIKE ?1");
@@ -1649,6 +1674,114 @@ fn check_annotation_queries(m: &mut dyn MetaStore) {
         ..all.clone()
     };
     assert!(uuids(&q).is_empty());
+    let q = AnnotationQuery {
+        commands: vec![(U2.into(), 2), (U1.into(), 3)],
+        include_deleted: true,
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a4"], "only the listed (session, seq) pairs");
+    let q = AnnotationQuery {
+        commands: vec![(U1.into(), 2), (U2.into(), 2)],
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a1", "a2", "a3"]);
+    let q = AnnotationQuery {
+        commands: vec![(U2.into(), 3)],
+        ..all.clone()
+    };
+    assert!(uuids(&q).is_empty());
+
+    // Newest first, uuid descending breaks ties; the keyset follows the order.
+    let desc = AnnotationQuery {
+        newest_first: true,
+        ..all.clone()
+    };
+    assert_eq!(uuids(&desc), ["a3", "a2", "a1"]);
+    let q = AnnotationQuery {
+        after: Some((20.0, "a3".into())),
+        limit: 1,
+        ..desc.clone()
+    };
+    assert_eq!(uuids(&q), ["a2"], "keyset cursor, descending");
+    let q = AnnotationQuery {
+        after: Some((20.0, "a2".into())),
+        ..desc.clone()
+    };
+    assert_eq!(uuids(&q), ["a1"]);
+    let q = AnnotationQuery {
+        tags: vec!["ops".into(), "incident".into()],
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a3"], "every tag, on one annotation");
+    let q = AnnotationQuery {
+        tags: vec!["ops".into(), "nope".into()],
+        ..all.clone()
+    };
+    assert!(uuids(&q).is_empty());
+    let q = AnnotationQuery {
+        uuid: Some("a2".into()),
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a2"]);
+    let q = AnnotationQuery {
+        uuid: Some("a4".into()),
+        ..all.clone()
+    };
+    assert!(uuids(&q).is_empty(), "the other filters still apply");
+    let q = AnnotationQuery {
+        since: Some(20.0),
+        until: Some(30.0),
+        include_deleted: true,
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a2", "a3", "a4"], "inclusive created_at bounds");
+    let q = AnnotationQuery {
+        until: Some(19.999),
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a1"]);
+
+    // Body text: Unicode lowercase on both sides, in order, up to the limit.
+    let mut x = annotation("a5", 40.0, &[]);
+    x.body = "Viel ÄRGER mit dem Deploy".into();
+    m.put_annotation(&x).unwrap();
+    let mut x = annotation("a6", 50.0, &[]);
+    x.body = "ärger again".into();
+    m.put_annotation(&x).unwrap();
+    let uuids =
+        |q: &AnnotationQuery| -> Vec<String> { m.find_annotations(q).unwrap().into_iter().map(|a| a.uuid).collect() };
+    let text = |t: &str| AnnotationQuery {
+        text: Some(t.into()),
+        ..all.clone()
+    };
+    assert_eq!(uuids(&text("ärger")), ["a5", "a6"]);
+    assert_eq!(uuids(&text("ÄrGeR")), ["a5", "a6"]);
+    assert_eq!(
+        uuids(&text("NOTE A")),
+        ["a1", "a2", "a3"],
+        "the default body is `note <uuid>`"
+    );
+    let q = AnnotationQuery {
+        limit: 1,
+        newest_first: true,
+        ..text("ärger")
+    };
+    assert_eq!(uuids(&q), ["a6"]);
+    let q = AnnotationQuery {
+        after: Some((50.0, "a6".into())),
+        ..q
+    };
+    assert_eq!(uuids(&q), ["a5"]);
+    assert!(uuids(&text("deploys")).is_empty());
+
+    assert_eq!(
+        m.authors().unwrap(),
+        [AuthorInfo {
+            name: "alice".into(),
+            count: 5
+        }],
+        "deleted ones do not count"
+    );
 
     assert_eq!(m.annotation("a4").unwrap().unwrap().deleted_at, Some(31.0));
     assert_eq!(m.annotation("nope").unwrap(), None);
@@ -1678,6 +1811,186 @@ fn meta_annotation_queries_and_tags() {
     let env = Env::new();
     check_annotation_queries(env.meta().as_mut());
     check_annotation_queries(&mut crate::fake::MemIndex::new());
+}
+
+/// The tag filter of a search (docs/API.md §5.4), for any [`Searcher`] whose annotations
+/// and forgotten list `m` writes. U1 has commands 1–3 (t 10, 20, 30, each one second long)
+/// with output, gap output at t 1 and 25 and a running command 5 at t 50; U2 one command at
+/// t 40.
+fn check_tag_search(base: SessionMeta, w: &mut dyn IndexWriter, m: &mut dyn MetaStore, r: &dyn Searcher) {
+    let mut b = IndexBatch::new(SessionMeta {
+        uuid: U1.into(),
+        ..base.clone()
+    });
+    b.commands = (1..=3)
+        .map(|i| command(i, &format!("run {i}"), i as f64 * 10.0))
+        .collect();
+    b.chunks = vec![
+        chunk(None, 1.0, "out gap early"),
+        chunk(Some(1), 10.5, "out one"),
+        chunk(Some(2), 20.5, "out two"),
+        chunk(None, 25.0, "out gap late"),
+        chunk(Some(3), 30.5, "out three"),
+    ];
+    // Still running: open-ended.
+    let mut running = command(5, "tail -f log", 50.0);
+    (running.t_end, running.ts_end) = (None, None);
+    b.commands.push(running);
+    w.apply(&b).unwrap();
+    let mut b = IndexBatch::new(SessionMeta {
+        uuid: U2.into(),
+        cast_path: base.cast_path.with_extension("u2"),
+        ..base
+    });
+    b.commands = vec![command(1, "run 4", 40.0)];
+    b.chunks = vec![chunk(Some(1), 40.5, "out four")];
+    w.apply(&b).unwrap();
+
+    let note = |uuid: &str, session: &str, target: (Option<Seq>, Option<f64>, Option<f64>), tags: &[&str]| {
+        let mut a = annotation(uuid, 100.0, tags);
+        (a.session_uuid, a.cmd_seq, a.t_from, a.t_to) = (session.into(), target.0, target.1, target.2);
+        a
+    };
+    m.put_annotation(&note("a1", U1, (Some(1), None, None), &["db", "ops"]))
+        .unwrap();
+    // A span over the end of command 2 (20–21) and the late gap chunk, not command 3.
+    m.put_annotation(&note("a2", U1, (None, Some(20.75), Some(25.0)), &["ops"]))
+        .unwrap();
+    let mut gone = note("a3", U1, (Some(3), None, None), &["db"]);
+    gone.deleted_at = Some(101.0);
+    m.put_annotation(&gone).unwrap();
+    m.put_annotation(&note("a4", U2, (Some(1), None, None), &["ops"]))
+        .unwrap();
+    m.put_annotation(&note("a5", U2, (Some(9), None, None), &["lost"]))
+        .unwrap();
+    m.put_annotation(&note("a6", U1, (None, Some(60.0), Some(61.0)), &["late"]))
+        .unwrap();
+
+    let run = |term: &str, target: SearchTarget, tags: &[&str], limit: usize| -> (Vec<String>, bool) {
+        let mut q = SearchQuery::new(term);
+        q.target = target;
+        q.filters.tags = tags.iter().map(|t| (*t).to_owned()).collect();
+        q.limit = limit;
+        let mut out = Vec::new();
+        loop {
+            let p = r.search(&q).unwrap();
+            out.extend(p.hits.iter().map(|h| {
+                let who = if h.session_uuid == U1 { "u1" } else { "u2" };
+                match (h.kind, h.cmd_seq) {
+                    (HitKind::Command, Some(s)) => format!("{who}:c{s}"),
+                    (HitKind::Output, Some(s)) => format!("{who}:o{s}"),
+                    _ => format!("{who}:gap@{}", h.t),
+                }
+            }));
+            match p.next {
+                Some(c) => q.cursor = Some(c.to_string().parse().unwrap()),
+                None => return (out, p.capped),
+            }
+        }
+    };
+    let cmds = |tags: &[&str]| run("", SearchTarget::Commands, tags, 50).0;
+    assert_eq!(cmds(&["ops"]), ["u2:c1", "u1:c2", "u1:c1"]);
+    assert_eq!(cmds(&["db", "ops"]), ["u1:c1"], "all tags on one annotation");
+    assert_eq!(cmds(&["db"]), ["u1:c1"], "deleted annotations do not count");
+    assert!(cmds(&["nope"]).is_empty());
+    assert!(cmds(&["lost"]).is_empty(), "a command index.db does not have");
+    assert_eq!(cmds(&["late"]), ["u1:c5"], "a running command is open-ended");
+    assert_eq!(
+        run("run", SearchTarget::Commands, &["ops"], 50).0,
+        ["u2:c1", "u1:c2", "u1:c1"]
+    );
+    assert_eq!(
+        run("out", SearchTarget::All, &["ops"], 50).0,
+        ["u2:o1", "u1:gap@25", "u1:o1"],
+        "output by its command's annotation, or by its own t inside a span (o2 starts before it)"
+    );
+    // One hit per page: the same list, in the same order.
+    assert_eq!(
+        run("run", SearchTarget::Commands, &["ops"], 1).0,
+        run("run", SearchTarget::Commands, &["ops"], 50).0
+    );
+    assert_eq!(
+        run("u", SearchTarget::All, &["ops"], 1).0,
+        run("u", SearchTarget::All, &["ops"], 50).0
+    );
+    assert_eq!(
+        run("ou", SearchTarget::Output, &["ops"], 2).0,
+        ["u2:o1", "u1:gap@25", "u1:o1"],
+        "short-term scan"
+    );
+
+    // Other filters still apply, and forgotten sessions never count.
+    let mut q = SearchQuery::new("");
+    q.filters.tags = vec!["ops".into()];
+    q.filters.session = Some(U1.into());
+    assert_eq!(r.search(&q).unwrap().hits.len(), 2);
+    m.forget(&ForgetTarget::Session { uuid: U2.into() }, "alice").unwrap();
+    assert_eq!(cmds(&["ops"]), ["u1:c2", "u1:c1"]);
+    let p = run("", SearchTarget::Commands, &["nope"], 50);
+    assert_eq!(p, (Vec::new(), false));
+}
+
+#[test]
+fn search_tag_filter() {
+    let env = Env::new();
+    let (mut w, mut m) = (env.writer(), env.meta());
+    let r = env.reader();
+    check_tag_search(session(&env, U1), w.as_mut(), m.as_mut(), r.as_ref());
+
+    let mem = crate::fake::MemIndex::new();
+    check_tag_search(session(&env, U1), &mut mem.clone(), &mut mem.clone(), &mem);
+}
+
+/// A tag on more than [`TAG_FILTER_CAP`] annotations: the newest ones count, `capped` is set.
+#[test]
+fn search_tag_filter_cap() {
+    let env = Env::new();
+    let mut w = env.writer();
+    fixture(&env, w.as_mut());
+    let mut m = env.meta();
+    m.put_annotation(&annotation("a0", 1.0, &["bulk"])).unwrap();
+    let conn = Connection::open(&env.paths.meta).unwrap();
+    conn.execute_batch(&format!(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {TAG_FILTER_CAP})
+         INSERT INTO annotations(uuid, session_uuid, cmd_seq, author, body, created_at, updated_at)
+           SELECT 'b' || i, '{U1}', 1, 'alice', '', 10.0 + i, 10.0 + i FROM n;
+         INSERT INTO annotation_tags(annotation_id, tag_id)
+           SELECT a.id, t.id FROM annotations a, tags t WHERE a.uuid GLOB 'b*' AND t.name = 'bulk';"
+    ))
+    .unwrap();
+    let r = env.reader();
+    let mut q = SearchQuery::new("");
+    q.filters.tags = vec!["bulk".into()];
+    let p = r.search(&q).unwrap();
+    assert!(p.capped);
+    assert_eq!(seqs(&p), [(HitKind::Command, Some(1))], "a0 (command 2) is the oldest");
+    q.term = "make".into();
+    assert!(r.search(&q).unwrap().hits.is_empty());
+}
+
+/// The tag filter cap counts annotations attached to nothing searchable too.
+#[test]
+fn tag_targets_cap_counts_unusable_annotations() {
+    let env = Env::new();
+    let mut m = env.meta();
+    m.put_annotation(&annotation("a1", 10.0, &["x"])).unwrap();
+    for (uuid, created) in [("a2", 20.0), ("a3", 30.0)] {
+        // Neither a command nor a span (t_to unset).
+        let mut a = annotation(uuid, created, &["x"]);
+        a.cmd_seq = None;
+        m.put_annotation(&a).unwrap();
+    }
+    let conn = Connection::open(&env.paths.meta).unwrap();
+    let tags = ["x".to_owned()];
+    assert_eq!(super::meta::tag_targets(&conn, &tags, 2).unwrap(), (vec![], true));
+    let command = super::meta::TagTarget::Command {
+        session: U1.into(),
+        seq: 2,
+    };
+    assert_eq!(
+        super::meta::tag_targets(&conn, &tags, 3).unwrap(),
+        (vec![command], false)
+    );
 }
 
 #[test]

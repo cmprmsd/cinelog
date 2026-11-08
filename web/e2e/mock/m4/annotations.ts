@@ -1,14 +1,22 @@
-// Mock of `/api/annotations`, `/api/annotations/{uuid}` and `/api/tags` (work package M4-C;
-// docs/API.md §9.4): in-memory annotations and tags with the server's validation, author
-// rules, soft delete, cursor pages and bus events. Annotations of forgotten sessions and
-// commands are treated as absent, like the server does.
+// Mock of `/api/annotations`, `/api/annotations/authors`, `/api/annotations/{uuid}` and
+// `/api/tags` (work package M4-C, the overview's parameters and contexts; docs/API.md §9.4):
+// in-memory annotations and tags with the server's validation, author rules, soft delete,
+// cursor pages in either order and bus events. Annotations of forgotten sessions and
+// commands are treated as absent, like the server does. `liveAnnotations` gives the search
+// mock its tag filter and hit tags (§5.4).
+//
+// Mock-only control, for the specs (`e2e/annotations-overview.spec.ts`): `POST
+// /api/_mock/annotations` with an `AnnotationCreate` plus `author` creates the annotation as
+// that principal (a TEAM member other than the signed-in one), bus events included.
 
 import { randomBytes } from 'node:crypto';
 import type {
   Annotation,
+  AnnotationContext,
   AnnotationCreate,
   AnnotationPage,
   AnnotationPatch,
+  AuthorList,
   Tag,
   TagList,
   TagRequest,
@@ -17,6 +25,7 @@ import type { MockContext, MockHandler, MockRequest } from './context.ts';
 
 const MAX_BODY = 16 * 1024;
 const MAX_TAGS = 16;
+const MAX_Q = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TAG_CHAR = /^[\p{Alphabetic}\p{N}\-_.:/+#@]$/u;
 
@@ -96,6 +105,42 @@ function gone(ctx: MockContext, a: Annotation): boolean {
   return !f || (a.cmd_seq !== null && ctx.maskFor(f)(a.cmd_seq) !== null);
 }
 
+/** Non-deleted annotations that are not gone with forgotten content (search's tag filter). */
+export function liveAnnotations(ctx: MockContext): Annotation[] {
+  return [...annotations.values()].filter((a) => a.deleted_at === null && !gone(ctx, a));
+}
+
+/** A `tag` parameter: comma-separated, each normalised, at most 16 (`parse_tag_list`). */
+export function parseTagList(ctx: MockContext, raw: string | null): string[] {
+  const out = new Set<string>();
+  for (const item of (raw ?? '').split(',')) if (item.trim()) out.add(normalizeTag(ctx, item));
+  if (out.size > MAX_TAGS) ctx.fail(400, 'bad_request', `at most ${MAX_TAGS} tags`);
+  return [...out];
+}
+
+/** Where an annotation sits (`AnnotationContext`); none when its session is unknown. */
+function contextOf(ctx: MockContext, a: Annotation): AnnotationContext | null {
+  const f = ctx.fixtures.find((x) => x.session.uuid === a.session);
+  if (!f) return null;
+  const s = f.session;
+  const base = { user: s.user, host: s.host, pane: s.tmux.pane, tmux_session: s.tmux.session, started_at: s.started_at };
+  if (a.cmd_seq !== null) {
+    const c = f.commands.find((x) => x.seq === a.cmd_seq);
+    if (!c) return { ...base, command: null, ts_from: s.started_at, ts_to: null };
+    const typed = (c.typed.split('\n')[0] ?? '').slice(0, 200);
+    return { ...base, command: { typed, exit: c.exit, cwd: c.cwd }, ts_from: s.started_at + c.t_start, ts_to: s.started_at + c.t_end };
+  }
+  return { ...base, command: null, ts_from: s.started_at + (a.t_from ?? 0), ts_to: s.started_at + (a.t_to ?? 0) };
+}
+
+function bound(ctx: MockContext, sp: URLSearchParams, key: string): number | null {
+  const raw = sp.get(key);
+  if (raw === null) return null;
+  const n = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(n)) ctx.fail(400, 'bad_request', `invalid query: ${key}`);
+  return n;
+}
+
 /** The live annotation `uuid`, or 404. */
 function existing(ctx: MockContext, uuid: string): Annotation {
   if (!UUID_RE.test(uuid)) ctx.fail(400, 'bad_request', 'not an annotation uuid');
@@ -117,8 +162,21 @@ function list(ctx: MockContext, url: URL): AnnotationPage {
   const cmdSeq = cmdRaw === null ? null : Number(cmdRaw);
   if (cmdSeq !== null && (!Number.isInteger(cmdSeq) || cmdSeq < 0)) ctx.fail(400, 'bad_request', 'invalid query: cmd_seq');
   if (cmdSeq !== null && session === null) ctx.fail(400, 'bad_request', 'cmd_seq needs session');
-  const tag = sp.has('tag') ? normalizeTag(ctx, sp.get('tag')) : null;
+  const tagList = parseTagList(ctx, sp.get('tag'));
   const author = sp.get('author')?.trim() || null;
+  const uuid = sp.get('uuid');
+  if (uuid !== null && !UUID_RE.test(uuid)) ctx.fail(400, 'bad_request', 'invalid query: uuid');
+  const qRaw = sp.get('q')?.trim() ?? '';
+  if ([...qRaw].length > MAX_Q) ctx.fail(400, 'bad_request', `q is longer than ${MAX_Q} characters`);
+  const q = qRaw.toLowerCase();
+  const from = bound(ctx, sp, 'from');
+  const to = bound(ctx, sp, 'to');
+  if (from !== null && to !== null && from > to) ctx.fail(400, 'bad_request', 'from is after to');
+  const order = sp.get('order') ?? 'asc';
+  if (order !== 'asc' && order !== 'desc') ctx.fail(400, 'bad_request', 'invalid query: order');
+  const desc = order === 'desc';
+  const context = sp.get('context');
+  if (context !== null && context !== 'true' && context !== 'false') ctx.fail(400, 'bad_request', 'invalid query: context');
   const deleted = sp.get('deleted');
   if (deleted !== null && deleted !== 'true' && deleted !== 'false') ctx.fail(400, 'bad_request', 'invalid query: deleted');
   const limit = sp.has('limit') ? Number(sp.get('limit')) : 200;
@@ -130,24 +188,38 @@ function list(ctx: MockContext, url: URL): AnnotationPage {
     if (!ts || !id || !Number.isFinite(Number(ts)) || !UUID_RE.test(id)) ctx.fail(400, 'bad_request', 'invalid cursor');
     after = [Number(ts), id];
   }
+  const sign = desc ? -1 : 1;
+  /** Position relative to the cursor in the requested order: > 0 comes after it. */
+  const vsCursor = (a: Annotation, at: [number, string]) => sign * (a.created_at - at[0] || (a.uuid < at[1] ? -1 : a.uuid > at[1] ? 1 : 0));
   const rows = [...annotations.values()]
     .filter(
       (a) =>
         (session === null || a.session === session) &&
         (cmdSeq === null || a.cmd_seq === cmdSeq) &&
-        (tag === null || a.tags.includes(tag)) &&
+        tagList.every((t) => a.tags.includes(t)) &&
         (author === null || a.author === author) &&
+        (uuid === null || a.uuid === uuid.toLowerCase()) &&
+        (!q || a.body.toLowerCase().includes(q)) &&
+        (from === null || a.created_at >= from) &&
+        (to === null || a.created_at <= to) &&
         (deleted === 'true' || a.deleted_at === null) &&
-        (after === null || a.created_at > after[0] || (a.created_at === after[0] && a.uuid > after[1])),
+        (after === null || vsCursor(a, after) > 0),
     )
-    .sort((a, b) => a.created_at - b.created_at || (a.uuid < b.uuid ? -1 : 1))
+    .sort((a, b) => sign * (a.created_at - b.created_at || (a.uuid < b.uuid ? -1 : 1)))
     .slice(0, limit);
   const last = rows.at(-1);
+  const shown = rows.filter((a) => !gone(ctx, a));
+  const contexts: Record<string, AnnotationContext> = {};
+  if (context === 'true') {
+    for (const a of shown) {
+      const c = contextOf(ctx, a);
+      if (c) contexts[a.uuid] = c;
+    }
+  }
   return {
-    annotations: rows.filter((a) => !gone(ctx, a)),
+    annotations: shown,
     next: rows.length === limit && last ? `${last.created_at}~${last.uuid}` : null,
-    // The overview params (order, q, from/to, tag lists, context) come with the UI work package.
-    contexts: {},
+    contexts,
   };
 }
 
@@ -237,9 +309,25 @@ function putTag(ctx: MockContext, raw: unknown): Tag {
 }
 
 const ITEM = /^\/api\/annotations\/([^/]+)$/;
+const CONTROL = '/api/_mock/annotations';
 
 export const handle: MockHandler = async (ctx: MockContext, { req, res, url, method, principal }: MockRequest) => {
   const path = url.pathname;
+  if (path === CONTROL) {
+    if (method !== 'POST') ctx.fail(405, 'method_not_allowed', 'method not allowed');
+    const body = ((await ctx.readJson(req)) ?? {}) as { author?: unknown };
+    const author = typeof body.author === 'string' && body.author.trim() ? body.author.trim() : ctx.fail(400, 'bad_request', 'author is required');
+    ctx.json(res, 201, create(ctx, body, author));
+    return true;
+  }
+  if (path === '/api/annotations/authors') {
+    if (method !== 'GET') ctx.fail(405, 'method_not_allowed', 'method not allowed');
+    const counts = new Map<string, number>();
+    for (const a of liveAnnotations(ctx)) counts.set(a.author, (counts.get(a.author) ?? 0) + 1);
+    const out: AuthorList = { authors: [...counts].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, count]) => ({ name, count })) };
+    ctx.json(res, 200, out);
+    return true;
+  }
   if (path === '/api/annotations') {
     if (method === 'GET') ctx.json(res, 200, list(ctx, url));
     else if (method === 'POST') ctx.json(res, 201, create(ctx, await ctx.readJson(req), principal));

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
+  import { knownTags } from '../annotations/tags.svelte';
   import type { SearchHit } from '../api/types';
   import { exitClass } from '../chapters';
   import { fmtTs, oneLine } from '../format';
@@ -19,10 +20,16 @@
     onopen: (hit: SearchHit) => void;
     onactive: (i: number) => void;
     onmore: () => void;
+    /** A tag chip of an annotated result was clicked. */
+    ontag?: (tag: string) => void;
+    /** Tags already filtered on (their chips are marked). */
+    filtered?: readonly string[];
   }
-  let { groups, active, openId, keep, onopen, onactive, onmore }: Props = $props();
+  let { groups, active, openId, keep, onopen, onactive, onmore, ontag, filtered = [] }: Props = $props();
 
   const ROW = 56;
+  /** Tag chips shown per row; the rest are counted. */
+  const MAX_CHIPS = 2;
   const expanded = new SvelteSet<string>();
   let viewport: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
@@ -120,6 +127,24 @@
             <Snippet parts={h.snippet} />
           </span>
         </a>
+        {#if h.tags.length}
+          <span class="tags" data-testid="hit-tags">
+            {#each h.tags.slice(0, MAX_CHIPS) as t (t)}
+              <button
+                type="button"
+                class="tag"
+                class:on={filtered.includes(t)}
+                style:--c={knownTags.color(t)}
+                title={`Only results annotated #${t}`}
+                onclick={() => ontag?.(t)}
+                data-testid="hit-tag">#{t}</button
+              >
+            {/each}
+            {#if h.tags.length > MAX_CHIPS}<span class="muted" title={h.tags.slice(MAX_CHIPS).map((t) => `#${t}`).join(' ')}
+                >+{h.tags.length - MAX_CHIPS}</span
+              >{/if}
+          </span>
+        {/if}
         {#if row.head && row.group.rest.length}
           <button
             type="button"
@@ -210,6 +235,30 @@
   }
   .badge.out {
     flex: none;
+  }
+  .tags {
+    display: flex;
+    flex: 0 1 auto;
+    gap: 0.25rem;
+    align-items: center;
+    min-width: 0;
+    max-width: 40%;
+    margin-right: 0.4rem;
+    font-size: 0.78em;
+  }
+  .tag {
+    min-width: 0;
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 0.45rem;
+    border: 1px solid var(--c);
+    border-left-width: 4px;
+    border-radius: 999px;
+    line-height: 1.5;
+  }
+  .tag.on {
+    background: var(--accent-soft);
   }
   .more {
     align-self: center;

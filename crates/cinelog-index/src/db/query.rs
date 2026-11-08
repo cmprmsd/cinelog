@@ -13,6 +13,11 @@
 //!
 //! `meta.forgotten` is read for every query and excluded here, before the writer has purged
 //! the rows (including the echo of a forgotten command, see `forget`).
+//!
+//! A tag filter (docs/API.md §5.4) is resolved from the same read-only meta.db connection
+//! once per search into index.db command ids and spans ([`Tagged`]), which every stream's
+//! filters receive as JSON parameters through `json_each`: no `ATTACH`, no cross-database
+//! join.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -33,7 +38,7 @@ use crate::error::{IndexError, Result};
 use crate::model::{
     CANDIDATE_CAP, ChunkKind, Command, Cursor, DbPaths, EntryDetail, EntryRef, ExitFilter, HitKind, IndexStatus,
     LegacyImportRow, LegacyProgress, LegacyStatus, LiveLag, SHORT_TERM_SCAN, SearchFilters, SearchHit, SearchPage,
-    SearchQuery, SearchTarget, SessionCounts, SessionState, SessionSummary, TmuxLocation, info_keys,
+    SearchQuery, SearchTarget, SessionCounts, SessionState, SessionSummary, TAG_FILTER_CAP, TmuxLocation, info_keys,
 };
 use crate::schema::{self, Access, DbKind};
 
@@ -87,20 +92,41 @@ pub(crate) fn candidate_sql(kind: HitKind, op: &str, where_: &str) -> String {
 }
 
 /// The newest-first table walk for terms the trigram index cannot serve. `?1` is the pattern.
-pub(crate) fn scan_sql(kind: HitKind, op: &str, filters: &str) -> String {
+/// With `walk_ts` false (a tag filter admitting few rows, see [`Tagged`]) the walk leaves the
+/// `ts` index to the planner, which then looks up the admitted ids and sorts them.
+pub(crate) fn scan_sql(kind: HitKind, op: &str, filters: &str, walk_ts: bool) -> String {
+    let hint = |index: &str| {
+        if walk_ts {
+            format!(" INDEXED BY {index}")
+        } else {
+            String::new()
+        }
+    };
     match kind {
         HitKind::Command => format!(
-            "SELECT {CMD_COLS} FROM commands c INDEXED BY commands_ts CROSS JOIN sessions s ON s.id = c.session_id
+            "SELECT {CMD_COLS} FROM commands c{} CROSS JOIN sessions s ON s.id = c.session_id
              WHERE (c.typed {op} ?1 OR c.expanded {op} ?1 OR c.cwd {op} ?1){filters}
-             ORDER BY c.ts_start DESC, c.id DESC"
+             ORDER BY c.ts_start DESC, c.id DESC",
+            hint("commands_ts")
         ),
         HitKind::Output => format!(
-            "SELECT {OUT_COLS}, o.text FROM outputs o INDEXED BY outputs_ts CROSS JOIN sessions s ON s.id = o.session_id
+            "SELECT {OUT_COLS}, o.text FROM outputs o{} CROSS JOIN sessions s ON s.id = o.session_id
              LEFT JOIN commands c ON c.id = o.command_id
              WHERE o.text {op} ?1{filters}
-             ORDER BY o.ts DESC, o.id DESC"
+             ORDER BY o.ts DESC, o.id DESC",
+            hint("outputs_ts")
         ),
     }
+}
+
+/// The ids of the outputs a tag filter admits (see [`Tagged`]): `?{a}` the annotated command
+/// ids, `?{s}` the spans. Both parts are index lookups (`outputs_cmd`, `outputs_sess`).
+pub(crate) fn tagged_outputs_sql(a: &str, s: &str) -> String {
+    format!(
+        "SELECT id FROM outputs WHERE command_id IN (SELECT value FROM json_each({a}))
+         UNION ALL SELECT o2.id FROM json_each({s}) j CROSS JOIN outputs o2
+           ON o2.session_id = j.value ->> 0 AND o2.t >= j.value ->> 1 AND o2.t <= j.value ->> 2"
+    )
 }
 
 /// `s` as a literal GLOB pattern: the metacharacters `*`, `?`, `[` and `]` in brackets.
@@ -174,8 +200,8 @@ impl Cond {
         }
     }
 
-    /// The §6.5 filters and the page cursor for a stream of `kind`.
-    fn filters(&mut self, f: &SearchFilters, kind: HitKind, cursor: Option<Cursor>) {
+    /// The §6.5 filters, the tag filter's targets and the page cursor for a stream of `kind`.
+    fn filters(&mut self, f: &SearchFilters, kind: HitKind, cursor: Option<Cursor>, tagged: Option<&Tagged>) {
         let (ts, id) = match kind {
             HitKind::Command => ("c.ts_start", "c.id"),
             HitKind::Output => ("o.ts", "o.id"),
@@ -213,6 +239,9 @@ impl Cond {
             Some(ExitFilter::Failure) => self.push("c.exit <> 0".into()),
             None => {}
         }
+        if let Some(t) = tagged {
+            self.tagged(t, kind);
+        }
         if let Some(c) = cursor {
             // Hits strictly after the cursor in (ts, kind, id) descending order.
             let p = self.bind(c.ts);
@@ -227,6 +256,46 @@ impl Cond {
             self.push(clause);
         }
     }
+}
+
+impl Cond {
+    /// Restricts a stream of `kind` to what the tag filter admits (docs/API.md §5.4):
+    /// commands by id; output by its owning command, or by its `t` inside a span. SQLite
+    /// evaluates each `IN` subquery once per statement.
+    fn tagged(&mut self, t: &Tagged, kind: HitKind) {
+        match kind {
+            HitKind::Command => {
+                let p = self.bind(t.commands.clone());
+                self.push(format!("c.id IN (SELECT value FROM json_each({p}))"));
+            }
+            HitKind::Output => {
+                let a = self.bind(t.annotated.clone());
+                let s = self.bind(t.spans.clone());
+                self.push(format!("o.id IN ({})", tagged_outputs_sql(&a, &s)));
+            }
+        }
+    }
+}
+
+/// What a search tag filter admits, in index.db ids, as JSON arrays for `json_each`.
+///
+/// The indexed and empty-term streams just add the restriction. A short-term scan walks the
+/// `ts` index newest first and would pass many rows the filter refuses, so when the filter
+/// admits at most [`CANDIDATE_CAP`] rows of a kind the scan looks those up instead (and
+/// sorts them); a larger set keeps the walk, which yields hits before its deadline.
+#[derive(Debug, Default)]
+struct Tagged {
+    /// Commands a matching command annotation is on, or a matching span overlaps.
+    commands: String,
+    n_commands: usize,
+    /// Commands a matching command annotation is on (their output matches).
+    annotated: String,
+    /// The matching spans as `[session id, t_from, t_to]`.
+    spans: String,
+    /// Nothing can match.
+    none: bool,
+    /// More than [`TAG_FILTER_CAP`] annotations matched.
+    capped: bool,
 }
 
 fn is_interrupt(e: &rusqlite::Error) -> bool {
@@ -511,10 +580,103 @@ impl SqliteSearcher {
         })
     }
 
+    /// Resolves a tag filter (`None` without one) from meta.db, which [`Self::forget_set`]
+    /// opened if it exists, into index.db ids. Runs inside the search's read snapshot.
+    fn tagged(&self, tags: &[String]) -> Result<Option<Tagged>> {
+        if tags.is_empty() {
+            return Ok(None);
+        }
+        let meta = self.meta.borrow();
+        let Some(conn) = meta.as_ref() else {
+            return Ok(Some(Tagged {
+                none: true,
+                ..Tagged::default()
+            }));
+        };
+        let (targets, capped) = meta::tag_targets(conn, tags, TAG_FILTER_CAP)?;
+        let (mut cmds, mut spans) = (Vec::new(), Vec::new());
+        for t in targets {
+            match t {
+                meta::TagTarget::Command { session, seq } => cmds.push(serde_json::json!([session, seq])),
+                meta::TagTarget::Span { session, t_from, t_to } => {
+                    spans.push(serde_json::json!([session, t_from, t_to]));
+                }
+            }
+        }
+        let ids = |sql: &str, arg: String| -> Result<Vec<i64>> {
+            let mut st = self.conn.prepare_cached(sql)?;
+            let v = st.query_map([arg], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        };
+        let mut annotated = ids(
+            "SELECT c.id FROM json_each(?1) j CROSS JOIN sessions s ON s.uuid = j.value ->> 0
+             CROSS JOIN commands c ON c.session_id = s.id AND c.seq = j.value ->> 1",
+            serde_json::to_string(&cmds)?,
+        )?;
+        annotated.sort_unstable();
+        annotated.dedup();
+        let mut commands = annotated.clone();
+        let mut span_rows: Vec<(i64, f64, f64)> = Vec::new();
+        if !spans.is_empty() {
+            let mut st = self.conn.prepare_cached(
+                "SELECT s.id, j.value ->> 1, j.value ->> 2 FROM json_each(?1) j
+                 CROSS JOIN sessions s ON s.uuid = j.value ->> 0",
+            )?;
+            span_rows = st
+                .query_map([serde_json::to_string(&spans)?], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+        }
+        let spans_json = serde_json::to_string(&span_rows)?;
+        if !span_rows.is_empty() {
+            // Closed intervals; a command still running (`t_end` NULL) is open-ended.
+            commands.extend(ids(
+                "SELECT c.id FROM json_each(?1) j CROSS JOIN commands c ON c.session_id = j.value ->> 0
+                 AND c.t_start <= j.value ->> 2 WHERE c.t_end IS NULL OR c.t_end >= j.value ->> 1",
+                spans_json.clone(),
+            )?);
+            commands.sort_unstable();
+            commands.dedup();
+        }
+        Ok(Some(Tagged {
+            none: commands.is_empty() && span_rows.is_empty(),
+            n_commands: commands.len(),
+            commands: serde_json::to_string(&commands)?,
+            annotated: serde_json::to_string(&annotated)?,
+            spans: spans_json,
+            capped,
+        }))
+    }
+
+    /// Whether a tag filter admits at most [`CANDIDATE_CAP`] rows of `kind` (see [`Tagged`]).
+    fn few_tagged(&self, t: &Tagged, kind: HitKind) -> Result<bool> {
+        Ok(match kind {
+            HitKind::Command => t.n_commands <= CANDIDATE_CAP,
+            HitKind::Output => {
+                let n: i64 = self
+                    .conn
+                    .prepare_cached(&format!(
+                        "SELECT count(*) FROM ({} LIMIT {})",
+                        tagged_outputs_sql("?1", "?2"),
+                        CANDIDATE_CAP + 1
+                    ))?
+                    .query_row([&t.annotated, &t.spans], |r| r.get(0))?;
+                n <= CANDIDATE_CAP as i64
+            }
+        })
+    }
+
     /// The candidate ids of `kind`, newest first, and whether there were more.
-    fn candidates(&self, kind: HitKind, q: &SearchQuery, term: &Term) -> Result<(Vec<i64>, bool)> {
+    fn candidates(
+        &self,
+        kind: HitKind,
+        q: &SearchQuery,
+        term: &Term,
+        tagged: Option<&Tagged>,
+    ) -> Result<(Vec<i64>, bool)> {
         let mut cond = Cond::with(vec![Value::Text(term.pattern().to_owned())]);
-        cond.filters(&q.filters, kind, q.cursor);
+        cond.filters(&q.filters, kind, q.cursor, tagged);
         let mut st = self
             .conn
             .prepare_cached(&candidate_sql(kind, term.op(), &cond.where_()))?;
@@ -606,8 +768,15 @@ impl SqliteSearcher {
         Ok(())
     }
 
-    fn indexed_stream(&self, kind: HitKind, q: &SearchQuery, term: &Term, forget: &ForgetSet) -> Result<Stream> {
-        let (ids, capped) = self.candidates(kind, q, term)?;
+    fn indexed_stream(
+        &self,
+        kind: HitKind,
+        q: &SearchQuery,
+        term: &Term,
+        forget: &ForgetSet,
+        tagged: Option<&Tagged>,
+    ) -> Result<Stream> {
+        let (ids, capped) = self.candidates(kind, q, term, tagged)?;
         if ids.is_empty() {
             return Ok(Stream::default());
         }
@@ -636,20 +805,39 @@ impl SqliteSearcher {
         Ok(s)
     }
 
-    fn scan_stream(&self, kind: HitKind, q: &SearchQuery, term: &Term, forget: &ForgetSet) -> Result<Stream> {
+    fn scan_stream(
+        &self,
+        kind: HitKind,
+        q: &SearchQuery,
+        term: &Term,
+        forget: &ForgetSet,
+        tagged: Option<&Tagged>,
+    ) -> Result<Stream> {
         let mut cond = Cond::with(vec![Value::Text(term.pattern().to_owned())]);
-        cond.filters(&q.filters, kind, q.cursor);
-        let sql = scan_sql(kind, term.op(), &cond.and());
+        cond.filters(&q.filters, kind, q.cursor, tagged);
         let want = q.limit + 1;
-        self.stream(|out| match kind {
-            HitKind::Command => self.take_commands(out, &sql, &cond.params, term, forget, want),
-            HitKind::Output => self.take_outputs(out, &sql, &cond.params, Some(13), term, forget, want),
+        self.stream(|out| {
+            let walk_ts = match tagged {
+                Some(t) => !self.few_tagged(t, kind)?,
+                None => true,
+            };
+            let sql = scan_sql(kind, term.op(), &cond.and(), walk_ts);
+            match kind {
+                HitKind::Command => self.take_commands(out, &sql, &cond.params, term, forget, want),
+                HitKind::Output => self.take_outputs(out, &sql, &cond.params, Some(13), term, forget, want),
+            }
         })
     }
 
-    fn newest_commands(&self, q: &SearchQuery, term: &Term, forget: &ForgetSet) -> Result<Stream> {
+    fn newest_commands(
+        &self,
+        q: &SearchQuery,
+        term: &Term,
+        forget: &ForgetSet,
+        tagged: Option<&Tagged>,
+    ) -> Result<Stream> {
         let mut cond = Cond::default();
-        cond.filters(&q.filters, HitKind::Command, q.cursor);
+        cond.filters(&q.filters, HitKind::Command, q.cursor, tagged);
         let sql = format!(
             "SELECT {CMD_COLS} FROM commands c JOIN sessions s ON s.id = c.session_id{}
              ORDER BY c.ts_start DESC, c.id DESC",
@@ -660,7 +848,13 @@ impl SqliteSearcher {
         Ok(s)
     }
 
-    fn search_streams(&self, q: &SearchQuery, term: &Term, forget: &ForgetSet) -> Result<Vec<Stream>> {
+    fn search_streams(
+        &self,
+        q: &SearchQuery,
+        term: &Term,
+        forget: &ForgetSet,
+        tagged: Option<&Tagged>,
+    ) -> Result<Vec<Stream>> {
         let kinds: &[HitKind] = match q.target {
             SearchTarget::Commands => &[HitKind::Command],
             SearchTarget::Output => &[HitKind::Output],
@@ -670,17 +864,23 @@ impl SqliteSearcher {
             return Ok(if q.target == SearchTarget::Output {
                 Vec::new()
             } else {
-                vec![self.newest_commands(q, term, forget)?]
+                vec![self.newest_commands(q, term, forget, tagged)?]
             });
         }
         if term.indexable() {
-            return kinds.iter().map(|&k| self.indexed_stream(k, q, term, forget)).collect();
+            return kinds
+                .iter()
+                .map(|&k| self.indexed_stream(k, q, term, forget, tagged))
+                .collect();
         }
         // One time budget for the whole scan, newest first.
         let deadline = Instant::now() + self.short_scan;
         self.deadline.set(Some(deadline));
         let watchdog = Watchdog::start(self.conn.get_interrupt_handle(), deadline);
-        let res = kinds.iter().map(|&k| self.scan_stream(k, q, term, forget)).collect();
+        let res = kinds
+            .iter()
+            .map(|&k| self.scan_stream(k, q, term, forget, tagged))
+            .collect();
         drop(watchdog);
         self.deadline.set(None);
         res
@@ -783,22 +983,20 @@ impl Searcher for SqliteSearcher {
         if q.limit == 0 {
             return Ok(SearchPage::default());
         }
-        if !q.filters.tags.is_empty() {
-            // Contract only: implemented by the backend work package.
-            return Err(IndexError::Invalid(
-                "the search tag filter is not implemented yet".into(),
-            ));
-        }
         let term = Term::new(&q.term, q.case_sensitive);
         let forget = self.forget_set()?;
         // One read snapshot for every statement of this search.
         let tx = self.conn.unchecked_transaction()?;
-        let streams = self.search_streams(q, &term, &forget)?;
+        let tagged = self.tagged(&q.filters.tags)?;
+        if tagged.as_ref().is_some_and(|t| t.none) {
+            return Ok(SearchPage::default());
+        }
+        let streams = self.search_streams(q, &term, &forget, tagged.as_ref())?;
         drop(tx);
 
         let mut page = SearchPage {
             partial: streams.iter().any(|s| s.partial),
-            capped: streams.iter().any(|s| s.capped),
+            capped: streams.iter().any(|s| s.capped) || tagged.is_some_and(|t| t.capped),
             ..SearchPage::default()
         };
         let mut hits: Vec<SearchHit> = streams.into_iter().flat_map(|s| s.hits).collect();

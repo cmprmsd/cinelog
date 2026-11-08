@@ -1,12 +1,19 @@
 <script lang="ts">
+  import { normalizeTag } from '../annotations/annotations';
+  import { knownTags } from '../annotations/tags.svelte';
   import type { SearchIn } from '../api/types';
   import {
+    addTag,
     chips,
     clearFilter,
     DATE_LABELS,
+    EMPTY,
+    fromLocalInput,
+    MAX_FILTER_TAGS,
     normalizeExit,
     stateFromQuery,
     stateToQuery,
+    toLocalInput,
     type DatePreset,
     type FilterKey,
     type SearchState,
@@ -15,31 +22,90 @@
   import { prefs } from '../prefs.svelte';
   import { router } from '../router.svelte';
 
-  let { onsubmit }: { onsubmit?: () => void } = $props();
+  interface Props {
+    /** Enter in the field; with `detached` it gets the search to run. */
+    onsubmit?: (query?: URLSearchParams) => void;
+    /**
+     * The page's URL is not a search (the annotations overview has its own `q` and `tag`):
+     * the bar keeps its state to itself until Enter.
+     */
+    detached?: boolean;
+  }
+  let { onsubmit, detached = false }: Props = $props();
 
-  const cur = $derived(stateFromQuery(router.query));
+  let local = $state<SearchState>(EMPTY);
+  const cur = $derived(detached ? local : stateFromQuery(router.query));
   const active = $derived(chips(cur, (ts) => fmtTs(ts, prefs.utc).slice(0, 16)));
   let input: HTMLInputElement | undefined = $state();
   let filtersOpen = $state(false);
+  let tagError = $state<string | null>(null);
+
+  // A fresh start whenever the bar detaches from (or re-attaches to) the URL.
+  $effect(() => {
+    void detached;
+    local = EMPTY;
+  });
+
+  $effect(() => {
+    if (filtersOpen || cur.tags.length) void knownTags.load();
+  });
 
   export function focus(): void {
     input?.focus();
     input?.select();
   }
 
-  function update(patch: Partial<SearchState>): void {
-    router.setQuery(stateToQuery({ ...cur, ...patch }, router.query), { replace: true });
+  function set(s: SearchState): void {
+    if (detached) local = s;
+    else router.setQuery(stateToQuery(s, router.query), { replace: true });
   }
 
-  function remove(key: FilterKey): void {
-    router.setQuery(stateToQuery(clearFilter(cur, key), router.query), { replace: true });
+  function update(patch: Partial<SearchState>): void {
+    set({ ...cur, ...patch });
+  }
+
+  function remove(key: FilterKey, value?: string): void {
+    set(clearFilter(cur, key, value));
   }
 
   function onkeydown(e: KeyboardEvent): void {
     if (e.key === 'Enter') {
       e.preventDefault();
       input?.blur();
-      onsubmit?.();
+      onsubmit?.(detached ? stateToQuery(cur) : undefined);
+    }
+  }
+
+  /** Adds the tag typed or picked in the filter's tag field. */
+  function takeTag(field: HTMLInputElement): void {
+    const raw = field.value.trim().replace(/^#/, '');
+    if (!raw) return;
+    const n = normalizeTag(raw);
+    if (!n) {
+      tagError = `"${raw}" is not a tag: 1–40 letters, digits or - _ . : / + # @.`;
+      return;
+    }
+    if (!cur.tags.includes(n) && cur.tags.length >= MAX_FILTER_TAGS) {
+      tagError = `At most ${MAX_FILTER_TAGS} tags.`;
+      return;
+    }
+    tagError = null;
+    field.value = '';
+    update({ tags: addTag(cur.tags, n) });
+  }
+
+  function tagInput(e: Event): void {
+    const field = e.currentTarget as HTMLInputElement;
+    tagError = null;
+    // A suggestion picked from the list replaces the text at once: take it.
+    const kind = (e as InputEvent).inputType;
+    if (kind === 'insertReplacementText' || (kind === undefined && knownTags.list.some((t) => t.name === field.value))) takeTag(field);
+  }
+
+  function tagKey(e: KeyboardEvent & { currentTarget: HTMLInputElement }): void {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      takeTag(e.currentTarget);
     }
   }
 
@@ -48,19 +114,6 @@
     { value: 'out', label: 'out', title: 'Search command output' },
     { value: 'both', label: 'both', title: 'Search commands and output' },
   ];
-
-  // `datetime-local` works in local time; the URL keeps epoch seconds.
-  const toLocalInput = (ts: number | null) => {
-    if (ts === null) return '';
-    const d = new Date(ts * 1000);
-    const p = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-  };
-  const fromLocalInput = (v: string): number | null => {
-    if (!v) return null;
-    const t = new Date(v).getTime();
-    return Number.isFinite(t) ? Math.floor(t / 1000) : null;
-  };
 
   function setDate(preset: DatePreset): void {
     if (preset === 'custom') {
@@ -114,10 +167,10 @@
 
   {#if active.length}
     <ul class="chips" aria-label="Active filters">
-      {#each active as c (c.key)}
-        <li>
+      {#each active as c (`${c.key}:${c.value ?? ''}`)}
+        <li class:tag={c.key === 'tag'} style:--c={c.value ? knownTags.color(c.value) : undefined} data-testid={c.key === 'tag' ? 'search-tag-chip' : undefined}>
           <span>{c.label}</span>
-          <button type="button" class="x" aria-label={`Remove filter ${c.label}`} onclick={() => remove(c.key)}>×</button>
+          <button type="button" class="x" aria-label={`Remove filter ${c.label}`} onclick={() => remove(c.key, c.value)}>×</button>
         </li>
       {/each}
     </ul>
@@ -177,9 +230,30 @@
       <label title="Commands run in this directory or below it"
         >cwd <input type="text" value={cur.cwd} placeholder="/dir (and below)" onchange={(e) => update({ cwd: e.currentTarget.value.trim() })} /></label>
       <label>pane <input type="text" class="narrow" value={cur.pane} placeholder="%3" onchange={(e) => update({ pane: e.currentTarget.value.trim() })} /></label>
+      <label title="Only commands (and spans) with an annotation carrying this tag; several tags: all of them"
+        >tag <input
+          type="text"
+          list="search-tag-list"
+          placeholder="#tag"
+          autocomplete="off"
+          spellcheck="false"
+          aria-invalid={tagError !== null}
+          aria-describedby={tagError ? 'search-tag-err' : undefined}
+          oninput={tagInput}
+          onkeydown={tagKey}
+          onchange={(e) => takeTag(e.currentTarget)}
+          data-testid="search-tag-input"
+        /></label
+      >
+      <datalist id="search-tag-list">
+        {#each knownTags.list.filter((t) => !cur.tags.includes(t.name)) as t (t.name)}
+          <option value={t.name}>{t.count ? `${t.count}×` : ''}</option>
+        {/each}
+      </datalist>
       <label class="check"
         ><input type="checkbox" checked={cur.hidden} onchange={(e) => update({ hidden: e.currentTarget.checked })} /> include hidden</label
       >
+      {#if tagError}<span class="err" id="search-tag-err" role="alert">{tagError}</span>{/if}
     </div>
   {/if}
 </div>
@@ -251,6 +325,11 @@
     background: var(--accent-soft);
     font-size: 0.85em;
   }
+  .chips li.tag {
+    border-color: var(--c);
+    border-left-width: 4px;
+    background: transparent;
+  }
   .chips .x {
     border: 0;
     background: transparent;
@@ -277,6 +356,11 @@
   }
   .filters .narrow {
     width: 5rem;
+  }
+  .filters .err {
+    flex-basis: 100%;
+    color: var(--fail);
+    font-size: 0.85em;
   }
   @media (max-width: 760px) {
     input[type='search'] {
