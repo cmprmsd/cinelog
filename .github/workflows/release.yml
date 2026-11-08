@@ -2,7 +2,8 @@ name: release
 
 # On a tag v<VERSION>: build static musl binaries for x86_64 and aarch64 (each smoke-tested on
 # its native runner), publish them with SHA256SUMS, then commit shell/checksums/v<VERSION>.sha256
-# to main. That committed file is the trust anchor shell/fetch.zsh verifies against (plan §10.2).
+# to main. That committed file is the trust anchor shell/fetch.zsh verifies against (plan §10.2);
+# the last job runs fetch.zsh on both architectures against the published release and it.
 
 on:
   push:
@@ -233,3 +234,36 @@ jobs:
             sleep $((attempt * 5))
           done
           echo "::error::could not push $file to main"; exit 1
+
+  verify:
+    # What a user's `zimfw update` does once the checksum is on main: fetch.zsh downloads
+    # the published asset and verifies it against the committed file (no fallback warning).
+    name: fetch.zsh on ${{ matrix.runner }} against the published release
+    needs: [meta, checksums]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+      - name: The tagged tree plus the checksum file from main
+        run: |
+          file="shell/checksums/v$VERSION.sha256"
+          git fetch --depth=1 origin refs/heads/main:refs/remotes/origin/main
+          git show "origin/main:$file" > "$file"
+          cat "$file"
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh
+      - name: Download and verify
+        run: |
+          zsh shell/fetch.zsh --no-cargo --no-refresh 2> fetch.err || { cat fetch.err; exit 1; }
+          cat fetch.err
+          if grep -q warning fetch.err; then echo "::error::fetch.zsh did not verify against shell/checksums/v$VERSION.sha256"; exit 1; fi
+          test "$(bin/cinelog --version)" = "cinelog $VERSION"
+          test "$(bin/cinelog rec --protocol)" = 1
+          zsh shell/fetch.zsh --no-cargo --no-refresh 2>&1 | tee again.log
+          grep -q "is up to date" again.log

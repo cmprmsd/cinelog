@@ -12,12 +12,14 @@ use cinelog_it::synth::{CorpusSpec, corpus};
 use cinelog_it::util::now_us;
 use cinelog_it::{CliOutput, Need, Sandbox, Serve, need, scaled, wait_until};
 
-/// Large enough that a debug build needs several seconds, with one cast (about 10 MB) ten
-/// times the others, so it commits checkpoints inside the cast (every 4 MiB of input).
+/// Large enough that a debug build needs a few seconds, with one cast (about 10 MB) ten
+/// times the others, so it commits checkpoints inside the cast (every 4 MiB of input). The
+/// many small casts after it keep the second kill of the serve run from racing the end of
+/// the backfill on a fast machine.
 fn spec() -> CorpusSpec {
     CorpusSpec {
         seed: 12,
-        casts: 10,
+        casts: 24,
         commands: 120,
         max_lines: 160,
         newest_start_us: now_us() - 86_400_000_000,

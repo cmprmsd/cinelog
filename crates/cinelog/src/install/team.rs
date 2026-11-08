@@ -28,7 +28,7 @@ use cinelog_web::tls::{self, TlsOptions};
 use sha2::{Digest, Sha256};
 
 use super::fsutil::{self, Outcome};
-use super::{Steps, migrate, old_server, zshrc};
+use super::{Steps, migrate, old_server, restart, zshrc};
 use crate::module;
 
 /// `packaging/tmpfiles.d/cinelog.conf` → `/etc/tmpfiles.d/cinelog.conf`.
@@ -134,8 +134,9 @@ pub struct Options {
 /// The system manager, as far as the team install drives it.
 pub trait Systemd {
     fn is_active(&self, unit: &str) -> bool;
-    /// Runs `systemctl ARGS`; failures are reported into `steps`, never fatal.
-    fn run(&self, args: &[&str], steps: &mut Steps);
+    /// Runs `systemctl ARGS`; failures are reported into `steps`, never fatal. Whether it
+    /// succeeded.
+    fn run(&self, args: &[&str], steps: &mut Steps) -> bool;
 }
 
 /// `systemctl` of the running system.
@@ -149,14 +150,21 @@ impl Systemd for SystemSystemd {
             .is_ok_and(|s| s.success())
     }
 
-    fn run(&self, args: &[&str], steps: &mut Steps) {
-        super::systemctl(args, steps);
+    fn run(&self, args: &[&str], steps: &mut Steps) -> bool {
+        super::systemctl(args, steps)
     }
+}
+
+/// Whether systemd is the running init (what `sd_booted()` checks): a unit written on a host
+/// with another init (OpenRC, a container, WSL without systemd) is never started.
+pub fn systemd_booted() -> bool {
+    Path::new("/run/systemd/system").is_dir()
 }
 
 /// What the install learns from and does to the running system besides files. A
 /// `--prefix` install has none of it: no systemd, no process scan.
 pub struct Host<'a> {
+    /// The system manager; `None` for a `--prefix` install or a host not booted with systemd.
     pub systemd: Option<&'a dyn Systemd>,
     /// `/proc` to look for root's old Python viewer in.
     pub proc_root: Option<PathBuf>,
@@ -168,9 +176,13 @@ pub struct Host<'a> {
 impl Host<'static> {
     /// The running system for a real install; only `$SUDO_USER` for a `--prefix` one.
     pub fn current(root: &SystemRoot) -> Self {
+        Self::detect(root, systemd_booted())
+    }
+
+    fn detect(root: &SystemRoot, systemd_booted: bool) -> Self {
         let real = root.is_real();
         Self {
-            systemd: real.then_some(&SystemSystemd as &dyn Systemd),
+            systemd: (real && systemd_booted).then_some(&SystemSystemd as &dyn Systemd),
             proc_root: real.then(old_server::proc_root),
             sudo_user: std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()),
             now: cinelog_web::now(),
@@ -390,6 +402,7 @@ pub fn install_on(opts: &Options, host: &Host<'_>, steps: &mut Steps) -> Result<
         certificate: cert.as_ref().is_some_and(|c| c.regenerated),
     };
     install_unit(opts, host, &unit_text, restart, steps)?;
+    restart_detached(opts, host, &paths, steps);
     member_token(&paths, host, steps)?;
 
     steps.note("recommended: `Defaults always_set_home` in sudoers or `sudo -i`, so root never runs user dotfiles");
@@ -485,7 +498,14 @@ fn install_unit(opts: &Options, host: &Host<'_>, text: &str, changed: Restart, s
     opts.sys.require_secure(&unit)?;
     steps.file(&outcome, &unit, "(hardened team server unit)", no_home());
     let Some(systemd) = host.systemd else {
-        steps.note(format!("test install: {UNIT_NAME} was not enabled or started"));
+        if opts.sys.root.is_real() {
+            steps.note(format!(
+                "systemd is not running: {UNIT_NAME} was not enabled or started (root's recorded shells start \
+                 `cinelog serve` themselves)"
+            ));
+        } else {
+            steps.note(format!("test install: {UNIT_NAME} was not enabled or started"));
+        }
         return Ok(());
     };
     let was_active = systemd.is_active(UNIT_NAME);
@@ -499,6 +519,31 @@ fn install_unit(opts: &Options, host: &Host<'_>, text: &str, changed: Restart, s
         systemd.run(&["try-restart", UNIT_NAME], steps);
     }
     Ok(())
+}
+
+/// A team server that root's shells started without the unit (`serve --ensure` on a host
+/// without systemd, or before the unit existed) still runs the old binary after an upgrade:
+/// it is stopped and the unit takes over; without systemd, or when the unit does not start,
+/// a detached server.
+fn restart_detached(opts: &Options, host: &Host<'_>, paths: &Paths, steps: &mut Steps) {
+    if host.proc_root.is_none() {
+        return;
+    }
+    let exe = opts.sys.root.join(team::BINARY);
+    let mut start_unit = |_: &[String], steps: &mut Steps| match host.systemd {
+        Some(systemd) => systemd.run(&["start", UNIT_NAME], steps),
+        None => false,
+    };
+    let start = if host.systemd.is_some() {
+        restart::Start::With(&mut start_unit)
+    } else {
+        restart::Start::Detached
+    };
+    let unit = restart::Unit {
+        name: UNIT_NAME,
+        user: false,
+    };
+    restart::restart_stale(&paths.runtime_dir, &exe, opts.sys.euid, unit, start, steps);
 }
 
 /// Stops root's old Python viewer (`/root/.zim/modules/cinelog/http_server.py`) and checks
@@ -1163,9 +1208,10 @@ mod tests {
         fn is_active(&self, _unit: &str) -> bool {
             self.active
         }
-        fn run(&self, args: &[&str], steps: &mut Steps) {
+        fn run(&self, args: &[&str], steps: &mut Steps) -> bool {
             self.calls.borrow_mut().push(args.join(" "));
             steps.done(format!("systemctl {}", args.join(" ")));
+            true
         }
     }
 
@@ -1182,6 +1228,20 @@ mod tests {
             sudo_user: sudo_user.map(Into::into),
             now: 1_794_139_200.0,
         }
+    }
+
+    /// A real root without systemd as init (a container, OpenRC) gets no system manager, so
+    /// an upgrade restarts a detached team server detached instead of through the unit.
+    #[test]
+    fn systemd_is_driven_only_where_it_is_the_init() {
+        let real = SystemRoot::real();
+        let booted = Host::detect(&real, true);
+        assert!(booted.systemd.is_some() && booted.proc_root.is_some());
+        let other_init = Host::detect(&real, false);
+        assert!(other_init.systemd.is_none(), "no systemctl calls without systemd");
+        assert!(other_init.proc_root.is_some(), "the detached server is still restarted");
+        let prefixed = Host::detect(&SystemRoot::prefixed("/tmp/x"), true);
+        assert!(prefixed.systemd.is_none() && prefixed.proc_root.is_none());
     }
 
     #[test]

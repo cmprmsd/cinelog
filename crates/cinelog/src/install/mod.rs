@@ -4,6 +4,7 @@ pub mod fsutil;
 pub mod migrate;
 pub mod old_server;
 pub mod personal;
+pub mod restart;
 pub mod team;
 pub mod zshrc;
 
@@ -89,8 +90,8 @@ pub struct UserManager {
     /// The unit directory the manager reads (`~/.config/systemd/user` below the passwd
     /// home); `None` when unknown.
     pub unit_dir: Option<PathBuf>,
-    /// Runs `systemctl` (reports into the steps).
-    pub run: fn(&[&str], &mut Steps),
+    /// Runs `systemctl` (reports into the steps); whether it succeeded.
+    pub run: fn(&[&str], &mut Steps) -> bool,
     /// Linger is enabled: the manager runs without a login session.
     pub linger: bool,
 }
@@ -117,18 +118,28 @@ impl UserManager {
         }
     }
 
-    pub fn systemctl(&self, args: &[&str], steps: &mut Steps) {
-        (self.run)(args, steps);
+    pub fn systemctl(&self, args: &[&str], steps: &mut Steps) -> bool {
+        (self.run)(args, steps)
     }
 }
 
-/// Runs `systemctl` for an installed unit; failures are reported, never fatal.
-pub fn systemctl(args: &[&str], steps: &mut Steps) {
+/// Runs `systemctl` for an installed unit; failures are reported, never fatal. Whether it
+/// succeeded.
+pub fn systemctl(args: &[&str], steps: &mut Steps) -> bool {
     let line = format!("systemctl {}", args.join(" "));
     match std::process::Command::new("systemctl").args(args).status() {
-        Ok(s) if s.success() => steps.done(line),
-        Ok(s) => steps.warn(format!("{line} failed ({s})")),
-        Err(e) => steps.warn(format!("{line}: {e}")),
+        Ok(s) if s.success() => {
+            steps.done(line);
+            true
+        }
+        Ok(s) => {
+            steps.warn(format!("{line} failed ({s})"));
+            false
+        }
+        Err(e) => {
+            steps.warn(format!("{line}: {e}"));
+            false
+        }
     }
 }
 
@@ -200,7 +211,7 @@ fn execute(args: &InstallArgs, steps: &mut Steps) -> Result<Option<doctor::Repor
     let ctx = personal::install(env, &opts, steps)?;
     steps.note("next: put `zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'` in .zimrc and, for the fastest");
     steps.note("      start, `source <module>/shell/early.zsh` as the first line of .zshrc");
-    steps.note("search with `cinelog search`; the web UI is not part of this version yet");
+    steps.note("search with `cinelog search`; `cinelog status` shows the web UI address");
     Ok(Some(doctor::collect(&ctx)))
 }
 

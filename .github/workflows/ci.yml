@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh jq
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh jq git curl
       - name: zsh -n
         run: for f in cinelog.plugin.zsh shell/*.zsh shell/tests/*.zsh; do echo "$f"; zsh -n "$f"; done
       - name: fetch.zsh tests (root mode runs in a user namespace)
@@ -103,6 +103,8 @@ jobs:
           CINELOG_FETCH_TEST_ROOT=1 zsh -f shell/fetch.test.zsh -v
       - name: Plugin tests (unit + interactive zsh on zpty)
         run: zsh shell/tests/plugin_test.zsh -v
+      - name: zim module test (pinned zimfw 1.20.2, github.com redirected to local repos)
+        run: CINELOG_ZIM_TEST_STRICT=1 zsh shell/tests/zim_test.zsh -v
 
   web:
     name: web (svelte-check, vitest, build)
@@ -146,9 +148,14 @@ jobs:
     name: integration (zsh, tmux, sudo, screen, fzf)
     needs: rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
+        with:
+          # I24 builds the previous release from tag v0.12.0, else the last 0.12.0 commit
+          # (tests/it/src/upgrade.rs). Under CINELOG_IT_REQUIRE it fails when the history has
+          # neither, so v0.12.0 must be tagged before 'rewrite' is squash- or rebase-merged.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install test tools

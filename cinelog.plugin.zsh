@@ -533,6 +533,8 @@ function load_motd {
     print -r -- "$c[pgreen]cinelog: session ${${_cl_session//-/}[-8,-1]}${cast:+ → $cast}${_cl_opt[url]:+ · $_cl_opt[url]}$c[reset]"
   fi
   [[ $_cl_opt[motd] == 1 ]] || return 0
+  _cl_skew
+  _cl_old_viewer
   _cl_uptime && print -r -- "Uptime: $REPLY"
   if (( $+commands[ip] )); then
     local -a nets=(${(f)"$(ip -brief -color -4 a 2>/dev/null)"})
@@ -552,6 +554,35 @@ function load_motd {
   fi
   [[ $_cl_opt[check_free_space] == 1 ]] && _cl_free_space
   return 0
+}
+
+# Version skew between this binary, the plugin checkout, the team binary and the running
+# server (`cinelog doctor --skew`, PROTOCOL.md §6.1). Asked once per shell; `cs` reprints the
+# answer. Only its `cinelog: ` lines count, so an older binary without the flag prints nothing.
+# It runs the team binary's --version, so a hung binary or mount is cut off after 1 s.
+_cl_skew() {
+  emulate -L zsh
+  if (( ! ${+_cl_skew_lines} )); then
+    typeset -ga _cl_skew_lines=()
+    local -a tmo
+    (( $+commands[timeout] )) && tmo=(timeout -k 1 1)
+    _cl_pick_bin &&
+      _cl_skew_lines=(${(M)${(f)"$($tmo $REPLY doctor --skew </dev/null 2>/dev/null)"}:#cinelog: *})
+  fi
+  local l
+  for l in $_cl_skew_lines; do
+    print -r -- "$_cl_c[pyellow]${l//[[:cntrl:]]/}$_cl_c[reset]"
+  done
+  return 0
+}
+
+# Checkouts from before 1.0 keep the old viewer's session pages (recorded output) in the
+# git-ignored asciinema-player/; nothing uses them any more, so ask once per MOTD to remove them.
+_cl_old_viewer() {
+  emulate -L zsh
+  local d=$_cl_dir/asciinema-player
+  [[ -n $_cl_dir && -d $d ]] || return 0
+  print -r -- "$_cl_c[pyellow]cinelog: ${d//[[:cntrl:]]/} holds the old viewer's pages of recorded output; remove it: rm -rf ${(q-)d//[[:cntrl:]]/}$_cl_c[reset]"
 }
 
 # Local mounts at 90 % or more. df right-aligns the percentage (" 95% /"); a hung mount
@@ -575,11 +606,10 @@ _cl_run() {
   _cl_pick_bin || { print -ru2 -- "cinelog: binary missing - run: cinelog-fetch"; return 127; }
   $REPLY "$@"
 }
-# `function` syntax: an alias of the same name (e.g. the old `hist`) must not break these.
+# `function` syntax: a user alias of the same name must not break these.
 (( $+commands[cinelog] )) || function cinelog { _cl_run "$@" }
 function cinelog-link { _cl_run link "$@" }
 function cinelog-fetch { zsh $_cl_dir/shell/fetch.zsh "$@" }
-function hist { print -ru2 -- "hist → cinelog search"; _cl_run search "$@" }   # shim until 1.0
 alias cs='clear; load_motd'
 
 fpath=($_cl_dir/shell/completions $fpath)

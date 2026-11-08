@@ -368,6 +368,8 @@
 <style>
   .session {
     display: grid;
+    /* One column as wide as the panel: the player scales to it instead of widening it. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.5rem;
     align-content: start;
     min-width: 0;

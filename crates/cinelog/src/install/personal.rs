@@ -12,7 +12,7 @@ use cinelog_core::paths::EnvSnapshot;
 use cinelog_proto::NestedMode;
 
 use super::fsutil::{self, Outcome, Symlinks, pretty};
-use super::{Steps, UserManager, old_server, user_unit_file};
+use super::{Steps, UserManager, old_server, restart, user_unit_file};
 use crate::ctx::Ctx;
 use crate::module;
 
@@ -33,6 +33,7 @@ fn refuse_root(env: &EnvSnapshot) -> Result<()> {
 /// `packaging/systemd/cinelog.service`; its `ExecStart` runs `%h/.local/bin/cinelog`.
 const UNIT: &str = include_str!("../../../../packaging/systemd/cinelog.service");
 const UNIT_EXEC: &str = "ExecStart=%h/.local/bin/cinelog ";
+const USER_UNIT: &str = "cinelog.service";
 /// How long the old viewer gets to exit on SIGTERM.
 const OLD_SERVER_GRACE: Duration = Duration::from_secs(2);
 
@@ -202,16 +203,40 @@ fn link_binary(env: &EnvSnapshot, exe: Option<&Path>, steps: &mut Steps) -> Resu
     Ok((exe, true))
 }
 
-/// `install --refresh` (run by `fetch.zsh` after an update): the symlink, and a restart of
-/// the user unit if it is installed.
+/// `install --refresh` (run by `fetch.zsh` after an update): the symlink, then this user's
+/// running server restarted onto the new binary, by systemd for the unit, else directly
+/// (a detached `serve --ensure` server). Idempotent: a server that already runs the
+/// binary is left alone. Fails when the server could not be restarted, so `fetch.zsh`
+/// keeps its retry marker.
 pub fn refresh(env: EnvSnapshot, manager: &UserManager, steps: &mut Steps) -> Result<()> {
+    refresh_with(env, manager, None, steps)
+}
+
+fn refresh_with(env: EnvSnapshot, manager: &UserManager, exe: Option<&Path>, steps: &mut Steps) -> Result<()> {
     refuse_root(&env)?;
-    link_binary(&env, None, steps)?;
+    let (exe, _) = link_binary(&env, exe, steps)?;
     let unit = user_unit_file(&env);
-    if unit.exists() && manager.reads(&unit) {
-        manager.systemctl(&["--user", "try-restart", "cinelog.service"], steps);
+    let managed = unit.exists() && manager.reads(&unit);
+    if managed {
+        manager.systemctl(&["--user", "try-restart", USER_UNIT], steps);
     }
-    Ok(())
+    let ctx = Ctx::with(env, cinelog_core::SystemRoot::real());
+    // A detached server in place of an installed unit's is replaced by the unit's, as
+    // `serve --ensure` would start it (detached when the manager cannot).
+    let mut start_unit = |_: &[String], steps: &mut Steps| manager.systemctl(&["--user", "start", USER_UNIT], steps);
+    let start = if managed {
+        restart::Start::With(&mut start_unit)
+    } else {
+        restart::Start::Detached
+    };
+    let unit = restart::Unit {
+        name: USER_UNIT,
+        user: true,
+    };
+    match restart::restart_stale(&ctx.paths.runtime_dir, &exe, ctx.env.euid, unit, start, steps) {
+        restart::ServerRestart::Failed => bail!("the running server was not restarted onto {}", exe.display()),
+        _ => Ok(()),
+    }
 }
 
 /// `install --uninstall`: removes the symlink and the user unit. Casts, config and state
@@ -284,7 +309,10 @@ mod tests {
             exe: Some(exe.clone()),
             manager: UserManager {
                 unit_dir: Some(unit.parent().unwrap().to_path_buf()),
-                run: |args, steps| steps.done(format!("ran systemctl {}", args.join(" "))),
+                run: |args, steps| {
+                    steps.done(format!("ran systemctl {}", args.join(" ")));
+                    true
+                },
                 linger: false,
             },
             ..test_options(d.path())
@@ -329,6 +357,106 @@ mod tests {
             "{un}"
         );
         assert!(!unit.exists());
+    }
+
+    #[test]
+    fn refresh_relinks_and_restarts_only_a_managed_unit() {
+        let d = tempfile::tempdir().unwrap();
+        let env = test_env(d.path());
+        let old = d.path().join("old/bin/cinelog");
+        let new = d.path().join("module/bin/cinelog");
+        std::fs::create_dir_all(env.home.join(".local/bin")).unwrap();
+        std::os::unix::fs::symlink(&old, local_bin(&env)).unwrap();
+
+        let mut steps = Steps::default();
+        refresh_with(env.clone(), &no_manager(), Some(&new), &mut steps).unwrap();
+        assert_eq!(std::fs::read_link(local_bin(&env)).unwrap(), new, "{steps}");
+        assert!(!steps.to_string().contains("restarted"), "no server runs: {steps}");
+
+        let unit = user_unit_file(&env);
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(&unit, UNIT).unwrap();
+        let manager = UserManager {
+            unit_dir: Some(unit.parent().unwrap().to_path_buf()),
+            run: |args, steps| {
+                steps.done(format!("ran systemctl {}", args.join(" ")));
+                true
+            },
+            linger: true,
+        };
+        let mut steps = Steps::default();
+        refresh_with(env.clone(), &manager, Some(&new), &mut steps).unwrap();
+        let text = steps.to_string();
+        assert!(text.contains("is up to date"), "idempotent link: {text}");
+        assert!(
+            text.contains("ran systemctl --user try-restart cinelog.service"),
+            "{text}"
+        );
+
+        let mut root = test_env(d.path());
+        root.euid = 0;
+        assert!(refresh_with(root, &no_manager(), Some(&new), &mut Steps::default()).is_err());
+    }
+
+    /// Regression: with the unit installed but no user manager to start it (an ssh session
+    /// without pam_systemd, another init), the stopped detached server is replaced by a
+    /// detached one instead of by nothing.
+    #[test]
+    fn refresh_falls_back_to_a_detached_server_when_the_unit_does_not_start() {
+        use super::restart::fake;
+        let d = tempfile::tempdir().unwrap();
+        let mut env = test_env(d.path());
+        env.euid = nix::unistd::geteuid().as_raw();
+        let runtime = Ctx::with(env.clone(), cinelog_core::SystemRoot::real())
+            .paths
+            .runtime_dir;
+        let unit = user_unit_file(&env);
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(&unit, UNIT).unwrap();
+        let manager = UserManager {
+            unit_dir: Some(unit.parent().unwrap().to_path_buf()),
+            run: |args, steps| {
+                steps.warn(format!("systemctl {} failed", args.join(" ")));
+                false
+            },
+            linger: false,
+        };
+        let mut reaper = fake::Reaper::default();
+        let old = fake::old_server(&runtime, "/old/module/bin/cinelog", &mut reaper);
+        let new = fake::new_binary(d.path(), &runtime);
+
+        let mut steps = Steps::default();
+        let result = refresh_with(env.clone(), &manager, Some(&new), &mut steps);
+        let holder = crate::serve::lock::holder_pid(&runtime);
+        if let Some(pid) = holder {
+            reaper.add(pid);
+        }
+        result.unwrap();
+        assert!(holder.is_some_and(|p| p != old), "{steps}");
+        let text = steps.to_string();
+        assert!(text.contains("systemctl --user start cinelog.service failed"), "{text}");
+        assert!(text.contains("restarted the server"), "{text}");
+    }
+
+    /// A refresh that could not restart the server fails, so `fetch.zsh` keeps
+    /// `refresh.pending` and retries on the next pull.
+    #[test]
+    fn a_failed_restart_fails_the_refresh() {
+        use super::restart::fake;
+        let d = tempfile::tempdir().unwrap();
+        let mut env = test_env(d.path());
+        env.euid = nix::unistd::geteuid().as_raw();
+        let runtime = Ctx::with(env.clone(), cinelog_core::SystemRoot::real())
+            .paths
+            .runtime_dir;
+        let mut reaper = fake::Reaper::default();
+        // Holds serve.lock but is not `cinelog serve`: never signalled, so not restarted.
+        let holder = fake::old_server(&runtime, "flock", &mut reaper);
+        let new = d.path().join("module/bin/cinelog");
+        let mut steps = Steps::default();
+        let err = refresh_with(env, &no_manager(), Some(&new), &mut steps).unwrap_err();
+        assert!(err.to_string().contains("not restarted"), "{err}");
+        assert_eq!(crate::serve::lock::holder_pid(&runtime), Some(holder));
     }
 
     #[test]

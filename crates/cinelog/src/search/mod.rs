@@ -1,5 +1,5 @@
 //! `cinelog search`, `show`, `forget`, `index`, `status` and `import --report` (work package
-//! M2-E; plan §9.5, §6.4 "Status", §7.6, §11.8). The `hist` shim in the plugin calls `search`.
+//! M2-E; plan §9.5, §6.4 "Status", §7.6, §11.8).
 //!
 //! Search, show, status and the import report read through a read-only
 //! [`cinelog_index::db::open_reader`] on the scope's DB (personal, or the team DB at EUID 0);

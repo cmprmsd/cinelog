@@ -78,7 +78,8 @@ mkmodule() {
 
 # A fake `cinelog`: logs its argv; `rec --check` prints $FAKE_CHECK and, for `recorded`,
 # writes a registry entry for the calling tty; `rec -- SHELL` simulates an init failure
-# and execs SHELL unrecorded, exactly like the real recorder's fallback.
+# and execs SHELL unrecorded, exactly like the real recorder's fallback; `doctor --skew`
+# prints $FAKE_SKEW split at '|', or hangs with FAKE_SKEW_HANG=1.
 cat >$TMP/fake-cinelog <<'EOF'
 #!/bin/zsh -f
 print -r -- "$*" >>$FAKE_LOG
@@ -87,6 +88,9 @@ if [[ -n $FAKE_TTYLOG ]]; then   # which of fds 0-2 are terminals
 fi
 case "$1 $2" in
   ('rec --protocol') print ${FAKE_PROTOCOL:-1} ;;
+  ('doctor --skew')
+    [[ $FAKE_SKEW_HANG == 1 ]] && sleep 30
+    [[ -n $FAKE_SKEW ]] && print -rl -- ${(s:|:)FAKE_SKEW}; exit 0 ;;
   ('rec --check')
     if [[ $FAKE_CHECK == recorded* ]]; then
       t=$(tty); dir=$XDG_RUNTIME_DIR/cinelog
@@ -176,6 +180,7 @@ sp_run() {
 }
 sp_stop() { zpty -d $1 2>/dev/null; unset "SP_BUF[$1]"; }
 sp_log() { local h=SP_HOME_$1; REPLY=$(<${(P)h}/fake.log); }
+argv0s() { local -a l=("${(@f)REPLY}"); REPLY=${(F)${(@)l%% /*}}; }   # log lines without paths
 
 # Unit tests run against the plugin loaded into this shell as a recorded shell.
 unit_load() {
@@ -506,7 +511,7 @@ t_session_wrong_parent_is_not_trusted() {
   sp_expect s || { fail "no first prompt"; sp_stop s; return; }
   decode_markers ${SP_BUF[s]}
   eq ${#markers} 0 "no markers without proof"
-  sp_log s; eq "$REPLY" "rec --check" "stale env ignored, start decision asked"
+  sp_log s; eq "$REPLY" $'rec --check\ndoctor --skew' "stale env ignored, start decision asked"
   [[ ${SP_BUF[s]} == *'cinelog: not recording: error'* ]] || fail "one warning"
   sp_run s 'print -r "<$(env | grep -c CINELOG_)>"'
   [[ $REPLY == *'<0>'* ]] || fail "stale CINELOG_* unset"
@@ -516,9 +521,9 @@ t_session_wrong_parent_is_not_trusted() {
 t_session_fallback_does_not_loop() {
   sp_start s "FAKE_CHECK=start personal terminal" || return
   sp_expect s || { fail "no first prompt"; sp_stop s; return; }
-  sp_log s
-  eq "${(F)${(f)REPLY}%% /*}" $'rec --check\nrec --' "one check, one exec, no loop"
-  [[ $REPLY == *"rec -- ${commands[zsh]:A}"* || $REPLY == *"rec -- /"*zsh* ]] || fail "execs the running zsh"
+  sp_log s; local log=$REPLY
+  argv0s; eq "$REPLY" $'rec --check\nrec --\ndoctor --skew' "one check, one exec, no loop"
+  [[ $log == *"rec -- ${commands[zsh]:A}"* || $log == *"rec -- /"*zsh* ]] || fail "execs the running zsh"
   local n=${#${(M)${(f)SP_BUF[s]}:#*not recording: fake init failure*}}
   eq $n 1 "exactly one warning"
   sp_run s 'print -r "<$(env | grep -c CINELOG_)>"'
@@ -599,8 +604,8 @@ t_session_missing_binary_warns() {
   sp_start s -m $mod || return
   sp_expect s || { fail "no prompt"; sp_stop s; return; }
   [[ ${SP_BUF[s]} == *'cinelog binary missing - run: cinelog-fetch'* ]] || fail "missing-binary warning"
-  sp_run s 'print "<${+functions[cinelog-fetch]} ${+functions[cinelog-link]} ${+aliases[cs]} ${+functions[here]}>"'
-  [[ $REPLY == *'<1 1 1 0>'* ]] || fail "helpers present, here dropped: ${(q+)REPLY}"
+  sp_run s 'print "<${+functions[cinelog-fetch]} ${+functions[cinelog-link]} ${+aliases[cs]} ${+functions[here]} ${+functions[hist]} ${+aliases[hist]}>"'
+  [[ $REPLY == *'<1 1 1 0 0 0>'* ]] || fail "helpers present, here and the hist shim dropped: ${(q+)REPLY}"
   sp_log s; eq "$REPLY" "fetch --background" "background fetch requested"
   sp_stop s
   sp_start s -m $mod -r "zstyle ':cinelog:' auto-fetch no" || return
@@ -653,7 +658,7 @@ t_session_early_and_module_load_once() {
   sp_stop s
   sp_start s -e "FAKE_CHECK=start personal terminal" || return
   sp_expect s || { fail "no prompt"; sp_stop s; return; }
-  sp_log s; eq "${(F)${(f)REPLY}%% /*}" $'rec --check\nrec --' "early.zsh starts the recorder before the module"
+  sp_log s; argv0s; eq "$REPLY" $'rec --check\nrec --\ndoctor --skew' "early.zsh starts the recorder before the module"
   sp_stop s
 }
 
@@ -671,7 +676,7 @@ t_session_loaded_copy_wins() {
 
 t_session_hostile_user_options() {
   # zim sources modules after the user's options; aliases of our names must not break us.
-  local opts='setopt ksharrays shwordsplit nounset noclobber rcexpandparam; alias hist="echo old-hist"'
+  local opts='setopt ksharrays shwordsplit nounset noclobber rcexpandparam; alias cinelog-link="echo old-link"'
   sp_start s -n -r $opts || return
   sp_expect s || { fail "no first prompt"; sp_stop s; return; }
   sp_run s 'echo opts-ok'
@@ -709,6 +714,74 @@ t_session_attached_shell_takes_opts_from_registry() {
   [[ ${SP_BUF[s]} == *' Begin ['* || ${SP_BUF[s]} == *'Uptime:'* ]] && fail "banners/motd despite banners=0 motd=0"
   decode_markers ${SP_BUF[s]}
   kinds; eq "$REPLY" "hello cmd done" "still recorded"
+  sp_stop s
+}
+
+t_session_motd_prints_skew_warnings() {
+  local skew='cinelog: binary 1.0.0 but plugin 0.13.0 in /m: run cinelog-fetch|not a warning|cinelog: /usr/local/bin/cinelog is 0.13.0, older than 1.0.0: sudo x'
+  sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" "FAKE_SKEW=$skew" || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  local plain=${SP_BUF[s]//$'\e'\[[0-9;]#m}
+  [[ $plain == *'cinelog: binary 1.0.0 but plugin 0.13.0 in /m: run cinelog-fetch'$'\r'#$'\n''cinelog: /usr/local/bin/cinelog is 0.13.0, older than 1.0.0: sudo x'* ]] ||
+    fail "both skew lines in the MOTD: ${(q+)plain[1,600]}"
+  [[ $plain == *'not a warning'* ]] && fail "only 'cinelog: ' lines are printed"
+  [[ ${plain%%Uptime:*} == *'cinelog: session 56789abc'*'older than 1.0.0'* ]] ||
+    fail "after the session line, before the rest of the MOTD"
+  sp_run s cs
+  [[ ${REPLY//$'\e'\[[0-9;]#m} == *'cinelog: binary 1.0.0 but plugin 0.13.0'* ]] || fail "cs reprints the skew lines"
+  sp_log s; local n=${#${(M)${(f)REPLY}:#doctor --skew}}
+  eq $n 1 "doctor --skew asked once per shell"
+  sp_stop s
+  sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" "FAKE_SKEW=$skew" \
+    FAKE_REG_OPTS='motd=0' || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  [[ ${SP_BUF[s]} == *'older than'* ]] && fail "no skew lines with motd=0"
+  sp_log s; [[ $REPLY == *'doctor --skew'* ]] && fail "motd=0 does not run doctor --skew"
+  sp_stop s
+}
+
+# Escape sequences from the binary must not reach the terminal: ESC, BEL and CR are stripped
+# and only the plugin's own colour codes remain around the line.
+t_session_motd_skew_strips_control_chars() {
+  local skew=$'cinelog: x\e]0;pwn\a\r|cinelog: y\e[2Jz'
+  sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" "FAKE_SKEW=$skew" || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  local buf=${SP_BUF[s]}
+  [[ $buf == *$'\e[38;2;253;253;150mcinelog: x]0;pwn\e[0m\r\n'* ]] || fail "OSC line printed as plain text: ${(q+)buf[1,600]}"
+  [[ $buf == *$'\e[38;2;253;253;150mcinelog: y[2Jz\e[0m\r\n'* ]] || fail "CSI line printed as plain text: ${(q+)buf[1,600]}"
+  [[ $buf == *$'\e]0;pwn'* || $buf == *$'pwn\a'* ]] && fail "raw OSC/BEL from the binary reached the terminal"
+  [[ $buf == *$'\e[2J'* ]] && fail "raw CSI from the binary reached the terminal"
+  sp_stop s
+}
+
+# A pre-1.0 checkout's asciinema-player/ (old viewer pages with recorded output) is reported
+# in the MOTD with the command that removes it, and nothing is said once it is gone.
+t_session_motd_reports_old_viewer_pages() {
+  mkmodule; local mod=$REPLY
+  mkdir -p $mod/asciinema-player/tmp/h8 && print x >$mod/asciinema-player/tmp/h8/index.html
+  sp_start s -m $mod FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  local plain=${SP_BUF[s]//$'\e'\[[0-9;]#m}
+  [[ $plain == *"cinelog: $mod/asciinema-player holds the old viewer's pages of recorded output; remove it: rm -rf $mod/asciinema-player"* ]] ||
+    fail "old viewer pages reported: ${(q+)plain[1,600]}"
+  [[ -f $mod/asciinema-player/tmp/h8/index.html ]] || fail "the plugin itself deletes nothing"
+  sp_stop s
+  rm -rf $mod/asciinema-player
+  sp_start s -m $mod FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  [[ ${SP_BUF[s]} == *'old viewer'* ]] && fail "no notice without asciinema-player/"
+  sp_stop s
+}
+
+# A hung `doctor --skew` (e.g. the team binary on a dead mount) must not keep the prompt away.
+t_session_motd_skew_hang_is_bounded() {
+  (( $+commands[timeout] )) || { print -r -- "    (skipped: no timeout(1))"; return; }
+  local -F t0=$EPOCHREALTIME
+  sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" \
+    'FAKE_SKEW=cinelog: late' FAKE_SKEW_HANG=1 || return
+  sp_expect s '*PROMPT<->> *' 8 || { fail "no prompt while doctor --skew hangs"; sp_stop s; return; }
+  (( EPOCHREALTIME - t0 < 6 )) || fail "prompt took $(( EPOCHREALTIME - t0 )) s"
+  [[ ${SP_BUF[s]} == *'cinelog: late'* ]] && fail "a timed-out skew answer is not printed"
   sp_stop s
 }
 

@@ -141,8 +141,8 @@ pid of the requesting `cinelog` process.
 
 **`nested-start` / `nested-end`** — `uuid` (str, *req*): session uuid of the inner
 recording; `pid` (u32, *req*) and `starttime` (u64, *req*) of the inner recorder; `scope`
-(`"team"`/`"personal"`, *req*); `user` (str); `sudo_user` (str); `url` (str, once a server
-exists, M3); `exit` (i32, `nested-end` only).
+(`"team"`/`"personal"`, *req*); `user` (str); `sudo_user` (str); `url` (str, the inner
+session's web URL when its server is known); `exit` (i32, `nested-end` only).
 
 ### 2.3 Example
 
@@ -324,7 +324,7 @@ Wall time of any event: piecewise-linear mapping of its offset between `session`
 `clock` markers (intervals use `CLOCK_BOOTTIME`, so suspend time counts).
 
 When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops all other
-`m` events for players (M3); files on disk are never rewritten.
+`m` events for players; files on disk are never rewritten.
 
 ---
 
@@ -334,7 +334,7 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 
 | Command | Output / effect | Exit |
 |---|---|---|
-| `cinelog --version` | `cinelog <VERSION>` (e.g. `cinelog 0.10.0`) | 0 |
+| `cinelog --version` | `cinelog <VERSION>` (e.g. `cinelog 1.0.0`) | 0 |
 | `cinelog rec --protocol` | `1` | 0 |
 | `cinelog rec --check` | one line, §6.3 | 0 (also for `skip`) |
 | `cinelog rec -- <shell> [args…]` | records; on any init failure execs `<shell>` unrecorded (§6.4) | the shell's status |
@@ -344,8 +344,8 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 | `cinelog doctor --skew` | the local version-skew warnings (plugin vs binary, team binary, this scope's running server), one line each starting with `cinelog: `; nothing when all agree. No network, no ANSI; the plugin prints it in the MOTD | 0 |
 | `cinelog install [--team [--system-zshrc] [--upgrade] [--binary PATH] [--module DIR] [--allow-unverified]] [--prefix DIR] [--refresh] [--uninstall] [--no-migrate]` | install; `--prefix` (alias `--root`) writes every system path below DIR. TEAM: the binary is `--binary`, else `<module>/bin/cinelog`, else the running binary if it lies inside the module; it is verified against `shell/checksums/v<module VERSION>.sha256` unless `--allow-unverified`; `--upgrade` from the installed team binary itself is refused. `--module` defaults to the checkout found up to 4 levels above the running binary. `--refresh` is idempotent: it points `~/.local/bin/cinelog` at the module binary and restarts this user's running server (unit or detached) so it runs that binary | 0 ok |
 | `cinelog completions zsh` | completion script (committed as `shell/completions/_cinelog`) | 0 |
-| `cinelog serve [--scope personal\|team] [--no-http] [--ensure]` | indexer (and, from M3, the web server) of one scope; holds `serve.lock` in the runtime dir for its lifetime; `--ensure` returns at once if the lock is held, else starts the user unit or a detached `serve` | 0 |
-| `cinelog search [-a\|--out] [-s] [--user U] [--host H] [--since W] [--until W] [--exit N\|ok\|fail] [--cwd DIR] [--pane P] [--json\|--print] [--limit N] [TERM…]` | fzf over `<uuid>:<seq>\t<ts>\t<user>@<host>\t[exit]\t<typed>\t┊ <snippet>` lines (hidden first field), preview `cinelog show {1}`; Enter prints the URL (before M3: the cast path and `cinelog show <id>`); without fzf a plain list | 0; 1 no match |
+| `cinelog serve [--scope personal\|team] [--no-http] [--ensure]` | indexer and (without `--no-http`) web server of one scope; holds `serve.lock` in the runtime dir for its lifetime; `--ensure` returns at once if the lock is held, else starts the user unit or a detached `serve` | 0 |
+| `cinelog search [-a\|--out] [-s] [--user U] [--host H] [--since W] [--until W] [--exit N\|ok\|fail] [--cwd DIR] [--pane P] [--json\|--print] [--limit N] [TERM…]` | fzf over `<uuid>:<seq>\t<ts>\t<user>@<host>\t[exit]\t<typed>\t┊ <snippet>` lines (hidden first field), preview `cinelog show {1}`; Enter prints the URL (when no server is known: the cast path and `cinelog show <id>`); without fzf a plain list | 0; 1 no match |
 | `cinelog show <uuid>[:<seq>\|@<t>] [--json] [--max-bytes N]` | the command (or session) header and its output text | 0; 1 not found |
 | `cinelog forget <uuid>[:<seq>] [--from S --to S]` | records the target in `meta.forgotten`; the writer deletes it from index.db; casts are never rewritten | 0 |
 | `cinelog index --once\|--rebuild [CAST…]` | one-shot discovery and backfill (only while the writer lock is free); `--rebuild` drops index.db first, meta.db is kept | 0; 1 some casts failed |

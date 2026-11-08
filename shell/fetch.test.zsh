@@ -187,6 +187,26 @@ t_upgrade_swaps() {
   assert_eq $(sha $T/mod/bin/cinelog) $(sha $T/rel/v$VER/cinelog-$TARGET)
 }
 
+# The swap is a rename(2): bin/cinelog never disappears, and a process still running the old
+# file (a recorder, shown as `(deleted)` in /proc) keeps its inode and content.
+t_upgrade_swap_is_atomic() {
+  setup atomic
+  mkdir -p $T/mod/bin && fake_bin $T/mod/bin/cinelog 9.9.8 old
+  local old_ino=$(stat -c %i $T/mod/bin/cinelog) old_sum=$(sha $T/mod/bin/cinelog)
+  exec {held}<$T/mod/bin/cinelog
+  zsh -fc 'while [[ ! -e $1/stop ]]; do [[ -x $1/mod/bin/cinelog ]] || print miss >> $1/misses; done' \
+    zsh $T &
+  local watcher=$!
+  run_fetch; local rc=$?
+  : > $T/stop; wait $watcher
+  (( rc == 0 )) || fail "$(<$T/err)" || return 1
+  [[ ! -e $T/misses ]] || fail "bin/cinelog was missing during the swap" || return 1
+  [[ $(stat -c %i $T/mod/bin/cinelog) != $old_ino ]] || fail "replaced in place, not renamed" || return 1
+  assert_eq $(sha /proc/self/fd/$held) $old_sum "the old inode changed under its users" || return 1
+  exec {held}<&-
+  leftovers
+}
+
 t_checksum_mismatch_keeps_old() {
   setup mismatch
   mkdir -p $T/mod/bin && fake_bin $T/mod/bin/cinelog 9.9.8 old

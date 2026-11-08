@@ -1,5 +1,6 @@
-//! `cinelog doctor [--json]` (§10.7, M1 subset): exit 0 when nothing needs attention, 1
-//! when at least one check warns or fails.
+//! `cinelog doctor [--json]` (§10.7): exit 0 when nothing needs attention, 1 when at least
+//! one check warns or fails. `--skew` prints only the local version-skew warnings
+//! ([`skew`]).
 
 mod root_sources;
 pub mod skew;
@@ -9,7 +10,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cinelog_core::config::HidepidFallback;
+use cinelog_core::Scope;
+use cinelog_core::config::{Autostart, HidepidFallback};
 use cinelog_core::location;
 use cinelog_core::paths::team;
 use cinelog_core::registry::{RecState, SystemProbe};
@@ -114,6 +116,7 @@ pub fn collect(ctx: &Ctx) -> Report {
     registry(ctx, &mut r);
     storage(ctx, &mut r);
     server(ctx, &mut r);
+    r.checks.push(units(&UnitFacts::capture(ctx)));
     shell_setup(ctx, &mut r);
     if ctx.env.euid == 0 {
         root_hardening(ctx, &mut r);
@@ -387,7 +390,7 @@ fn server(ctx: &Ctx, r: &mut Report) {
             Some(pid) => r.add(
                 "server",
                 Status::Ok,
-                format!("indexer running (pid {pid}; the web UI arrives in a later version)"),
+                format!("indexer running (pid {pid}) without the web server (`serve --no-http`, or still starting)"),
             ),
             None => r.add(
                 "server",
@@ -396,6 +399,79 @@ fn server(ctx: &Ctx, r: &mut Report) {
             ),
         },
     }
+}
+
+/// What [`units`] needs to know about the server's systemd integration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitFacts {
+    pub scope: Scope,
+    pub unit_file: PathBuf,
+    pub installed: bool,
+    /// PERSONAL: the systemd user manager reads `unit_file` (not a sandbox HOME).
+    pub managed: bool,
+    pub linger: bool,
+    pub autostart: Autostart,
+}
+
+impl UnitFacts {
+    fn capture(ctx: &Ctx) -> Self {
+        let (unit_file, managed, linger) = match ctx.scope() {
+            Scope::Personal => {
+                let file = crate::install::user_unit_file(&ctx.env);
+                let manager = crate::install::UserManager::real(ctx.env.euid);
+                (file.clone(), manager.reads(&file), manager.linger)
+            }
+            Scope::Team => (ctx.root.join(team::UNIT), ctx.root.is_real(), true),
+        };
+        Self {
+            scope: ctx.scope(),
+            installed: unit_file.is_file(),
+            unit_file,
+            managed,
+            linger,
+            autostart: ctx.config.server.autostart,
+        }
+    }
+}
+
+/// The server's unit and, for PERSONAL, linger (§10.4).
+pub fn units(f: &UnitFacts) -> Check {
+    let check = |status, message: String| Check {
+        id: "units",
+        status,
+        message,
+    };
+    let file = f.unit_file.display();
+    let (unit, install) = match f.scope {
+        Scope::Personal => ("cinelog.service", "cinelog install".to_owned()),
+        Scope::Team => ("cinelog-team.service", module::sudo_install_team("")),
+    };
+    if !f.installed {
+        return match f.autostart {
+            Autostart::Systemd => check(
+                Status::Warn,
+                format!("server.autostart is \"systemd\" but {file} is missing: run `{install}`"),
+            ),
+            Autostart::Off => check(Status::Info, format!("no {unit}; server.autostart is off")),
+            _ => check(
+                Status::Info,
+                format!("no {unit}: recorded shells start a detached server (`{install}` adds the unit)"),
+            ),
+        };
+    }
+    if !f.managed {
+        return check(
+            Status::Info,
+            format!("{file} is not where the systemd manager reads units; shells start the server"),
+        );
+    }
+    if f.scope == Scope::Personal && !f.linger {
+        return check(
+            Status::Info,
+            format!("{unit} runs while you are logged in; `loginctl enable-linger` keeps it indexing"),
+        );
+    }
+    check(Status::Ok, format!("{unit} installed ({file})"))
 }
 
 /// Where zsh reads its startup files for this user.
@@ -732,6 +808,45 @@ mod tests {
         assert!(text.ends_with("2 problem(s) found\n"));
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["checks"][2]["status"], "warn");
+    }
+
+    #[test]
+    fn unit_and_linger() {
+        let base = UnitFacts {
+            scope: Scope::Personal,
+            unit_file: "/h/.config/systemd/user/cinelog.service".into(),
+            installed: true,
+            managed: true,
+            linger: true,
+            autostart: Autostart::Auto,
+        };
+        assert_eq!(units(&base).status, Status::Ok);
+        let no_linger = units(&UnitFacts {
+            linger: false,
+            ..base.clone()
+        });
+        assert!(no_linger.status == Status::Info && no_linger.message.contains("enable-linger"));
+        let missing = UnitFacts {
+            installed: false,
+            ..base.clone()
+        };
+        assert_eq!(units(&missing).status, Status::Info);
+        let required = units(&UnitFacts {
+            autostart: Autostart::Systemd,
+            ..missing.clone()
+        });
+        assert!(required.status == Status::Warn && required.message.contains("cinelog install"));
+        let sandbox = units(&UnitFacts {
+            managed: false,
+            ..base.clone()
+        });
+        assert_eq!(sandbox.status, Status::Info);
+        let team = units(&UnitFacts {
+            scope: Scope::Team,
+            linger: false,
+            ..base
+        });
+        assert!(team.status == Status::Ok && team.message.contains("cinelog-team.service"));
     }
 
     #[test]

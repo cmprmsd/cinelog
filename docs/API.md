@@ -1,13 +1,16 @@
-# cinelog web API, version 1 (M3, M4)
+# cinelog web API, version 1
 
 The HTTPS interface of `cinelog serve` (one server per scope: PERSONAL per user, TEAM for
 root shells). The wire types live in `crates/cinelog-web/src/api/types.rs` and are generated
 to `web/src/lib/api/types.ts` (`CINELOG_WRITE_TS=1 cargo test -p cinelog-web --lib
 api::types`; CI fails when the TS file is stale). Type names below are those types.
 
-Frozen for M3 by the contracts work package (M3-0) and extended for M4 (M4-0): live viewing,
-the UI bus, the timeline, annotations and tags, the export and live UI (§9). Changes are
-additive and go through the contracts owner.
+Stable across cinelog 1.x ([STABILITY.md](STABILITY.md)): changes are additive only (new
+endpoints, new optional fields and parameters, new event kinds). §1–§8 cover login, search,
+sessions, playback, export, forget and the team search client; §9 covers live viewing, the
+UI bus, the timeline, annotations and tags, and the export and live UI. §9.6, §9.7 and §10
+record how the SPA and the server are wired, for contributors. Security background:
+[SECURITY.md](SECURITY.md).
 
 ---
 
@@ -94,7 +97,7 @@ Public routes: `/healthz`, `/link/{uuid}`, `GET`/`POST /api/login` and the SPA a
   characters). Files store only `sha256(raw bytes)` (`crates/cinelog-web/src/tokens.rs`):
   PERSONAL `$XDG_CONFIG_HOME/cinelog/auth.toml` (one token, named after the user), TEAM
   `/etc/cinelog/tokens.toml` (one named token per member). Both 0600. The token name is the
-  **principal** (author of forgets and, in M4, annotations). `cinelog token new|list|revoke`
+  **principal** (author of forgets and annotations). `cinelog token new|list|revoke`
   manages them; revoking deletes every auth session of that principal.
 - **Login:** `POST /api/login` with `LoginRequest {token}`. Case and surrounding whitespace
   of the token do not matter. Constant-time comparison. At most 5 attempts per minute per
@@ -247,10 +250,12 @@ span before it purges; the server records it the first time it sees a forgotten 
 still in index.db, or recovers it once from a cinelog cast's `cmd`/`done` markers. The
 shell echoes the command line before the command's `cmd` marker, so in index.db it belongs
 to the output before the command (unattributed, or the enclosing command's). A command forget
-removes that echo too: in the output chunks that start within the span above (from the end of
-the command before it to its start), every line showing a line of the typed command becomes
-empty (line ordinals stay). Queries strip it at once, the purge rewrites the chunks, and a
-rebuild strips it on the way in. Other output in that span stays searchable.
+removes that echo too: in the output chunks within the span above (from the end of the
+command before it to its start, including the chunk already running at that end, because a
+real shell often writes the prompt and the echo a fraction of a millisecond before the end is
+stamped), every line showing a line of the typed command becomes empty (line ordinals stay).
+Queries strip it at once, the purge rewrites the chunks, and a rebuild strips it on the way
+in. Other output in that span stays searchable.
 
 ## 6. Playback
 
@@ -325,7 +330,7 @@ for the fzf preview (`cinelog show --team {1}`, a hidden flag). Result URLs (`--
 Enter) point at the team server. As root, `cinelog search` reads the team DB directly
 instead.
 
-## 9. M4: live view, UI bus, timeline, annotations, export UI
+## 9. Live view, UI bus, timeline, annotations, export UI
 
 ### 9.0 Server-sent events (both streams)
 - `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`. The
@@ -529,7 +534,10 @@ package writes its own specs (`e2e/live.spec.ts`, `e2e/export.spec.ts` M4-D,
 override the User-Agent (Chromium drops the override on some navigations while an
 EventSource is open, and sessions are bound to the User-Agent).
 
-## 10. Implementation map
+## 10. Implementation map (development history)
+
+Which work package of the M3 and M4 milestones built which part; useful to find the code
+behind an endpoint.
 
 ### 10.0 M3 work packages
 

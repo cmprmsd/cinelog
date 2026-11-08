@@ -1289,6 +1289,53 @@ fn command_forget_removes_the_echo() {
     fts_integrity(&raw);
 }
 
+/// A real shell writes the prompt with the echo a fraction of a millisecond before the
+/// previous command's `t_end` is stamped; that chunk still holds the forgotten echo.
+#[test]
+fn command_forget_removes_an_echo_written_just_before_the_previous_end() {
+    let env = Env::new();
+    let mut w = env.writer();
+    let mut b = IndexBatch::new(session(&env, U1));
+    b.commands = vec![command(1, "echo hello", 10.0), command(2, "echo leakytoken", 20.0)];
+    b.chunks = vec![
+        chunk(None, 1.0, "alice@h1:~$ echo hello"),
+        chunk(Some(1), 10.5, "hello"),
+        chunk(None, 10.9996, "alice@h1:~$ echo leakytoken"),
+        chunk(Some(2), 20.5, "other"),
+    ];
+    w.apply(&b).unwrap();
+    let r = env.reader();
+    assert_eq!(search(r.as_ref(), "leakytoken", SearchTarget::Output).hits.len(), 1);
+    let f = env
+        .meta()
+        .forget(
+            &ForgetTarget::Command {
+                uuid: U1.into(),
+                seq: 2,
+            },
+            "alice",
+        )
+        .unwrap();
+    assert!(
+        search(r.as_ref(), "leakytoken", SearchTarget::All).hits.is_empty(),
+        "excluded before the purge"
+    );
+    let out = w.apply_forgotten(std::slice::from_ref(&f)).unwrap();
+    assert_eq!(out.commands, 1);
+    assert!(search(r.as_ref(), "leakytoken", SearchTarget::All).hits.is_empty());
+    let raw = env.raw();
+    assert_eq!(
+        count(&raw, "SELECT count(*) FROM outputs WHERE text LIKE '%leakytoken%'"),
+        0
+    );
+    assert_eq!(
+        search(r.as_ref(), "hello", SearchTarget::Output).hits.len(),
+        2,
+        "the earlier echo and output stay"
+    );
+    fts_integrity(&raw);
+}
+
 #[test]
 fn range_forget_catches_commands_that_close_later() {
     let env = Env::new();

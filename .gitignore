@@ -1,4 +1,5 @@
-tmp/
+# Session pages the pre-1.0 viewer wrote into old checkouts; never commit them.
+/asciinema-player/
 /target/
 /web/dist/
 /web/node_modules/

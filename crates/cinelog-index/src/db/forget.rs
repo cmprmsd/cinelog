@@ -137,7 +137,7 @@ pub(crate) struct Echo {
     /// Row of the command in index.db, if it has one.
     command_id: Option<i64>,
     /// The end of the command before it, the start of an enclosing one, or the session
-    /// start (playback masks from the first along with the command).
+    /// start, lowered to the start of the echo-owning chunk that covers it.
     from: f64,
     /// The command's start.
     to: f64,
@@ -162,6 +162,15 @@ impl Echo {
                  FROM commands WHERE session_id = ?1 AND seq <> ?2 AND t_start < ?3",
             )?
             .query_row(params![sid, U64(seq), t_start], |r| r.get(0))?;
+        let from = from.unwrap_or(0.0).min(t_start);
+        // The shell may write the prompt (and so the echo) just before the previous command's
+        // end is stamped: the chunk that covers `from` is part of the echo's window too.
+        let covering: Option<f64> = conn
+            .prepare_cached(&format!(
+                "SELECT max(o.t) FROM outputs o LEFT JOIN commands c ON c.id = o.command_id
+                 WHERE o.session_id = ?1 AND o.t <= ?2 AND {ECHO_OWNER}"
+            ))?
+            .query_row(params![sid, from + T_EPS, t_start, command_id], |r| r.get(0))?;
         let lines = typed
             .lines()
             .map(str::trim)
@@ -170,7 +179,7 @@ impl Echo {
             .collect();
         Ok(Self {
             command_id,
-            from: from.unwrap_or(0.0).min(t_start),
+            from: covering.map_or(from, |c| c.min(from)),
             to: t_start,
             lines,
         })

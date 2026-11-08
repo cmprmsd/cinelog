@@ -2,7 +2,6 @@
 //! pause/resume/link` and subshells find their registry entry through `/dev/tty`).
 
 use std::os::fd::AsFd;
-use std::path::PathBuf;
 
 use crate::registry::TtyKey;
 
@@ -44,11 +43,6 @@ pub fn controlling_tty() -> Option<TtyKey> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     let dev = tty_nr_from_stat(&stat).filter(|&d| d != 0)?;
     key_from_dev(dev).or_else(|| named_std_tty(dev))
-}
-
-/// Path of the controlling terminal (`/dev/pts/N`, `/dev/tty1`), if any.
-pub fn controlling_tty_path() -> Option<PathBuf> {
-    controlling_tty().map(|k| PathBuf::from(k.to_string()))
 }
 
 /// Finds the name of an unusual tty (USB serial, console) through a std fd that is open on it.

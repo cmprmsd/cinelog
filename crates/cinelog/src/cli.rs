@@ -119,7 +119,7 @@ pub struct InstallArgs {
     /// Write every system path below this directory instead of `/` (tests)
     #[arg(long, alias = "root", value_name = "DIR")]
     pub prefix: Option<PathBuf>,
-    /// Only refresh the ~/.local/bin symlink and restart the user unit if active
+    /// Refresh the ~/.local/bin symlink and restart this user's running server (unit or detached)
     #[arg(long, conflicts_with_all = ["team", "uninstall"])]
     pub refresh: bool,
     /// Remove units, symlinks and the system zshrc block (casts are kept)

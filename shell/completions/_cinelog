@@ -74,7 +74,7 @@ _arguments "${_arguments_options[@]}" : \
 '--system-zshrc[With --team\: add the guarded block to the system zshrc]' \
 '--upgrade[With --team\: replace an existing team binary after verifying its checksum]' \
 '--allow-unverified[With --team\: install a binary that \`shell/checksums/\` does not list (local builds)]' \
-'(--team --uninstall)--refresh[Only refresh the ~/.local/bin symlink and restart the user unit if active]' \
+'(--team --uninstall)--refresh[Refresh the ~/.local/bin symlink and restart this user'\''s running server (unit or detached)]' \
 '--uninstall[Remove units, symlinks and the system zshrc block (casts are kept)]' \
 '--no-migrate[Skip reading the old cinelog-settings.conf]' \
 '-h[Print help]' \

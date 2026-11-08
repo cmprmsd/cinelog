@@ -171,6 +171,7 @@
 <style>
   .player {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.4rem;
     min-width: 0;
   }

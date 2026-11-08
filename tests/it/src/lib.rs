@@ -27,6 +27,7 @@ pub mod sshd;
 pub mod sudo;
 pub mod synth;
 pub mod tmux;
+pub mod upgrade;
 pub mod util;
 
 pub use binary::Flavour;
