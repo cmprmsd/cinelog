@@ -22,8 +22,8 @@
   is not installed (`pnpm exec playwright install chromium`).
 
 Some specs reshape responses with `page.route` instead of adding fixtures: cursor pages of a
-session's hits (`n`/`N`), a failing next result page, and `PlayInfo.ready=false` build progress.
-They run unchanged against a real server. The live specs that grow, pause, crash or end the
+session's hits (`n`/`N`), a failing next result page, `PlayInfo.ready=false` build progress, and
+the metadata 404 of a live session the indexer has not caught up with yet. They run unchanged against a real server. The live specs that grow, pause, crash or end the
 recorder through the mock's control endpoint skip there; the real recorder path is covered by
 the Rust integration test `tests/it/tests/i23_live_web.rs`. The forget spec changes server state, so run it once
 per fresh fixture set (a CI retry of that spec fails).

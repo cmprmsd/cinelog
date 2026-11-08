@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type { BusEvent, LiveSession, Session } from '../api/types';
 import {
   badgeFor,
+  detailAbsent,
   initialView,
   liveOptions,
   liveSource,
   LIVE_BUFFER_MS,
   needsReconnect,
+  notIndexedDelay,
   probeOutcome,
   probeStream,
   recorderBadge,
@@ -227,5 +229,34 @@ describe('player setup', () => {
     expect(o).not.toHaveProperty('idleTimeLimit');
     expect(o).not.toHaveProperty('markers');
     expect(o).not.toHaveProperty('startAt');
+  });
+});
+
+describe('detailAbsent: a 404 on the metadata', () => {
+  it('is only not indexed yet while the session is listed live or streaming', () => {
+    expect(detailAbsent('connecting', true)).toBe('not-indexed');
+    expect(detailAbsent('open', false)).toBe('not-indexed');
+    expect(detailAbsent('reconnecting', false)).toBe('not-indexed');
+    expect(detailAbsent('offline', true)).toBe('not-indexed');
+  });
+
+  it('asks for a probe of the stream otherwise, and follows its answer', () => {
+    expect(detailAbsent('connecting', false)).toBe('probe');
+    expect(detailAbsent('ended', false)).toBe('probe');
+    expect(detailAbsent('connecting', false, 200)).toBe('not-indexed');
+    expect(detailAbsent('connecting', false, 503)).toBe('not-indexed');
+    expect(detailAbsent('connecting', false, 0)).toBe('not-indexed');
+    expect(detailAbsent('connecting', false, 404)).toBe('missing');
+    expect(detailAbsent('unavailable', false, 410)).toBe('missing');
+  });
+
+  it('keeps a forgotten session missing', () => {
+    expect(detailAbsent('missing', true)).toBe('missing');
+    expect(detailAbsent('missing', false, 200)).toBe('missing');
+  });
+
+  it('asks again every second, then every five', () => {
+    expect([0, 1, 7].map(notIndexedDelay)).toEqual([1000, 1000, 1000]);
+    expect([8, 50].map(notIndexedDelay)).toEqual([5000, 5000]);
   });
 });

@@ -208,6 +208,52 @@ test.describe('live view', () => {
     await expect(page.getByRole('alert')).toContainText('does not exist or was forgotten');
   });
 
+  /**
+   * The indexer lags the recorder by a few seconds: until it catches up, the metadata of a
+   * fresh live session is 404 while the bus lists it and its stream works.
+   */
+  async function unindexedFor(page: Page, ms: number): Promise<{ misses: () => number }> {
+    const until = Date.now() + ms;
+    let misses = 0;
+    await page.route(`**/api/sessions/${FIX.live}`, async (route) => {
+      if (Date.now() >= until) return route.continue();
+      misses += 1;
+      return route.fulfill({ status: 404, json: { error: 'not_found', message: 'no such session' } });
+    });
+    return { misses: () => misses };
+  }
+
+  for (const via of ['the sidebar', 'a cold load without the bus'] as const) {
+    test(`a live session that is not indexed yet streams from ${via} and gets its metadata later`, async ({ page }) => {
+      if (via === 'the sidebar') {
+        await page.goto('/');
+      } else {
+        // Without the bus, only a probe of the stream tells a fresh session from a missing one.
+        await page.route('**/api/events', (route) => route.abort());
+      }
+      const unindexed = await unindexedFor(page, 3000);
+      const indexed = page.waitForResponse((r) => new URL(r.url()).pathname === `/api/sessions/${FIX.live}` && r.status() === 200, {
+        timeout: 10_000,
+      });
+      if (via === 'the sidebar') {
+        await page.getByTestId('live-list').locator(`a[href="/live/${FIX.live}"]`).click();
+        await expect(page.getByTestId('live-page')).toHaveAttribute('data-uuid', FIX.live);
+      } else {
+        await openLive(page);
+      }
+      await expect(page.getByTestId('live-view')).toHaveAttribute('data-stream', 'open');
+      await expect(term(page)).toContainText('up 4 days');
+      await expect(badge(page)).toHaveAttribute('data-kind', 'live');
+      await expect(page.getByRole('alert')).toHaveCount(0);
+      expect(unindexed.misses()).toBeGreaterThan(0);
+      // Once indexed, the view fetches the metadata; it never said `not found`.
+      await indexed;
+      await expect(page.getByTestId('live-view').locator('.meta')).toContainText('started');
+      await expect(page.getByTestId('live-view')).toHaveAttribute('data-stream', 'open');
+      await expect(badge(page)).not.toHaveText('not found');
+    });
+  }
+
   test('a refused stream shows the recording so far and switches to live when it is back', async ({ page }) => {
     test.skip(!mock, 'refuses the stream through the mock');
     await page.goto('/');

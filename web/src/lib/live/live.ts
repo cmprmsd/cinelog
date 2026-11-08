@@ -66,6 +66,29 @@ export function probeOutcome(status: number): 'retry-now' | 'signed-out' | 'miss
   return 'unavailable';
 }
 
+/**
+ * What a 404 on `GET /api/sessions/{uuid}` means here. The recorder registers a session a few
+ * seconds before the indexer has its metadata, so a session the bus lists as live, or whose
+ * stream is up or accepted (`streamStatus`, a probe of the stream URL), is not indexed yet: the
+ * view keeps streaming and asks again. Only a stream that is gone too (404, 410) is missing.
+ * `probe`: the answer needs a probe of the stream URL.
+ */
+export function detailAbsent(
+  stream: StreamState,
+  listedLive: boolean,
+  streamStatus?: number,
+): 'not-indexed' | 'missing' | 'probe' {
+  if (stream === 'missing') return 'missing';
+  if (listedLive || stream === 'open' || stream === 'reconnecting') return 'not-indexed';
+  if (streamStatus === undefined) return 'probe';
+  return probeOutcome(streamStatus) === 'missing' ? 'missing' : 'not-indexed';
+}
+
+/** Retries of the metadata while the session is not indexed yet: every second, then slower. */
+export function notIndexedDelay(attempt: number): number {
+  return attempt < 8 ? 1000 : 5000;
+}
+
 /** The view after one input for session `uuid`. */
 export function reduce(view: LiveView, input: LiveInput, uuid: string): LiveView {
   switch (input.type) {

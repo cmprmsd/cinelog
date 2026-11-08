@@ -4,12 +4,13 @@
   // screen to a late joiner, events follow, `LiveOffline` + `done` end it. Read-only: the API
   // has no input path and the page offers none. The badge combines the stream with the
   // recorder status from the UI bus (`LIVE`, `paused (tmux)`, `offline`, …). A refused
-  // stream (503 and the like) shows the recording so far and retries with backoff.
+  // stream (503 and the like) shows the recording so far and retries with backoff. A session
+  // younger than the indexer's lag has no metadata yet (404): it streams while the page asks again.
   import * as AsciinemaPlayer from 'asciinema-player';
   import { untrack } from 'svelte';
   import { api, ApiFailure, errorText, isAbort } from '../api/client';
   import { bus } from '../api/events.svelte';
-  import type { BusEvent, SessionDetail } from '../api/types';
+  import type { BusEvent, Session, SessionDetail } from '../api/types';
   import SessionView from '../components/SessionView.svelte';
   import { stateFromQuery } from '../filters';
   import { fmtClock, fmtTs, keyLabel, tzLabel } from '../format';
@@ -18,10 +19,12 @@
   import { router } from '../router.svelte';
   import {
     badgeFor,
+    detailAbsent,
     initialView,
     liveOptions,
     liveSource,
     needsReconnect,
+    notIndexedDelay,
     onPlayerEvent,
     probeOutcome,
     probeStream,
@@ -48,7 +51,7 @@
 
   const badge = $derived(badgeFor(view));
   const streaming = $derived(view.stream !== 'unavailable' && view.stream !== 'missing');
-  const s = $derived(detail?.session ?? null);
+  const s = $derived(detail?.session ?? view.recorder?.session ?? null);
   const search = $derived(stateFromQuery(router.query));
 
   function apply(input: LiveInput): void {
@@ -158,10 +161,23 @@
 
   // ---- session metadata: initial load, and polling while the bus is down -------------------
 
+  /** A 404 on the metadata: the session is missing, or only not indexed yet. */
+  async function notIndexed(id: string, signal: AbortSignal): Promise<boolean> {
+    const listed = () => view.recorder !== null || bus.live.some((l) => l.session.uuid === id);
+    let out = detailAbsent(view.stream, listed());
+    if (out === 'probe') {
+      const status = await probeStream(api.liveUrl(id));
+      if (signal.aborted) return true;
+      out = detailAbsent(view.stream, listed(), status);
+    }
+    return out === 'not-indexed';
+  }
+
   $effect(() => {
     const id = uuid;
     const ctl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let misses = 0;
     const load = async () => {
       try {
         const d = await api.session(id, ctl.signal);
@@ -170,7 +186,11 @@
       } catch (e) {
         if (isAbort(e)) return;
         if (e instanceof ApiFailure && e.status === 404) {
-          apply({ type: 'probe', status: 404 });
+          if (await notIndexed(id, ctl.signal)) {
+            if (!ctl.signal.aborted) timer = setTimeout(load, notIndexedDelay(misses++));
+          } else if (!ctl.signal.aborted) {
+            apply({ type: 'probe', status: 404 });
+          }
           return;
         }
         console.warn('live view: session metadata', errorText(e));
@@ -216,10 +236,10 @@
     clearTimers();
   });
 
-  const where = (d: SessionDetail) => {
-    const t = d.session.tmux;
+  const where = (session: Session) => {
+    const t = session.tmux;
     if (t.pane) return `tmux ${t.session ?? t.session_id ?? '?'}:${t.window ?? '?'}${t.window_name ? ` (${t.window_name})` : ''} ${t.pane}`;
-    return d.session.holder_comm ?? d.session.tty ?? '';
+    return session.holder_comm ?? session.tty ?? '';
   };
 </script>
 
@@ -234,9 +254,9 @@
         <span class={`state ${badge.kind}`} title={badge.title} data-testid="live-badge" data-kind={badge.kind}>{badge.label}</span>
       </h2>
       <div class="meta muted">
-        {#if s && detail}
+        {#if s}
           <span>started {fmtTs(s.started_at, prefs.utc)} {tzLabel(prefs.utc)}</span>
-          {#if where(detail)}<span>{where(detail)}</span>{/if}
+          {#if where(s)}<span>{where(s)}</span>{/if}
           <span>{s.scope}</span>
         {/if}
         {#if clock !== null && view.stream !== 'unavailable'}<span data-testid="live-clock">at {fmtClock(clock)}</span>{/if}
