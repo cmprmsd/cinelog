@@ -74,7 +74,10 @@ impl Detector for FakeDetector {
 /// Shell functions available to every test script.
 const PRELUDE: &str = r#"
 read -r N <&"$CINELOG_NONCE_FD"
-eval "exec $CINELOG_NONCE_FD<&-"
+# The real plugin closes the nonce fd (zsh's exec {fd}<&-); this fake stays
+# POSIX-portable instead: dash rejects exec <&- for fd numbers it has not
+# allocated itself ("Bad fd number"), and the recorder never waits on the
+# child's read end, so leaving it open does not change what is recorded.
 mark() { printf '\033]7777;cinelog;1;%s;j;%s\007' "$N" "$1"; }
 rmark() { printf '\033]7777;cinelog;1;-;j;%s\007' "$1"; }
 "#;

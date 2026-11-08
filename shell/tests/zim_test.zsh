@@ -118,7 +118,8 @@ gitq init --bare $GH/cmprmsd/cinelog.git || { print -u2 "zim_test: git init fail
 typeset -g VER=$(<$ROOT/VERSION)
 release $VER
 publish $VER
-print -r -- "zstyle ':zim' disable-version-check yes" >$H/.zshenv
+print -r -- "zstyle ':zim' disable-version-check yes
+skip_global_compinit=1" >$H/.zshenv
 print -r -- "zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'" >$H/.zimrc
 print -r -- 'PS1="PROMPT%!> "; unsetopt PROMPT_SP
 source $ZIM_HOME/init.zsh' >$H/.zshrc

@@ -125,6 +125,11 @@ sp_start() {
   local home=$TMP/home.$name.$RANDOM$RANDOM
   mkdir -p $home/zd $home/run $home/config $home/state
   chmod 700 $home/run
+  # Ubuntu's /etc/zsh/zshrc runs compinit, which on CI's group-writable workspace
+  # directories blocks every spawned shell on the insecure-directories y/n prompt.
+  # The documented guard is skip_global_compinit=1 in $ZDOTDIR/.zshenv; the harness
+  # must stay hermetic regardless of the host's global rc files.
+  print -r -- 'skip_global_compinit=1' >$home/zd/.zshenv
   {
     print -r -- 'PS1="PROMPT%!> "; unsetopt PROMPT_SP; HISTSIZE=100'
     print -r -- $pre

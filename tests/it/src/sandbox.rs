@@ -292,7 +292,9 @@ impl Sandbox {
 
     fn write_zshrc(&self) -> Result<()> {
         fs::write(self.home.join(".zshrc"), self.zshrc_text(true))?;
-        fs::write(self.home.join(".zshenv"), "")?;
+        // Ubuntu's /etc/zsh/zshrc compaudit-blocks interactive shells on CI's
+        // group-writable workspace; the documented guard keeps the sandbox hermetic.
+        fs::write(self.home.join(".zshenv"), "skip_global_compinit=1\n")?;
         Ok(())
     }
 
@@ -302,7 +304,7 @@ impl Sandbox {
         let dir = self.root.join("zdot-baseline");
         mkdir(&dir, 0o700)?;
         fs::write(dir.join(".zshrc"), self.zshrc_text(false))?;
-        fs::write(dir.join(".zshenv"), "")?;
+        fs::write(dir.join(".zshenv"), "skip_global_compinit=1\n")?;
         Ok(dir)
     }
 

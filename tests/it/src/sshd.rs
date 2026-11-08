@@ -49,7 +49,7 @@ impl Sshd {
         fs::create_dir_all(dir)?;
         let zdot = dir.join("zdotdir");
         fs::create_dir_all(&zdot)?;
-        fs::write(zdot.join(".zshenv"), "")?;
+        fs::write(zdot.join(".zshenv"), "skip_global_compinit=1\n")?;
         let (host_key, client_key) = (dir.join("host_key"), dir.join("client_key"));
         keygen(&host_key)?;
         keygen(&client_key)?;
