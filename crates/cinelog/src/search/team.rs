@@ -743,9 +743,45 @@ mod tests {
         assert_eq!(s.info["server_version"], "0.12.0");
         // /api/import is not routed here: a 404 becomes NotFound.
         assert!(matches!(reader.legacy_report(), Err(IndexError::NotFound(_))));
-        drop(f.server);
-        let err = reader.search(&SearchQuery::new("x")).unwrap_err().to_string();
+        // A freed port can be re-bound at once by a parallel test's server, so point a second
+        // client at a port that stays reserved but never listens: connects are refused.
+        let (_reserved, port) = refusing_port();
+        let url = BaseUrl {
+            host: "127.0.0.1".into(),
+            port,
+        };
+        let client = TeamClient::new(url, Some(testserver::fingerprint()), f.team.token.clone(), None).unwrap();
+        let down = TeamStore {
+            client: Arc::new(client),
+        };
+        let err = down
+            .reader()
+            .unwrap()
+            .search(&SearchQuery::new("x"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cannot reach the team server"), "{err}");
+    }
+
+    /// A loopback TCP port that is bound (so nobody else gets it) but not listening.
+    fn refusing_port() -> (std::os::fd::OwnedFd, u16) {
+        use std::os::fd::FromRawFd as _;
+        // SAFETY: plain socket calls on a fresh fd that the OwnedFd owns from here on.
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+            let owned = std::os::fd::OwnedFd::from_raw_fd(fd);
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as libc::sa_family_t;
+            addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+            let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+            let rc = libc::bind(fd, (&raw const addr).cast(), len);
+            assert_eq!(rc, 0, "bind: {}", std::io::Error::last_os_error());
+            let mut got_len = len;
+            let rc = libc::getsockname(fd, (&raw mut addr).cast(), &mut got_len);
+            assert_eq!(rc, 0, "getsockname: {}", std::io::Error::last_os_error());
+            (owned, u16::from_be(addr.sin_port))
+        }
     }
 
     #[test]
