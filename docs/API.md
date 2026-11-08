@@ -234,9 +234,12 @@ other output; `SessionDetail.forgotten` lists only the `command` row, and
 after the command has left index.db (the SPA draws its rail bands from it). The CLI records the
 span before it purges; the server records it the first time it sees a forgotten command
 still in index.db, or recovers it once from a cinelog cast's `cmd`/`done` markers. The
-echoed command line before the command's `cmd` marker belongs to an unattributed index
-chunk, so it stays searchable as output after a command forget; forget the range or the
-session to remove it from search.
+shell echoes the command line before the command's `cmd` marker, so in index.db it belongs
+to the output before the command (unattributed, or the enclosing command's). A command forget
+removes that echo too: in the output chunks that start within the span above (from the end of
+the command before it to its start), every line showing a line of the typed command becomes
+empty (line ordinals stay). Queries strip it at once, the purge rewrites the chunks, and a
+rebuild strips it on the way in. Other output in that span stays searchable.
 
 ## 6. Playback
 

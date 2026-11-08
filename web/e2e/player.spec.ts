@@ -187,10 +187,7 @@ test.describe('player', () => {
   });
 
   test('a forgotten command is gone from search', async ({ page }) => {
-    // Known gap of the real indexer (docs/API.md §5.6): zsh echoes the command line before
-    // preexec, so it lands in the unattributed chunk before the command, which a command
-    // forget keeps searchable. `test.fail` turns into an error once that is fixed.
-    test.fail(!process.env.CINELOG_E2E_MOCK, 'the echoed command line stays in the index after a command forget');
+    // Also its echo: zsh prints the command line before preexec, into the output before it.
     await page.goto(`/?q=${FIX.forgetWord}&in=both`);
     await expect(page.getByTestId('result-count')).toContainText('0 hits');
     await expect(page.getByTestId('results')).not.toContainText(FIX.forgetWord);

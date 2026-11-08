@@ -1182,6 +1182,113 @@ fn assert_tombstone(raw: &Connection, uuid: &str) {
     }
 }
 
+/// U1 with the prompts and echoes zsh writes before each `cmd` marker: a banner at 1, `echo
+/// hello` at 10, `echo forgetmetoken` at 20 (its prompt at 11, the end of the one before)
+/// and `bash` at 30 with a nested `echo forgetmetoken` at 35.
+fn echo_fixture(env: &Env, w: &mut dyn IndexWriter) {
+    let mut b = IndexBatch::new(session(env, U1));
+    let mut bash = command(3, "bash", 30.0);
+    bash.t_end = Some(40.0);
+    let mut nested = command(4, "echo forgetmetoken", 35.0);
+    nested.parent_seq = Some(3);
+    nested.depth = 1;
+    b.commands = vec![
+        command(1, "echo hello", 10.0),
+        command(2, "echo forgetmetoken", 20.0),
+        bash,
+        nested,
+    ];
+    b.chunks = vec![
+        chunk(
+            None,
+            1.0,
+            "banner: forgetmetoken is the word of the day\nalice@h1:~$ echo hello",
+        ),
+        chunk(Some(1), 10.5, "hello"),
+        chunk(None, 11.0, "alice@h1:~$\nalice@h1:~$ echo forgetmetoken"),
+        chunk(Some(2), 20.5, "forgetmetoken"),
+        chunk(None, 21.0, "alice@h1:~$ bash"),
+        chunk(Some(3), 30.5, "bash-5.2$ echo forgetmetoken    [rprompt]"),
+        chunk(Some(4), 35.5, "forgetmetoken"),
+    ];
+    w.apply(&b).unwrap();
+}
+
+fn gap_texts(raw: &Connection) -> Vec<String> {
+    let mut st = raw
+        .prepare("SELECT text FROM outputs WHERE command_id IS NULL OR command_id = (SELECT id FROM commands WHERE seq = 3) ORDER BY t")
+        .unwrap();
+    st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// §15.7: a command forget also removes the echoed command line, which lies in the output
+/// before the command (unattributed, or the enclosing command's), from search and show.
+#[test]
+fn command_forget_removes_the_echo() {
+    let env = Env::new();
+    let mut w = env.writer();
+    echo_fixture(&env, w.as_mut());
+    let r = env.reader();
+    let mut meta = env.meta();
+    let hits = |r: &dyn Searcher| {
+        let mut v: Vec<(HitKind, Option<Seq>, String)> = search(r, "forgetmetoken", SearchTarget::All)
+            .hits
+            .into_iter()
+            .map(|h| (h.kind, h.cmd_seq, h.snippet.unwrap_or_default()))
+            .collect();
+        v.sort_by(|a, b| a.2.cmp(&b.2));
+        v
+    };
+    assert_eq!(hits(r.as_ref()).len(), 7);
+    let forgotten: Vec<Forgotten> = [2, 4]
+        .into_iter()
+        .map(|seq| {
+            meta.forget(&ForgetTarget::Command { uuid: U1.into(), seq }, "alice")
+                .unwrap()
+        })
+        .collect();
+
+    // Excluded at once, before the purge: only the banner, which lies before the prompt.
+    let banner = vec![(
+        HitKind::Output,
+        None,
+        "banner: \u{E000}forgetmetoken\u{E001} is the word of the day".to_owned(),
+    )];
+    assert_eq!(hits(r.as_ref()), banner);
+    let shown = r
+        .show(&EntryRef::Session { uuid: U1.into() }, 1 << 20)
+        .unwrap()
+        .unwrap();
+    assert_eq!(shown.output.matches("forgetmetoken").count(), 1, "{}", shown.output);
+    assert!(shown.output.contains("echo hello") && shown.output.contains("alice@h1:~$ bash"));
+    assert_eq!(search(r.as_ref(), "alice@h1", SearchTarget::Output).hits.len(), 3);
+
+    let raw = env.raw();
+    let out = w.apply_forgotten(&forgotten).unwrap();
+    assert_eq!((out.commands, out.outputs), (2, 4), "two echoes, two outputs");
+    let after = vec![
+        "banner: forgetmetoken is the word of the day\nalice@h1:~$ echo hello".to_owned(),
+        "alice@h1:~$\n".to_owned(),
+        "alice@h1:~$ bash".to_owned(),
+        String::new(),
+    ];
+    assert_eq!(gap_texts(&raw), after, "echoed lines emptied, ordinals kept");
+    assert_eq!(hits(r.as_ref()), banner);
+    fts_integrity(&raw);
+    assert_eq!(
+        w.apply_forgotten(&forgotten).unwrap(),
+        ForgetOutcome::default(),
+        "idempotent"
+    );
+
+    // A rebuild strips the echo on the way in.
+    w.clear().unwrap();
+    echo_fixture(&env, w.as_mut());
+    assert_eq!(gap_texts(&raw), after);
+    assert_eq!(hits(r.as_ref()), banner);
+    fts_integrity(&raw);
+}
+
 #[test]
 fn range_forget_catches_commands_that_close_later() {
     let env = Env::new();

@@ -15,13 +15,19 @@
 //! than deleting them: the row keeps the span of the chunk before it intact, so purging is
 //! idempotent and never makes an earlier chunk look like it reaches into the range. It blanks
 //! a chunk that starts before a range once its end is known (or the session is over).
+//!
+//! A command forget also hides the command's [`Echo`]: the shell prints the command line
+//! before its `cmd` marker, so the echo belongs to the output before the command (the
+//! session's unattributed output, or the enclosing command's). The writer replaces the echoed
+//! lines with empty ones (line ordinals stay) and the reader strips them before the purge.
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::U64;
 use crate::error::Result;
-use crate::model::{ForgetTarget, Forgotten, Seq};
+use crate::model::{ChunkKind, ForgetTarget, Forgotten, Seq};
 
 #[derive(Debug, Default, Clone)]
 struct Entry {
@@ -53,6 +59,22 @@ impl ForgetSet {
 
     pub(crate) fn session(&self, uuid: &str) -> bool {
         self.by_uuid.get(uuid).is_some_and(|e| e.session)
+    }
+
+    /// Whether command `seq` is forgotten by its own `command` row.
+    pub(crate) fn by_seq(&self, uuid: &str, seq: Seq) -> bool {
+        self.by_uuid.get(uuid).is_some_and(|e| e.commands.contains(&seq))
+    }
+
+    /// The session's commands forgotten by seq, in ascending order.
+    pub(crate) fn seqs(&self, uuid: &str) -> Vec<Seq> {
+        let mut v: Vec<Seq> = self
+            .by_uuid
+            .get(uuid)
+            .map(|e| e.commands.iter().copied().collect())
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
     }
 
     /// The session's forgotten ranges.
@@ -105,6 +127,149 @@ impl ForgetSet {
         }
     }
 }
+
+/// Slack for comparing chunk times with command times (both come from the same µs clock).
+const T_EPS: f64 = 1e-6;
+
+/// Where a command's echo can be and what it looks like (module docs).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Echo {
+    /// Row of the command in index.db, if it has one.
+    command_id: Option<i64>,
+    /// The end of the command before it, the start of an enclosing one, or the session
+    /// start (playback masks from the first along with the command).
+    from: f64,
+    /// The command's start.
+    to: f64,
+    /// Non-blank lines of the typed command, trimmed.
+    lines: Vec<String>,
+}
+
+impl Echo {
+    /// The echo of command `seq` of session `sid`, typed as `typed` and started at
+    /// `t_start`; `command_id` is its row, if stored.
+    pub(crate) fn new(
+        conn: &Connection,
+        sid: i64,
+        command_id: Option<i64>,
+        seq: Seq,
+        t_start: f64,
+        typed: &str,
+    ) -> Result<Self> {
+        let from: Option<f64> = conn
+            .prepare_cached(
+                "SELECT max(CASE WHEN t_end IS NOT NULL AND t_end <= ?3 THEN t_end ELSE t_start END)
+                 FROM commands WHERE session_id = ?1 AND seq <> ?2 AND t_start < ?3",
+            )?
+            .query_row(params![sid, U64(seq), t_start], |r| r.get(0))?;
+        let lines = typed
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(Self {
+            command_id,
+            from: from.unwrap_or(0.0).min(t_start),
+            to: t_start,
+            lines,
+        })
+    }
+
+    /// The echo of stored command `seq` of session `sid`; `None` once its row is gone.
+    pub(crate) fn of_stored(conn: &Connection, sid: i64, seq: Seq) -> Result<Option<Self>> {
+        let row: Option<(i64, f64, String)> = conn
+            .prepare_cached("SELECT id, t_start, typed FROM commands WHERE session_id = ?1 AND seq = ?2")?
+            .query_row(params![sid, U64(seq)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        row.map(|(id, t, typed)| Self::new(conn, sid, Some(id), seq, t, &typed))
+            .transpose()
+    }
+
+    /// Whether a chunk starting at `t` can hold the echo by its time. Its owner must be
+    /// unattributed or open at the command's start ([`ECHO_OWNER`]).
+    pub(crate) fn spans(&self, t: f64) -> bool {
+        t >= self.from - T_EPS && t <= self.to + T_EPS
+    }
+
+    /// `text` with every line that shows a line of the command replaced by an empty one,
+    /// or `None` when there is none. A chunk left without text becomes empty.
+    pub(crate) fn strip(&self, text: &str) -> Option<String> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let mut hit = false;
+        let lines: Vec<&str> = text
+            .split('\n')
+            .map(|l| {
+                if self.lines.iter().any(|e| l.contains(e.as_str())) {
+                    hit = true;
+                    ""
+                } else {
+                    l
+                }
+            })
+            .collect();
+        if !hit {
+            return None;
+        }
+        let out = lines.join("\n");
+        Some(if out.trim().is_empty() { String::new() } else { out })
+    }
+
+    /// Replaces the echoed lines in the stored chunks of session `sid`; returns how many
+    /// chunks changed.
+    pub(crate) fn purge(&self, conn: &Connection, sid: i64) -> Result<u64> {
+        if self.lines.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "SELECT o.id, o.text FROM outputs o LEFT JOIN commands c ON c.id = o.command_id
+             WHERE o.session_id = ?1 AND o.t >= ?2 AND o.t <= ?3 AND o.text <> '' AND {ECHO_OWNER}"
+        );
+        let found: Vec<(i64, String)> = conn
+            .prepare_cached(&sql)?
+            .query_map(params![sid, self.from - T_EPS, self.to + T_EPS, self.command_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut changed = 0;
+        for (id, text) in found {
+            if let Some(new) = self.strip(&text) {
+                conn.prepare_cached("UPDATE outputs SET text = ?2 WHERE id = ?1")?
+                    .execute(params![id, new])?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Whether chunks of `kind` can hold an echo.
+    pub(crate) fn kind(kind: ChunkKind) -> bool {
+        matches!(kind, ChunkKind::Primary | ChunkKind::Gap)
+    }
+
+    /// Whether stored chunk `id` has an owner that can hold the echo.
+    pub(crate) fn owner_of(&self, conn: &Connection, id: i64) -> Result<bool> {
+        let sql = format!(
+            "SELECT 1 FROM outputs o LEFT JOIN commands c ON c.id = o.command_id WHERE o.id = ?1 AND {ECHO_OWNER}"
+        );
+        Ok(conn
+            .prepare_cached(&sql)?
+            .query_row(
+                params![id, Option::<i64>::None, self.to + T_EPS, self.command_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+}
+
+/// The owners of an echo, over `outputs o LEFT JOIN commands c ON c.id = o.command_id` with
+/// `?3` the command's start and `?4` its row: primary or unattributed output, unattributed or
+/// of another command still running when it started (an enclosing one).
+const ECHO_OWNER: &str = "o.kind IN ('primary', 'gap') AND (o.command_id IS NULL
+      OR (o.command_id IS NOT ?4 AND c.t_start < ?3 AND (c.t_end IS NULL OR c.t_end >= ?3)))";
 
 /// Whether stored chunk `id` runs past `a` (module docs): no later chunk of its owner and kind
 /// starts by `a`, and its command (if any) had not ended by `a`. A chunk that no longer
@@ -207,6 +372,30 @@ mod tests {
                 .chunk("a", None, 0.0, |_| panic!("not needed"))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn echo_lines_are_emptied() {
+        let echo = Echo {
+            command_id: None,
+            from: 5.0,
+            to: 9.0,
+            lines: vec!["for f in *; do".into(), "echo $f".into(), "done".into()],
+        };
+        assert!(echo.spans(5.0) && echo.spans(9.0) && !echo.spans(4.9) && !echo.spans(9.1));
+        let text = "motd\n$ for f in *; do\n> echo $f\n> done    12:00\n";
+        assert_eq!(echo.strip(text).as_deref(), Some("motd\n\n\n\n"));
+        assert_eq!(echo.strip("motd"), None);
+        assert_eq!(
+            echo.strip("$ for f in *; do\n> done").as_deref(),
+            Some(""),
+            "nothing left"
+        );
+        let none = Echo {
+            lines: Vec::new(),
+            ..echo
+        };
+        assert_eq!(none.strip("anything"), None);
     }
 
     /// A chunk that starts before a range is forgotten when its span reaches past the start

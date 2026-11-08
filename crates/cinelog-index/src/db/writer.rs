@@ -12,7 +12,7 @@ use nix::fcntl::{Flock, FlockArg};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::forget::{BLANK_INSIDE, BLANK_STRADDLING, ForgetSet};
+use super::forget::{BLANK_INSIDE, BLANK_STRADDLING, Echo, ForgetSet};
 use super::{
     LEGACY_SELECT, TOMBSTONE, U64, ino_from_db, ino_to_db, legacy_from_row, now, opt_u64, opt_u64_at, parse_at,
     path_at, path_value, read_meta_forgotten, u64_at, utf8_at,
@@ -530,6 +530,12 @@ fn apply_batch(tx: &Transaction<'_>, forget: &ForgetSet, redact: &Redactor, b: &
         };
         insert_chunk(tx, sid, cmd, ch, redact, forget.in_range(uuid, ch.t))?;
     }
+    // The echo of a command forgotten by seq arrives with it (rebuild, or forgotten live).
+    for c in &b.commands {
+        if forget.by_seq(uuid, c.seq) {
+            Echo::new(tx, sid, None, c.seq, c.t_start, &redact.apply(&c.typed))?.purge(tx, sid)?;
+        }
+    }
     // New chunks, command ends or the session's end can show that a chunk before a range
     // runs into it.
     for &(t_from, _) in forget.ranges(uuid) {
@@ -571,8 +577,8 @@ fn count(tx: &Transaction<'_>, sql: &str, args: impl rusqlite::Params) -> Result
 }
 
 /// Removes the rows of one forget target, adding what was removed to `out`: a session
-/// becomes its tombstone, commands are deleted with their output, range-forgotten chunks are
-/// blanked (see `forget`).
+/// becomes its tombstone, commands are deleted with their output and their echo, range-
+/// forgotten chunks are blanked (see `forget`).
 fn purge(tx: &Transaction<'_>, target: &ForgetTarget, out: &mut ForgetOutcome) -> Result<()> {
     let Some(sid) = session_id(tx, target.uuid())? else {
         return Ok(());
@@ -584,6 +590,9 @@ fn purge(tx: &Transaction<'_>, target: &ForgetTarget, out: &mut ForgetOutcome) -
             out.sessions += u64::from(entomb(tx, sid)?);
         }
         ForgetTarget::Command { seq, .. } => {
+            if let Some(echo) = Echo::of_stored(tx, sid, seq)? {
+                out.outputs += echo.purge(tx, sid)?;
+            }
             out.outputs += count(
                 tx,
                 "SELECT count(*) FROM outputs o JOIN commands c ON c.id = o.command_id

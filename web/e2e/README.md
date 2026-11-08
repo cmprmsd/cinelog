@@ -25,10 +25,6 @@ session's hits (`n`/`N`), a failing next result page, and `PlayInfo.ready=false`
 They run unchanged against a real server. The forget spec changes server state, so run it once
 per fresh fixture set (a CI retry of that spec fails).
 
-Known gap, marked `test.fail` on a real server: zsh echoes the command line before preexec,
-so the real index keeps it in the unattributed chunk before the command, and a command forget
-leaves it searchable ("a forgotten command is gone from search"; docs/API.md §5.6).
-
 `auth.setup.ts` signs in once and stores the cookie in `e2e/.auth/` (git-ignored) for the
 `chromium` project; `login.spec.ts` runs without it. Every test fails on a CSP violation report.
 

@@ -12,7 +12,7 @@
 //! - the empty term: the newest commands.
 //!
 //! `meta.forgotten` is read for every query and excluded here, before the writer has purged
-//! the rows.
+//! the rows (including the echo of a forgotten command, see `forget`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use rusqlite::types::Value;
 use rusqlite::{Connection, InterruptHandle, OptionalExtension, Row, Rows, params, params_from_iter};
 
-use super::forget::{ForgetSet, chunk_runs_past};
+use super::forget::{Echo, ForgetSet, chunk_runs_past};
 use super::text::Term;
 use super::{
     LEGACY_SELECT, TOMBSTONE, U64, legacy_from_row, meta, opt_u64_at, parse_at, path_at, read_meta_forgotten, u64_at,
@@ -31,9 +31,9 @@ use super::{
 use crate::api::Searcher;
 use crate::error::{IndexError, Result};
 use crate::model::{
-    CANDIDATE_CAP, Command, Cursor, DbPaths, EntryDetail, EntryRef, ExitFilter, HitKind, IndexStatus, LegacyImportRow,
-    LegacyProgress, LegacyStatus, LiveLag, SHORT_TERM_SCAN, SearchFilters, SearchHit, SearchPage, SearchQuery,
-    SearchTarget, SessionCounts, SessionState, SessionSummary, TmuxLocation, info_keys,
+    CANDIDATE_CAP, ChunkKind, Command, Cursor, DbPaths, EntryDetail, EntryRef, ExitFilter, HitKind, IndexStatus,
+    LegacyImportRow, LegacyProgress, LegacyStatus, LiveLag, SHORT_TERM_SCAN, SearchFilters, SearchHit, SearchPage,
+    SearchQuery, SearchTarget, SessionCounts, SessionState, SessionSummary, TmuxLocation, info_keys,
 };
 use crate::schema::{self, Access, DbKind};
 
@@ -396,6 +396,21 @@ impl OutputText {
     }
 }
 
+/// The echoes of forgotten commands, loaded per session uuid once per stream.
+struct Echoes<'f> {
+    forget: &'f ForgetSet,
+    by_uuid: HashMap<String, Vec<Echo>>,
+}
+
+impl<'f> Echoes<'f> {
+    fn new(forget: &'f ForgetSet) -> Self {
+        Self {
+            forget,
+            by_uuid: HashMap::new(),
+        }
+    }
+}
+
 /// One stream's result.
 #[derive(Default)]
 struct Stream {
@@ -528,6 +543,7 @@ impl SqliteSearcher {
     ) -> Result<()> {
         let mut st = self.conn.prepare_cached(sql)?;
         let mut text_of = self.conn.prepare_cached("SELECT text FROM outputs WHERE id = ?1")?;
+        let mut echoes = Echoes::new(forget);
         let mut rows = st.query(params_from_iter(params))?;
         while let Some(r) = self.next_row(&mut rows, &mut out.partial)? {
             let mut h = out_hit(r)?;
@@ -543,7 +559,11 @@ impl SqliteSearcher {
                     None => continue,
                 },
             };
-            if term.needs_post_filter() && !term.matches(&text) {
+            let (text, stripped) = match h.chunk_kind {
+                Some(kind) => self.without_echoes(&mut echoes, &h.session_uuid, h.id, kind, h.t, text)?,
+                None => (text, false),
+            };
+            if (stripped || term.needs_post_filter()) && !term.matches(&text) {
                 continue;
             }
             h.snippet = term.snippet(&text);
@@ -637,19 +657,20 @@ impl SqliteSearcher {
 
     fn output_text(&self, cond: &Cond, uuid: &str, forget: &ForgetSet, max: usize) -> Result<(String, bool)> {
         let sql = format!(
-            "SELECT o.id, o.t, c.seq, o.text FROM outputs o LEFT JOIN commands c ON c.id = o.command_id{}
+            "SELECT o.id, o.t, c.seq, o.text, o.kind FROM outputs o LEFT JOIN commands c ON c.id = o.command_id{}
              ORDER BY o.t, o.id",
             cond.where_()
         );
         let mut st = self.conn.prepare_cached(&sql)?;
         let mut rows = st.query(params_from_iter(&cond.params))?;
         let mut out = OutputText::new(max);
+        let mut echoes = Echoes::new(forget);
         while let Some(r) = rows.next()? {
             let (id, t, seq): (i64, f64, Option<u64>) = (r.get(0)?, r.get(1)?, opt_u64_at(r, 2)?);
             if forget.chunk(uuid, seq, t, |a| chunk_runs_past(&self.conn, id, a))? {
                 continue;
             }
-            let text: String = r.get(3)?;
+            let (text, _) = self.without_echoes(&mut echoes, uuid, id, parse_at(r, 4)?, t, r.get(3)?)?;
             if text.is_empty() {
                 // Blanked by a forget.
                 continue;
@@ -659,6 +680,54 @@ impl SqliteSearcher {
             }
         }
         Ok((out.text, out.truncated))
+    }
+
+    /// The echoes of a session's forgotten commands that index.db still holds.
+    fn echoes<'c>(&self, cache: &'c mut Echoes<'_>, uuid: &str) -> Result<&'c [Echo]> {
+        if !cache.by_uuid.contains_key(uuid) {
+            let seqs = cache.forget.seqs(uuid);
+            let mut list = Vec::new();
+            if !seqs.is_empty()
+                && let Some(sid) = self
+                    .conn
+                    .prepare_cached("SELECT id FROM sessions WHERE uuid = ?1")?
+                    .query_row([uuid], |r| r.get::<_, i64>(0))
+                    .optional()?
+            {
+                for seq in seqs {
+                    list.extend(Echo::of_stored(&self.conn, sid, seq)?);
+                }
+            }
+            cache.by_uuid.insert(uuid.to_owned(), list);
+        }
+        Ok(cache.by_uuid.get(uuid).map_or(&[], Vec::as_slice))
+    }
+
+    /// `text` of chunk `id` without the echoes of forgotten commands the writer has not
+    /// purged yet, and whether any was stripped.
+    fn without_echoes(
+        &self,
+        cache: &mut Echoes<'_>,
+        uuid: &str,
+        id: i64,
+        kind: ChunkKind,
+        t: f64,
+        mut text: String,
+    ) -> Result<(String, bool)> {
+        let mut stripped = false;
+        if !Echo::kind(kind) {
+            return Ok((text, stripped));
+        }
+        for e in self.echoes(cache, uuid)? {
+            if e.spans(t)
+                && e.owner_of(&self.conn, id)?
+                && let Some(s) = e.strip(&text)
+            {
+                text = s;
+                stripped = true;
+            }
+        }
+        Ok((text, stripped))
     }
 
     fn summary(&self, uuid: &str) -> Result<Option<(i64, SessionSummary)>> {
