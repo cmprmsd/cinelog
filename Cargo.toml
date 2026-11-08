@@ -1,0 +1,114 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cinelog",
+    "crates/cinelog-core",
+    "crates/cinelog-proto",
+    "crates/cinelog-cast",
+    "crates/cinelog-detect",
+    "crates/cinelog-rec",
+    "crates/cinelog-index",
+    "crates/cinelog-web",
+    "tests/it",
+]
+default-members = ["crates/cinelog"]
+# cargo-fuzz targets live outside the workspace (nightly only).
+exclude = ["crates/cinelog-proto/fuzz"]
+
+[workspace.package]
+version = "0.10.0"
+edition = "2024"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/cmprmsd/cinelog"
+authors = ["cmprmsd"]
+publish = false
+
+[workspace.dependencies]
+# internal
+cinelog-core = { path = "crates/cinelog-core" }
+cinelog-proto = { path = "crates/cinelog-proto" }
+cinelog-cast = { path = "crates/cinelog-cast" }
+cinelog-detect = { path = "crates/cinelog-detect" }
+cinelog-rec = { path = "crates/cinelog-rec" }
+cinelog-index = { path = "crates/cinelog-index" }
+cinelog-web = { path = "crates/cinelog-web" }
+
+# recorder / system (§3.2)
+nix = { version = "0.30", features = [
+    "term", "process", "signal", "poll", "fs", "ioctl", "user", "hostname", "net", "mman", "resource",
+] }
+libc = "0.2.191"
+signal-hook = "0.4.6"
+memchr = "2.8"
+crossbeam-channel = "0.5.15"
+
+# data formats
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+toml = "0.9"
+base64 = "0.22"
+data-encoding = "2.9"
+uuid = { version = "1.18", features = ["v7", "serde"] }
+jiff = "0.2.15"
+sha2 = "0.10"
+getrandom = "0.3"
+regex = "1.11"
+strsim = "0.11"
+
+# index (§3.2)
+avt = "=0.20.0"
+rusqlite = { version = "0.41", features = ["bundled"] }
+zstd = "0.14"
+walkdir = "2.5"
+
+# web (§3.2)
+axum = { version = "0.8.9", features = ["macros", "http2"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+subtle = "2.6"
+rust-embed = { version = "8.7", features = ["mime-guess"] }
+tokio = { version = "1.47", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+async-stream = "0.3"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["set-header", "trace"] }
+ts-rs = { version = "12", features = ["serde-json-impl", "uuid-impl"] }
+
+# cli, errors, logging
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.5"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+tracing-journald = "0.3"
+
+# tests
+proptest = "1.7"
+tempfile = "3.20"
+assert_cmd = "2"
+predicates = "3"
+insta = { version = "1.43", features = ["json"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 1

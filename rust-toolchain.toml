@@ -1,0 +1,6 @@
+# CI uses the latest stable; the workspace MSRV is rust-version in Cargo.toml.
+# Release targets (x86_64/aarch64-unknown-linux-musl) are added by the workflows.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

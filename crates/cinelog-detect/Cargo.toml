@@ -1,0 +1,23 @@
+[package]
+name = "cinelog-detect"
+description = "/proc scanning behind a ProcFs trait: PTY master holder, classification, fg pgrp, attribution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cinelog-core.workspace = true
+cinelog-proto.workspace = true
+libc.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

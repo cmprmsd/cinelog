@@ -1,1 +1,8 @@
 tmp/
+/target/
+/web/dist/
+/web/node_modules/
+/.omc/
+/bin/cinelog
+/bin/cinelog.new
+*.zwc
