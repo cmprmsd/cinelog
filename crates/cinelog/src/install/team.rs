@@ -1150,6 +1150,9 @@ mod tests {
         // With ownership checks (as for a real install, here for this uid below the
         // temp dir), the group-writable system directory is refused before any write.
         let base = f._dir.path().to_path_buf();
+        // tempfile yields the base with mode 0777 & ~umask (umask 002: 775), and the
+        // ownership walk checks the stop path too, so tighten it like a real root would be.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(f.opts.sys.root.join("/")).unwrap();
         std::fs::create_dir_all(&bin_dir).unwrap();
         for d in bin_dir.ancestors().skip(1).take_while(|d| *d != base) {

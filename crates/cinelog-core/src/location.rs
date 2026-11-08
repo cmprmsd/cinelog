@@ -150,7 +150,9 @@ mod tests {
         let base = dir.path();
         fs::set_permissions(base, fs::Permissions::from_mode(0o755)).unwrap();
         let file = base.join("sub/bin");
+        // create_dir applies the umask (umask 002: 775); the chain must start clean.
         fs::create_dir(base.join("sub")).unwrap();
+        fs::set_permissions(base.join("sub"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(&file, b"x").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(insecure_component(&file, uid, base), None);
