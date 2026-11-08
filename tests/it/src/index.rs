@@ -190,7 +190,7 @@ impl Dump {
             h.update([0]);
             for r in rows {
                 h.update(r.as_bytes());
-                h.update([b'\n']);
+                h.update(*b"\n");
             }
         }
         hex(&h.finalize())

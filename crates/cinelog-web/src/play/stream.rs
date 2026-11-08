@@ -29,7 +29,7 @@ pub(crate) struct Mask {
 
 impl Mask {
     pub fn new(mut spans: Vec<Span>, seqs: HashSet<u64>) -> Self {
-        spans.sort_by(|a, b| (a.from_us, a.to_us).cmp(&(b.from_us, b.to_us)));
+        spans.sort_by_key(|s| (s.from_us, s.to_us));
         spans.dedup();
         Self { spans, seqs }
     }
