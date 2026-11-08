@@ -21,10 +21,15 @@ cinelog-proto.workspace = true
 cinelog-cast.workspace = true
 cinelog-detect.workspace = true
 cinelog-rec.workspace = true
+cinelog-index.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 nix.workspace = true
 libc.workspace = true
+signal-hook.workspace = true
+crossbeam-channel.workspace = true
+walkdir.workspace = true
+zstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -40,6 +45,7 @@ tracing-subscriber.workspace = true
 tracing-journald.workspace = true
 
 [dev-dependencies]
+cinelog-index = { workspace = true, features = ["fake"] }
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true

@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# In-memory fakes of every M2 trait (`cinelog_index::fake`) for other crates' tests.
+fake = []
+
 [dependencies]
 cinelog-core.workspace = true
 cinelog-proto.workspace = true
@@ -24,6 +28,10 @@ serde_json.workspace = true
 uuid.workspace = true
 jiff.workspace = true
 crossbeam-channel.workspace = true
+nix.workspace = true
+libc.workspace = true
+memchr.workspace = true
+data-encoding.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

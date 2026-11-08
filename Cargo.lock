@@ -437,10 +437,12 @@ dependencies = [
  "cinelog-cast",
  "cinelog-core",
  "cinelog-detect",
+ "cinelog-index",
  "cinelog-proto",
  "cinelog-rec",
  "clap",
  "clap_complete",
+ "crossbeam-channel",
  "data-encoding",
  "getrandom 0.3.4",
  "jiff",
@@ -450,6 +452,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signal-hook",
  "tempfile",
  "thiserror",
  "toml",
@@ -457,6 +460,8 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "uuid",
+ "walkdir",
+ "zstd",
 ]
 
 [[package]]
@@ -513,8 +518,12 @@ dependencies = [
  "cinelog-core",
  "cinelog-proto",
  "crossbeam-channel",
+ "data-encoding",
  "insta",
  "jiff",
+ "libc",
+ "memchr",
+ "nix",
  "proptest",
  "regex",
  "rusqlite",
@@ -539,7 +548,9 @@ dependencies = [
  "libc",
  "nix",
  "regex",
+ "rusqlite",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 

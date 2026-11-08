@@ -9,7 +9,8 @@ repository.workspace = true
 publish.workspace = true
 
 # The harness talks to cinelog only through the built binary, the plugin, the casts and the
-# registry files, exactly as a user would. It deliberately does not link the cinelog crates.
+# registry files, exactly as a user would. It deliberately does not link the cinelog crates;
+# index.db is inspected read-only through rusqlite (I12 row hashes, I13).
 
 [features]
 # Scenarios that need root or a real sudo prompt also require CINELOG_IT_ROOT=1 at runtime.
@@ -23,6 +24,8 @@ regex.workspace = true
 tempfile.workspace = true
 getrandom.workspace = true
 anyhow.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

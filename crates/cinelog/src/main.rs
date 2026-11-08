@@ -6,6 +6,8 @@ mod install;
 mod link;
 mod module;
 mod pause;
+mod search;
+mod serve;
 mod session;
 
 use std::path::PathBuf;
@@ -35,6 +37,15 @@ fn main() -> ExitCode {
         Command::Resume => pause::run(pause::Action::Resume, None),
         Command::Doctor(args) => doctor::run(args.json),
         Command::Install(args) => install::run(&args),
+        Command::Serve(args) => serve::run(&args),
+        Command::Compress(args) => serve::compress(&args),
+        Command::Meta(args) => serve::meta(&args),
+        Command::Search(args) => search::run(&args),
+        Command::Show(args) => search::show(&args),
+        Command::Forget(args) => search::forget(&args),
+        Command::Index(args) => search::index(&args),
+        Command::Status(args) => search::status(&args),
+        Command::Import(args) => search::import_report(&args),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "cinelog", &mut std::io::stdout());
             ExitCode::SUCCESS

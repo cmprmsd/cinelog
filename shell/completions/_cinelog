@@ -80,6 +80,147 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+'--scope=[Scope to serve; TEAM needs EUID 0 (default\: the scope of the current EUID)]:SCOPE:(personal team)' \
+'--no-http[Indexer only\: no HTTP listener (the only mode before the web server lands)]' \
+'--ensure[Return at once if a server holds serve.lock; otherwise start one (systemd user unit if installed, else a detached process) and return]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'--user=[]:USER:_default' \
+'--host=[]:HOST:_default' \
+'--since=[Not before\: a date/time (\`2026-11-01\`, \`2026-11-01T14\:00\`) or an age (\`2d\`, \`3h\`)]:WHEN:_default' \
+'--until=[Not after\: same forms as --since]:WHEN:_default' \
+'--exit=[Exit status\: a number, \`ok\` or \`fail\`]:STATUS:_default' \
+'--cwd=[Commands run in this directory (\`.\` is the current one)]:DIR:_default' \
+'--pane=[tmux pane id (e.g. \`%3\`)]:PANE:_default' \
+'--limit=[Maximum number of results]:LIMIT:_default' \
+'(--out)-a[Also search command output]' \
+'(--out)--all[Also search command output]' \
+'--out[Search command output only]' \
+'-s[Case-sensitive match (default\: Unicode case-insensitive)]' \
+'--case-sensitive[Case-sensitive match (default\: Unicode case-insensitive)]' \
+'--json[Print JSON lines instead of running fzf]' \
+'(--json)--print[Print the plain list instead of running fzf]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::term -- Search term (words are joined with single spaces); empty lists the newest commands:_default' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--max-bytes=[Maximum output bytes to print]:BYTES:_default' \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- `<uuid>`, `<uuid>\:<seq>` or `<uuid>@<t>` (the hidden first field of `search`):_default' \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+'--from=[With a session id\: forget only output from this cast offset (seconds)]:SECS:_default' \
+'--to=[With a session id\: forget only output up to this cast offset (seconds)]:SECS:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- `<uuid>` (whole session) or `<uuid>\:<seq>` (one command):_default' \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+'--once[Index new and changed casts once (only while no writer holds the lock)]' \
+'--rebuild[Drop index.db and rebuild it from the casts (meta.db is kept)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::paths -- Only these casts (default\: everything under the logs root):_files' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(compress)
+_arguments "${_arguments_options[@]}" : \
+'--now[Compress every candidate now]' \
+'--dry-run[List the candidates without compressing]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--report[Per-file banners, log lines, aligned commands and mean confidence]' \
+'--json[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(meta)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_cinelog__subcmd__meta_commands" \
+"*::: :->meta" \
+&& ret=0
+
+    case $state in
+    (meta)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-meta-command-$line[1]:"
+        case $line[1] in
+            (export)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':file:_files' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':file:_files' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__meta__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-meta-help-command-$line[1]:"
+        case $line[1] in
+            (export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -123,6 +264,62 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(forget)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(compress)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(meta)
+_arguments "${_arguments_options[@]}" : \
+":: :_cinelog__subcmd__help__subcmd__meta_commands" \
+"*::: :->meta" \
+&& ret=0
+
+    case $state in
+    (meta)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cinelog-help-meta-command-$line[1]:"
+        case $line[1] in
+            (export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -149,6 +346,15 @@ _cinelog_commands() {
 'resume:Resume a paused or degraded recording' \
 'doctor:Diagnose the installation and the current shell' \
 'install:Install or refresh cinelog for this user, or system-wide with --team' \
+'serve:Index (and later serve) this scope'\''s casts; one instance per scope (serve.lock)' \
+'search:Search commands, and with -a their output; interactive with fzf' \
+'show:Print a command (or session) with its output; the fzf preview of \`search\`' \
+'forget:Remove a command, time range or session from the index (casts are never rewritten)' \
+'index:Index the casts once, or rebuild the index from the casts' \
+'status:Indexer lag, backlog, legacy import progress and server state' \
+'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
+'import:Legacy import report (aggregate numbers only)' \
+'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -159,10 +365,20 @@ _cinelog__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog completions commands' commands "$@"
 }
+(( $+functions[_cinelog__subcmd__compress_commands] )) ||
+_cinelog__subcmd__compress_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog compress commands' commands "$@"
+}
 (( $+functions[_cinelog__subcmd__doctor_commands] )) ||
 _cinelog__subcmd__doctor_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog doctor commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__forget_commands] )) ||
+_cinelog__subcmd__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog forget commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__help_commands] )) ||
 _cinelog__subcmd__help_commands() {
@@ -173,6 +389,15 @@ _cinelog__subcmd__help_commands() {
 'resume:Resume a paused or degraded recording' \
 'doctor:Diagnose the installation and the current shell' \
 'install:Install or refresh cinelog for this user, or system-wide with --team' \
+'serve:Index (and later serve) this scope'\''s casts; one instance per scope (serve.lock)' \
+'search:Search commands, and with -a their output; interactive with fzf' \
+'show:Print a command (or session) with its output; the fzf preview of \`search\`' \
+'forget:Remove a command, time range or session from the index (casts are never rewritten)' \
+'index:Index the casts once, or rebuild the index from the casts' \
+'status:Indexer lag, backlog, legacy import progress and server state' \
+'compress:Compress finished casts older than \`retention.compress_after_days\` (never legacy casts)' \
+'import:Legacy import report (aggregate numbers only)' \
+'meta:Export or import meta.db (annotations, tags, forget list, settings)' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -183,15 +408,35 @@ _cinelog__subcmd__help__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help completions commands' commands "$@"
 }
+(( $+functions[_cinelog__subcmd__help__subcmd__compress_commands] )) ||
+_cinelog__subcmd__help__subcmd__compress_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help compress commands' commands "$@"
+}
 (( $+functions[_cinelog__subcmd__help__subcmd__doctor_commands] )) ||
 _cinelog__subcmd__help__subcmd__doctor_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help doctor commands' commands "$@"
 }
+(( $+functions[_cinelog__subcmd__help__subcmd__forget_commands] )) ||
+_cinelog__subcmd__help__subcmd__forget_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help forget commands' commands "$@"
+}
 (( $+functions[_cinelog__subcmd__help__subcmd__help_commands] )) ||
 _cinelog__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__import_commands] )) ||
+_cinelog__subcmd__help__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help import commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__index_commands] )) ||
+_cinelog__subcmd__help__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help index commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__help__subcmd__install_commands] )) ||
 _cinelog__subcmd__help__subcmd__install_commands() {
@@ -202,6 +447,24 @@ _cinelog__subcmd__help__subcmd__install_commands() {
 _cinelog__subcmd__help__subcmd__link_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help link commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__meta_commands] )) ||
+_cinelog__subcmd__help__subcmd__meta_commands() {
+    local commands; commands=(
+'export:Write meta.db as JSON Lines (\`-\` for stdout; \`.zst\` compresses)' \
+'import:Merge a JSON Lines export into meta.db (\`.zst\` is decompressed)' \
+    )
+    _describe -t commands 'cinelog help meta commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__meta__subcmd__export_commands] )) ||
+_cinelog__subcmd__help__subcmd__meta__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help meta export commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__meta__subcmd__import_commands] )) ||
+_cinelog__subcmd__help__subcmd__meta__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help meta import commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__help__subcmd__pause_commands] )) ||
 _cinelog__subcmd__help__subcmd__pause_commands() {
@@ -218,6 +481,36 @@ _cinelog__subcmd__help__subcmd__resume_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog help resume commands' commands "$@"
 }
+(( $+functions[_cinelog__subcmd__help__subcmd__search_commands] )) ||
+_cinelog__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help search commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__serve_commands] )) ||
+_cinelog__subcmd__help__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help serve commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__show_commands] )) ||
+_cinelog__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help show commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__help__subcmd__status_commands] )) ||
+_cinelog__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog help status commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__import_commands] )) ||
+_cinelog__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog import commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__index_commands] )) ||
+_cinelog__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog index commands' commands "$@"
+}
 (( $+functions[_cinelog__subcmd__install_commands] )) ||
 _cinelog__subcmd__install_commands() {
     local commands; commands=()
@@ -227,6 +520,49 @@ _cinelog__subcmd__install_commands() {
 _cinelog__subcmd__link_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog link commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta_commands] )) ||
+_cinelog__subcmd__meta_commands() {
+    local commands; commands=(
+'export:Write meta.db as JSON Lines (\`-\` for stdout; \`.zst\` compresses)' \
+'import:Merge a JSON Lines export into meta.db (\`.zst\` is decompressed)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog meta commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__export_commands] )) ||
+_cinelog__subcmd__meta__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog meta export commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__help_commands] )) ||
+_cinelog__subcmd__meta__subcmd__help_commands() {
+    local commands; commands=(
+'export:Write meta.db as JSON Lines (\`-\` for stdout; \`.zst\` compresses)' \
+'import:Merge a JSON Lines export into meta.db (\`.zst\` is decompressed)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cinelog meta help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__help__subcmd__export_commands] )) ||
+_cinelog__subcmd__meta__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog meta help export commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__help__subcmd__help_commands] )) ||
+_cinelog__subcmd__meta__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog meta help help commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__help__subcmd__import_commands] )) ||
+_cinelog__subcmd__meta__subcmd__help__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog meta help import commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__meta__subcmd__import_commands] )) ||
+_cinelog__subcmd__meta__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog meta import commands' commands "$@"
 }
 (( $+functions[_cinelog__subcmd__pause_commands] )) ||
 _cinelog__subcmd__pause_commands() {
@@ -242,6 +578,26 @@ _cinelog__subcmd__rec_commands() {
 _cinelog__subcmd__resume_commands() {
     local commands; commands=()
     _describe -t commands 'cinelog resume commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__search_commands] )) ||
+_cinelog__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog search commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__serve_commands] )) ||
+_cinelog__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog serve commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__show_commands] )) ||
+_cinelog__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog show commands' commands "$@"
+}
+(( $+functions[_cinelog__subcmd__status_commands] )) ||
+_cinelog__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'cinelog status commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_cinelog" ]; then

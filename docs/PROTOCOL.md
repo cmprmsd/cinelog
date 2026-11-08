@@ -343,6 +343,15 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 | `cinelog doctor [--json]` | diagnostics | 0 ok, 1 problems found |
 | `cinelog install [--team [--system-zshrc] [--upgrade] [--binary PATH] [--module DIR] [--allow-unverified]] [--prefix DIR] [--refresh] [--uninstall] [--no-migrate]` | install; `--prefix` (alias `--root`) writes every system path below DIR. TEAM: the binary is `--binary`, else `<module>/bin/cinelog`, else the running binary if it lies inside the module; it is verified against `shell/checksums/v<module VERSION>.sha256` unless `--allow-unverified`; `--upgrade` from the installed team binary itself is refused. `--module` defaults to the checkout found up to 4 levels above the running binary. `--refresh` is idempotent | 0 ok |
 | `cinelog completions zsh` | completion script (committed as `shell/completions/_cinelog`) | 0 |
+| `cinelog serve [--scope personal\|team] [--no-http] [--ensure]` | indexer (and, from M3, the web server) of one scope; holds `serve.lock` in the runtime dir for its lifetime; `--ensure` returns at once if the lock is held, else starts the user unit or a detached `serve` | 0 |
+| `cinelog search [-a\|--out] [-s] [--user U] [--host H] [--since W] [--until W] [--exit N\|ok\|fail] [--cwd DIR] [--pane P] [--json\|--print] [--limit N] [TERM…]` | fzf over `<uuid>:<seq>\t<ts>\t<user>@<host>\t[exit]\t<typed>\t┊ <snippet>` lines (hidden first field), preview `cinelog show {1}`; Enter prints the URL (before M3: the cast path and `cinelog show <id>`); without fzf a plain list | 0; 1 no match |
+| `cinelog show <uuid>[:<seq>\|@<t>] [--json] [--max-bytes N]` | the command (or session) header and its output text | 0; 1 not found |
+| `cinelog forget <uuid>[:<seq>] [--from S --to S]` | records the target in `meta.forgotten`; the writer deletes it from index.db; casts are never rewritten | 0 |
+| `cinelog index --once\|--rebuild [CAST…]` | one-shot discovery and backfill (only while the writer lock is free); `--rebuild` drops index.db first, meta.db is kept | 0; 1 some casts failed |
+| `cinelog status [--json]` | indexer lag per live session, backlog, legacy import progress, last error, server state | 0 |
+| `cinelog compress --now\|--dry-run` | zstd-compresses finished non-legacy casts older than `retention.compress_after_days` | 0 |
+| `cinelog import --report [--json]` | per legacy file: banners, log lines, aligned commands, mean confidence (aggregates only) | 0 |
+| `cinelog meta export\|import <FILE>` | meta.db as JSON Lines (`-` = stdout, `.zst` compressed) | 0 |
 
 Upgrade hints name the full path of the user's binary (`sudo ~/.zim/modules/cinelog/bin/cinelog
 install --team --upgrade`): under sudo's `secure_path` a bare `cinelog` is usually the old team

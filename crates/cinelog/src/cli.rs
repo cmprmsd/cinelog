@@ -1,5 +1,5 @@
-//! Frozen M1 command-line surface (see docs/PROTOCOL.md, "Binary interface").
-//! Later milestones add subcommands; existing names and flags do not change.
+//! Frozen command-line surface (see docs/PROTOCOL.md, "Binary interface"): M1 plus the M2
+//! subcommands. Later milestones add subcommands; existing names and flags do not change.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -27,6 +27,24 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Install or refresh cinelog for this user, or system-wide with --team
     Install(InstallArgs),
+    /// Index (and later serve) this scope's casts; one instance per scope (serve.lock)
+    Serve(ServeArgs),
+    /// Search commands, and with -a their output; interactive with fzf
+    Search(SearchArgs),
+    /// Print a command (or session) with its output; the fzf preview of `search`
+    Show(ShowArgs),
+    /// Remove a command, time range or session from the index (casts are never rewritten)
+    Forget(ForgetArgs),
+    /// Index the casts once, or rebuild the index from the casts
+    Index(IndexArgs),
+    /// Indexer lag, backlog, legacy import progress and server state
+    Status(StatusArgs),
+    /// Compress finished casts older than `retention.compress_after_days` (never legacy casts)
+    Compress(CompressArgs),
+    /// Legacy import report (aggregate numbers only)
+    Import(ImportArgs),
+    /// Export or import meta.db (annotations, tags, forget list, settings)
+    Meta(MetaArgs),
     /// Print a shell completion script
     #[command(hide = true)]
     Completions {
@@ -104,6 +122,155 @@ pub struct InstallArgs {
     pub no_migrate: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Scope to serve; TEAM needs EUID 0 (default: the scope of the current EUID)
+    #[arg(long, value_enum)]
+    pub scope: Option<ScopeArg>,
+    /// Indexer only: no HTTP listener (the only mode before the web server lands)
+    #[arg(long)]
+    pub no_http: bool,
+    /// Return at once if a server holds serve.lock; otherwise start one (systemd user unit if
+    /// installed, else a detached process) and return
+    #[arg(long)]
+    pub ensure: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ScopeArg {
+    Personal,
+    Team,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Also search command output
+    #[arg(short = 'a', long = "all", conflicts_with = "out")]
+    pub all: bool,
+    /// Search command output only
+    #[arg(long)]
+    pub out: bool,
+    /// Case-sensitive match (default: Unicode case-insensitive)
+    #[arg(short = 's', long)]
+    pub case_sensitive: bool,
+    #[arg(long, value_name = "USER")]
+    pub user: Option<String>,
+    #[arg(long, value_name = "HOST")]
+    pub host: Option<String>,
+    /// Not before: a date/time (`2026-11-01`, `2026-11-01T14:00`) or an age (`2d`, `3h`)
+    #[arg(long, value_name = "WHEN")]
+    pub since: Option<String>,
+    /// Not after: same forms as --since
+    #[arg(long, value_name = "WHEN")]
+    pub until: Option<String>,
+    /// Exit status: a number, `ok` or `fail`
+    #[arg(long, value_name = "STATUS")]
+    pub exit: Option<String>,
+    /// Commands run in this directory (`.` is the current one)
+    #[arg(long, value_name = "DIR")]
+    pub cwd: Option<String>,
+    /// tmux pane id (e.g. `%3`)
+    #[arg(long, value_name = "PANE")]
+    pub pane: Option<String>,
+    /// Print JSON lines instead of running fzf
+    #[arg(long)]
+    pub json: bool,
+    /// Print the plain list instead of running fzf
+    #[arg(long, conflicts_with = "json")]
+    pub print: bool,
+    /// Maximum number of results
+    #[arg(long, default_value_t = 1000)]
+    pub limit: usize,
+    /// Search term (words are joined with single spaces); empty lists the newest commands
+    #[arg(value_name = "TERM")]
+    pub term: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {
+    /// `<uuid>`, `<uuid>:<seq>` or `<uuid>@<t>` (the hidden first field of `search`)
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(long)]
+    pub json: bool,
+    /// Maximum output bytes to print
+    #[arg(long, default_value_t = 64 * 1024, value_name = "BYTES")]
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ForgetArgs {
+    /// `<uuid>` (whole session) or `<uuid>:<seq>` (one command)
+    #[arg(value_name = "ID")]
+    pub id: String,
+    /// With a session id: forget only output from this cast offset (seconds)
+    #[arg(long, value_name = "SECS", requires = "to")]
+    pub from: Option<f64>,
+    /// With a session id: forget only output up to this cast offset (seconds)
+    #[arg(long, value_name = "SECS", requires = "from")]
+    pub to: Option<f64>,
+}
+
+#[derive(Debug, Args)]
+#[command(group = clap::ArgGroup::new("mode").required(true).args(["once", "rebuild"]))]
+pub struct IndexArgs {
+    /// Index new and changed casts once (only while no writer holds the lock)
+    #[arg(long)]
+    pub once: bool,
+    /// Drop index.db and rebuild it from the casts (meta.db is kept)
+    #[arg(long)]
+    pub rebuild: bool,
+    /// Only these casts (default: everything under the logs root)
+    #[arg(value_name = "CAST")]
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(group = clap::ArgGroup::new("mode").required(true).args(["now", "dry_run"]))]
+pub struct CompressArgs {
+    /// Compress every candidate now
+    #[arg(long)]
+    pub now: bool,
+    /// List the candidates without compressing
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Per-file banners, log lines, aligned commands and mean confidence
+    #[arg(long, required = true)]
+    pub report: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct MetaArgs {
+    #[command(subcommand)]
+    pub action: MetaAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MetaAction {
+    /// Write meta.db as JSON Lines (`-` for stdout; `.zst` compresses)
+    Export {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Merge a JSON Lines export into meta.db (`.zst` is decompressed)
+    Import {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +292,30 @@ mod tests {
         assert!(Cli::try_parse_from(["cinelog", "install", "--binary", "/x"]).is_err());
         assert!(Cli::try_parse_from(["cinelog", "install", "--team", "--binary", "/x"]).is_ok());
         assert!(Cli::try_parse_from(["cinelog", "install", "--refresh", "--team"]).is_err());
+    }
+
+    #[test]
+    fn m2_subcommands() {
+        let ok = |args: &[&str]| Cli::try_parse_from(args).map(|_| ()).map_err(|e| e.to_string());
+        let parse = |args: &[&str]| Cli::try_parse_from(args).unwrap().command;
+        let Command::Search(s) = parse(&["cinelog", "search", "-a", "--exit", "fail", "foo", "bar"]) else {
+            panic!()
+        };
+        assert!(s.all && s.term == ["foo", "bar"] && s.exit.as_deref() == Some("fail"));
+        assert!(ok(&["cinelog", "search", "-a", "--out", "x"]).is_err());
+        assert!(ok(&["cinelog", "index"]).is_err());
+        assert!(ok(&["cinelog", "index", "--once", "--rebuild"]).is_err());
+        assert!(ok(&["cinelog", "index", "--rebuild"]).is_ok());
+        assert!(ok(&["cinelog", "compress"]).is_err());
+        assert!(ok(&["cinelog", "compress", "--now"]).is_ok());
+        assert!(ok(&["cinelog", "import"]).is_err());
+        assert!(ok(&["cinelog", "forget", "u", "--from", "1"]).is_err());
+        assert!(ok(&["cinelog", "forget", "u", "--from", "1", "--to", "2"]).is_ok());
+        assert!(ok(&["cinelog", "serve", "--scope", "team", "--no-http"]).is_ok());
+        assert!(ok(&["cinelog", "meta", "export", "-"]).is_ok());
+        let Command::Show(s) = parse(&["cinelog", "show", "x:1"]) else {
+            panic!()
+        };
+        assert_eq!(s.max_bytes, 65536);
     }
 }
