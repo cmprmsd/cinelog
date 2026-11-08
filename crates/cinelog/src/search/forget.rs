@@ -80,6 +80,15 @@ pub fn forget(
         }
     }
     let mut meta = store.meta()?;
+    if let ForgetTarget::Command { uuid, seq } = &target
+        && store.has_index()
+        && let Err(e) = store.record_command_span(meta.as_mut(), uuid, *seq)
+    {
+        writeln!(
+            err,
+            "cinelog: forget: cannot record the playback span ({e:#}); output may stay visible in legacy playback"
+        )?;
+    }
     let recorded = meta.forget(&target, by)?;
     writeln!(out, "forgot {} (hidden from search now)", describe(&recorded.target))?;
     match store.writer() {
@@ -267,5 +276,54 @@ mod tests {
         assert_eq!(c, 0);
         assert_eq!(out, format!("forgot session {U1} (hidden from search now)\n"));
         assert!(err.is_empty());
+    }
+    /// Regression (.omc/handoff/M3/M3-B.md item 2): a command forgotten from the CLI records
+    /// the span playback masks before the purge drops the command from index.db, so legacy
+    /// casts (no markers to recover it from) stay masked.
+    #[test]
+    fn a_command_forget_records_the_playback_span() {
+        use crate::serve::testkit::{UUID_A, cmd_json, done_json, write_cast};
+        use cinelog_core::paths::{EnvSnapshot, SystemRoot};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let ctx = crate::ctx::Ctx::with(
+            EnvSnapshot {
+                uid: 1000,
+                euid: 1000,
+                user: "alice".into(),
+                home: home.clone(),
+                xdg_config_home: None,
+                xdg_state_home: Some(home.join("state")),
+                xdg_runtime_dir: Some(dir.path().join("run")),
+            },
+            SystemRoot::prefixed(dir.path().join("sys")),
+        );
+        let (cmd, done) = (cmd_json(1, 7, 1, "echo secret"), done_json(1, 7, 1, 0));
+        write_cast(
+            &ctx.paths.logs_root.join("2026-11"),
+            &format!("box_{UUID_A}.cast"),
+            UUID_A,
+            1,
+            &[(0.5, "m", &cmd), (0.6, "o", "secret\r\n"), (0.9, "m", &done)],
+            Some(0),
+        );
+        crate::serve::open_engine(&ctx)
+            .unwrap()
+            .index_once(&cinelog_index::model::OnceOptions::default())
+            .unwrap();
+        let store = super::super::DbStore::new(&ctx);
+        let (c, out, err) = capture(|o, e| forget(&args(&format!("{UUID_A}:1"), None, None), &store, "alice", o, e));
+        assert_eq!(c, 0, "{err}");
+        assert!(out.contains("1 commands"), "{out}");
+        let span = store
+            .meta()
+            .unwrap()
+            .setting(&format!("forget_span/{UUID_A}/1"))
+            .unwrap()
+            .expect("span recorded");
+        let (from, to) = span.split_once(' ').unwrap();
+        assert_eq!(from.parse::<f64>().unwrap(), 0.0, "{span}: from the session start");
+        assert!(to.parse::<f64>().unwrap() >= 0.9, "{span}");
     }
 }

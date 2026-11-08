@@ -157,7 +157,7 @@ fn install_unit(env: &EnvSnapshot, exec: Option<&Path>, manager: &UserManager, s
     } else {
         Outcome::Unchanged
     };
-    steps.file(&outcome, &unit, "(indexer, `serve --no-http`)", &env.home);
+    steps.file(&outcome, &unit, "(indexer and web server)", &env.home);
     if !manager.reads(&unit) {
         steps.note(format!(
             "the systemd user manager does not read {}: not enabled (recorded shells start `cinelog serve` themselves)",
@@ -335,7 +335,7 @@ mod tests {
     fn a_binary_outside_local_bin_is_quoted_into_exec_start() {
         let unit = render_unit(Some(Path::new("/opt/my tools/100%/cinelog")));
         assert!(
-            unit.contains("ExecStart=\"/opt/my tools/100%%/cinelog\" serve --scope personal --no-http\n"),
+            unit.contains("ExecStart=\"/opt/my tools/100%%/cinelog\" serve --scope personal\n"),
             "{unit}"
         );
         assert_eq!(unit.matches("ExecStart=").count(), 1);

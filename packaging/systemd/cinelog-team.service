@@ -1,0 +1,55 @@
+# cinelog team server (plan §10.4): indexes the root shells' casts and serves the team
+# web UI. `sudo cinelog install --team` copies it to /etc/systemd/system/ and replaces the
+# BindPaths= line when team.toml sets another paths.logs.
+#
+# The server runs as root with an empty capability set: it reads and writes only
+# root-owned files (casts 0600 in 0700 dirs, /var/lib/cinelog, /etc/cinelog/tls) and checks
+# registry entries through world-readable /proc/<pid>/stat, so it needs neither
+# CAP_DAC_OVERRIDE nor CAP_SYS_PTRACE. /run/cinelog comes from tmpfiles.d (recorders write
+# their registry entries there too, so it is not a RuntimeDirectory=, which systemd would
+# remove on stop). AF_NETLINK is for getifaddrs (certificate names, Host allowlist).
+# Manual root check of all of this: packaging/verify-team-unit.sh.
+[Unit]
+Description=cinelog team server (root shells)
+Documentation=https://github.com/cmprmsd/cinelog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/cinelog serve --scope team
+Restart=on-failure
+RestartSec=2
+UMask=0077
+StateDirectory=cinelog
+StateDirectoryMode=0700
+ReadWritePaths=/run/cinelog /etc/cinelog/tls
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/root/logs
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+MemoryHigh=1G
+
+[Install]
+WantedBy=multi-user.target

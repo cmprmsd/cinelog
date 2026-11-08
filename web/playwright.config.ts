@@ -1,28 +1,36 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// E2E against a real `cinelog serve` with fixtures (plan §12.3). `CINELOG_E2E_URL` is the
-// server's base URL; `CINELOG_CHROMIUM` points at a system Chromium when Playwright's own
-// browser is not installed.
+// E2E (plan §12.3). Without `CINELOG_E2E_URL` the global setup starts the contract mock
+// (`e2e/mock/server.ts`, HTTPS, serving `dist/`), or with `CINELOG_E2E_BIN` a real
+// `cinelog serve` over the fixture casts (`e2e/real/`); with `CINELOG_E2E_URL` the specs run
+// against that server, which must carry the same fixtures and accept `CINELOG_E2E_TOKEN`. `CINELOG_CHROMIUM`
+// points at a system Chromium when Playwright's own browser is not installed.
+const chromium = {
+  ...devices['Desktop Chrome'],
+  launchOptions: process.env.CINELOG_CHROMIUM ? { executablePath: process.env.CINELOG_CHROMIUM } : {},
+};
+
 export default defineConfig({
   testDir: 'e2e',
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
+  workers: 1,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // A real server keeps the forget of the previous attempt: no retries there.
+  retries: process.env.CI && !process.env.CINELOG_E2E_BIN && !process.env.CINELOG_E2E_URL ? 1 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
-    baseURL: process.env.CINELOG_E2E_URL,
     ignoreHTTPSErrors: true,
     trace: 'retain-on-failure',
   },
   projects: [
+    { name: 'setup', testMatch: /auth\.setup\.ts/, use: chromium },
+    { name: 'login', testMatch: /login\.spec\.ts/, use: chromium, dependencies: ['setup'] },
     {
       name: 'chromium',
-      use: {
-        ...devices['Desktop Chrome'],
-        launchOptions: process.env.CINELOG_CHROMIUM
-          ? { executablePath: process.env.CINELOG_CHROMIUM }
-          : {},
-      },
+      testIgnore: /login\.spec\.ts/,
+      use: { ...chromium, storageState: 'e2e/.auth/state.json' },
+      dependencies: ['setup'],
     },
   ],
 });

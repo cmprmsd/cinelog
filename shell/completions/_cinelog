@@ -116,6 +116,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--max-bytes=[Maximum output bytes to print]:BYTES:_default' \
 '--json[]' \
+'--team[Look the entry up on the team server (\`cinelog token team-login\`); the preview of \`search --team\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':id -- `<uuid>`, `<uuid>\:<seq>` or `<uuid>@<t>` (the hidden first field of `search`):_default' \
@@ -260,7 +261,7 @@ _arguments "${_arguments_options[@]}" : \
 (team-login)
 _arguments "${_arguments_options[@]}" : \
 '--url=[Team server URL (default\: https\://<this host>\:10000)]:URL:_default' \
-'--fingerprint=[Expected certificate fingerprint (as \`cinelog tls show\` prints it on the server); without it the first fingerprint seen is trusted and printed]:SHA256:_default' \
+'--fingerprint=[Expected certificate fingerprint (as \`cinelog tls show\` prints it on the server); without it the server'\''s certificate is shown and must be confirmed at the terminal before the token is sent]:SHA256:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

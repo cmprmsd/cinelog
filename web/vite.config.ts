@@ -1,4 +1,5 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { defaultClientConditions } from 'vite';
 import { defineConfig } from 'vitest/config';
 
 // `pnpm dev` proxies the API to a running `cinelog serve` (self-signed TLS). The server
@@ -13,6 +14,8 @@ const proxy = {
 
 export default defineConfig({
   plugins: [svelte()],
+  // Component tests mount Svelte's client runtime in jsdom.
+  resolve: process.env.VITEST ? { conditions: ['browser', ...defaultClientConditions] } : {},
   build: {
     outDir: 'dist',
     emptyOutDir: true,

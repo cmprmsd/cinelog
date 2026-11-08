@@ -43,7 +43,7 @@ pub mod code {
 
 pub fn run(args: &SearchArgs) -> ExitCode {
     let ctx = Ctx::load();
-    let env = Env::current(&ctx);
+    let mut env = Env::current(&ctx);
     let fzf;
     let ui = if args.json {
         list::Ui::Json
@@ -52,13 +52,14 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     } else {
         match pick::Fzf::find() {
             Some(f) => {
-                fzf = f;
+                fzf = f.team(args.team);
                 list::Ui::Pick(&fzf)
             }
             None => list::Ui::Plain,
         }
     };
     if args.team {
+        env.server = team::server(&ctx);
         return exit("search", |out, err| {
             let store = team::store(&ctx)?;
             list::search(args, store.as_ref(), &env, ui, out, err)
@@ -71,6 +72,12 @@ pub fn run(args: &SearchArgs) -> ExitCode {
 pub fn show(args: &ShowArgs) -> ExitCode {
     let ctx = Ctx::load();
     let env = Env::current(&ctx);
+    if args.team {
+        return exit("show", |out, err| {
+            let store = team::store(&ctx)?;
+            show::show(args, store.as_ref(), &env, out, err)
+        });
+    }
     let store = DbStore::new(&ctx);
     exit("show", |out, err| show::show(args, &store, &env, out, err))
 }
@@ -209,6 +216,11 @@ pub trait Store {
     /// The writer, `None` while an indexer holds the writer lock or before index.db exists.
     fn writer(&self) -> anyhow::Result<Option<Box<dyn IndexWriter>>>;
     fn has_index(&self) -> bool;
+    /// Before a command forget: records in meta.db the span web playback masks for it (it
+    /// is read from index.db, which the purge then drops). `false` when nothing was found.
+    fn record_command_span(&self, _meta: &mut dyn MetaStore, _uuid: &str, _seq: u64) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The real databases in `Paths::db_dir`.
@@ -254,6 +266,15 @@ impl Store for DbStore {
 
     fn has_index(&self) -> bool {
         self.paths.index.is_file()
+    }
+
+    fn record_command_span(&self, meta: &mut dyn MetaStore, uuid: &str, seq: u64) -> anyhow::Result<bool> {
+        Ok(cinelog_web::play::record_forgotten_command_span(
+            &self.paths,
+            meta,
+            uuid,
+            seq,
+        )?)
     }
 }
 

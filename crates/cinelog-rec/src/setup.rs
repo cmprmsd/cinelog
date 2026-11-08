@@ -262,7 +262,10 @@ pub(crate) fn prepare(req: &RecRequest) -> Result<(Launch, PathBuf), Fallback> {
         .map_err(|e| fail(format!("nonce pipe: {e}"), &log))?;
 
     let slave_str = slave_path.display().to_string();
-    let opts = cfg.shell.to_opts(None).to_env_value();
+    // The session's web URL for the title (`shell.title_link`) and the MOTD, when this
+    // scope's server already runs; `cinelog link` looks it up at any time.
+    let url = session_url(&paths.runtime_dir, &id.to_string());
+    let opts = cfg.shell.to_opts(url.as_deref()).to_env_value();
     let extra = [
         (env::NONCE_FD, nonce_read.as_raw_fd().to_string()),
         (env::REC_PID, own_pid.to_string()),
@@ -396,9 +399,32 @@ pub(crate) fn prepare(req: &RecRequest) -> Result<(Launch, PathBuf), Fallback> {
     Ok((launch, cast_path))
 }
 
+/// The web URL of session `uuid` from the live `server.json` of `runtime_dir`.
+fn session_url(runtime_dir: &Path, uuid: &str) -> Option<String> {
+    cinelog_core::server::ServerInfo::read_live(runtime_dir).map(|s| s.session_url(uuid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_url_comes_from_a_live_server() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(session_url(dir.path(), "u-1"), None, "no server.json");
+        let info = cinelog_core::server::ServerInfo {
+            pid: std::process::id(),
+            url: "https://box:11000".into(),
+            port: 11000,
+            fingerprint: String::new(),
+            version: String::new(),
+        };
+        info.write(dir.path()).unwrap();
+        assert_eq!(
+            session_url(dir.path(), "u-1").as_deref(),
+            Some("https://box:11000/s/u-1")
+        );
+    }
 
     #[test]
     fn a_full_log_dir_is_refused_before_the_fork() {

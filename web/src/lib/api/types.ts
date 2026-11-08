@@ -125,9 +125,15 @@ children: Array<SessionRef>,
  */
 markers: Array<Marker>, parts: Array<CastPart>, 
 /**
- * Forgotten ranges of this session; playback shows them masked.
+ * The `meta.forgotten` rows of this session.
  */
 forgotten: Array<Forgotten>, 
+/**
+ * What playback and export mask, by start: forgotten ranges, and each forgotten
+ * command from the end of the command before it to its own end. Known after the
+ * command has left index.db, so clients draw these rather than deriving them.
+ */
+masked: Array<MaskedSpan>, 
 /**
  * How [`PlayInfo`] will load this session.
  */
@@ -289,6 +295,16 @@ export type Forgotten = { target: ForgetTarget,
  * Principal who forgot it.
  */
 by: string, at: number, };
+
+export type MaskedSpan = { t_from: number, 
+/**
+ * `null`: a forgotten command that has not ended (masked to the end).
+ */
+t_to: number | null, 
+/**
+ * Principal who forgot it.
+ */
+by: string, };
 
 export type PlayInfo = { mode: PlayMode, 
 /**

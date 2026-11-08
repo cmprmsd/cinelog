@@ -203,6 +203,9 @@ pub struct ShowArgs {
     /// Maximum output bytes to print
     #[arg(long, default_value_t = 64 * 1024, value_name = "BYTES")]
     pub max_bytes: usize,
+    /// Look the entry up on the team server (`cinelog token team-login`); the preview of `search --team`
+    #[arg(long, hide = true)]
+    pub team: bool,
 }
 
 #[derive(Debug, Args)]
@@ -309,7 +312,8 @@ pub enum TokenAction {
         #[arg(long, value_name = "URL")]
         url: Option<String>,
         /// Expected certificate fingerprint (as `cinelog tls show` prints it on the server);
-        /// without it the first fingerprint seen is trusted and printed
+        /// without it the server's certificate is shown and must be confirmed at the terminal
+        /// before the token is sent
         #[arg(long, value_name = "SHA256")]
         fingerprint: Option<String>,
     },

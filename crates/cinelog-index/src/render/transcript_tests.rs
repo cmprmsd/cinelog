@@ -570,3 +570,19 @@ fn one_large_event_and_endless_lines() {
         "50 rows and the 200 x in three 70-byte pieces"
     );
 }
+
+/// Regression: `stty cols 65535 rows 65535` in a recorded shell made the indexer allocate a
+/// 65535x65535 terminal (OOM abort of the daemon). Sizes are clamped like the web player's.
+#[test]
+fn huge_terminal_sizes_are_clamped() {
+    let mut t = tr(u16::MAX, u16::MAX);
+    assert_eq!(t.size(), (MAX_COLS, MAX_ROWS));
+    t.resize(at(1.0), u16::MAX, 3);
+    assert_eq!(t.size(), (MAX_COLS, 3));
+    t.resize(at(2.0), 0, 0);
+    assert_eq!(t.size(), (1, 1));
+    t.resize(at(3.0), 80, 24);
+    t.output(at(4.0), "still fine\r\n");
+    let all: Vec<String> = t.finish(at(5.0)).into_iter().map(|c| c.text).collect();
+    assert!(all.iter().any(|s| s.contains("still fine")), "{all:?}");
+}

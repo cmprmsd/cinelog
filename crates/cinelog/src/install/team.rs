@@ -1,28 +1,43 @@
-//! `cinelog install --team` (§5.6, §9.7, §10.3, §10.6 step 6; M1 part, no server): the
-//! verified binary in `/usr/local/bin`, the root-owned plugin copy, the system zshrc block,
-//! `/etc/cinelog`, `/var/lib/cinelog`, the log root and the runtime dir.
+//! `cinelog install --team` (§5.6, §9.7, §10.3, §10.4, §10.6 step 6): the verified binary
+//! in `/usr/local/bin`, the root-owned plugin copy, the system zshrc block, `/etc/cinelog`
+//! (with `tls/`), `/var/lib/cinelog`, the log root and the runtime dir; then the team server:
+//! the hardened system unit `packaging/systemd/cinelog-team.service`, tmpfiles.d, stopping
+//! root's old Python viewer, and the first named web token for `$SUDO_USER`.
 //!
 //! With `--prefix DIR` every system path lives below DIR and no root privileges are needed;
-//! that is the test mode. Without it the command must run as root and refuses to write
+//! that is the test mode: it writes the same files but never runs `systemctl` and never
+//! looks at running processes. Without it the command must run as root and refuses to write
 //! into any directory that is not root-owned and free of group/world write along its whole
 //! path. Modes are only tightened on directories cinelog owns; system directories such as
 //! `/usr/local/bin` are checked, never changed.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use cinelog_core::config::legacy;
 use cinelog_core::location;
 use cinelog_core::paths::{Paths, SystemRoot, team};
+use cinelog_core::server::ServerInfo;
 use cinelog_core::{Config, Scope};
+use cinelog_index::model::{DbPaths, settings_keys};
+use cinelog_web::hosts::HostAllowlist;
+use cinelog_web::server::BindSpec;
+use cinelog_web::tls::{self, TlsOptions};
 use sha2::{Digest, Sha256};
 
 use super::fsutil::{self, Outcome};
-use super::{Steps, migrate, zshrc};
+use super::{Steps, migrate, old_server, zshrc};
 use crate::module;
 
-pub const TMPFILES_LINE: &str = "d /run/cinelog 0700 root root -\n";
+/// `packaging/tmpfiles.d/cinelog.conf` → `/etc/tmpfiles.d/cinelog.conf`.
+pub const TMPFILES_CONF: &str = include_str!("../../../../packaging/tmpfiles.d/cinelog.conf");
+/// `packaging/systemd/cinelog-team.service` → `/etc/systemd/system/` (see [`render_unit`]).
+pub const UNIT: &str = include_str!("../../../../packaging/systemd/cinelog-team.service");
+pub const UNIT_NAME: &str = "cinelog-team.service";
+const UNIT_LOGS_LINE: &str = "BindPaths=/root/logs\n";
+const OLD_SERVER_GRACE: Duration = Duration::from_secs(3);
 
 /// The binary `install --team` copies to `/usr/local/bin/cinelog`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +129,53 @@ pub struct Options {
     pub upgrade: bool,
     pub allow_unverified: bool,
     pub migrate: bool,
+}
+
+/// The system manager, as far as the team install drives it.
+pub trait Systemd {
+    fn is_active(&self, unit: &str) -> bool;
+    /// Runs `systemctl ARGS`; failures are reported into `steps`, never fatal.
+    fn run(&self, args: &[&str], steps: &mut Steps);
+}
+
+/// `systemctl` of the running system.
+pub struct SystemSystemd;
+
+impl Systemd for SystemSystemd {
+    fn is_active(&self, unit: &str) -> bool {
+        std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", unit])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    fn run(&self, args: &[&str], steps: &mut Steps) {
+        super::systemctl(args, steps);
+    }
+}
+
+/// What the install learns from and does to the running system besides files. A
+/// `--prefix` install has none of it: no systemd, no process scan.
+pub struct Host<'a> {
+    pub systemd: Option<&'a dyn Systemd>,
+    /// `/proc` to look for root's old Python viewer in.
+    pub proc_root: Option<PathBuf>,
+    /// `$SUDO_USER`: the member who gets the first web token.
+    pub sudo_user: Option<String>,
+    pub now: f64,
+}
+
+impl Host<'static> {
+    /// The running system for a real install; only `$SUDO_USER` for a `--prefix` one.
+    pub fn current(root: &SystemRoot) -> Self {
+        let real = root.is_real();
+        Self {
+            systemd: real.then_some(&SystemSystemd as &dyn Systemd),
+            proc_root: real.then(old_server::proc_root),
+            sudo_user: std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()),
+            now: cinelog_web::now(),
+        }
+    }
 }
 
 /// A real team install needs root; a `--prefix` one does not.
@@ -250,6 +312,10 @@ pub fn verify(module: &Path, version: &str, bytes: &[u8]) -> Verification {
 }
 
 pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
+    install_on(opts, &Host::current(&opts.sys.root), steps)
+}
+
+pub fn install_on(opts: &Options, host: &Host<'_>, steps: &mut Steps) -> Result<()> {
     let sys = &opts.sys;
     sys.check_privileges()?;
     let root = &sys.root;
@@ -258,9 +324,11 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
 
     for (dir, mode, kind, what) in [
         (team::CONFIG_DIR, 0o700, DirKind::Owned, "team config"),
+        (team::TLS_DIR, 0o700, DirKind::Owned, "team server certificate"),
         (team::STATE_DIR, 0o700, DirKind::Owned, "team databases"),
         (team::RUNTIME_DIR, 0o700, DirKind::Owned, "team registry"),
         ("/etc/tmpfiles.d", 0o755, DirKind::System, ""),
+        ("/etc/systemd/system", 0o755, DirKind::System, ""),
         ("/usr/local/bin", 0o755, DirKind::System, ""),
         (team::SHARE_DIR, 0o755, DirKind::Owned, "plugin copy"),
     ] {
@@ -282,6 +350,7 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
     steps.notes(cfg.notes);
     sys.require_secure(&config_file)?;
 
+    let team_cfg = Config::load(&config_file).unwrap_or_default();
     let paths = team_paths(root);
     if let Some(problem) = location::db_location_problem(&paths.db_dir) {
         bail!("{problem}");
@@ -296,10 +365,11 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
     steps.dir(&outcome, &paths.logs_root, "team casts", home);
 
     let tmpfiles = root.join(team::TMPFILES);
-    let outcome = fsutil::write_atomic(&tmpfiles, TMPFILES_LINE.as_bytes(), 0o644)?;
+    let outcome = fsutil::write_atomic(&tmpfiles, TMPFILES_CONF.as_bytes(), 0o644)?;
+    sys.require_secure(&tmpfiles)?;
     steps.file(&outcome, &tmpfiles, "(recreates /run/cinelog at boot)", home);
 
-    write_binary(opts, &binary, steps)?;
+    let binary_changed = write_binary(opts, &binary, steps)?;
     install_plugin(opts, steps)?;
 
     let rc = zshrc::system_zshrc(root);
@@ -312,12 +382,223 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
         ));
     }
 
-    let unit = root.join(team::UNIT);
-    if root.is_real() && unit.exists() {
-        super::systemctl(&["try-restart", "cinelog-team.service"], steps);
-    }
+    stop_old_server(host, cfg.legacy_port, &paths, steps);
+    let cert = certificate(&team_cfg, &paths, steps);
+    let unit_text = render_unit(&unit_logs_root(&team_cfg))?;
+    let restart = Restart {
+        binary: binary_changed,
+        certificate: cert.as_ref().is_some_and(|c| c.regenerated),
+    };
+    install_unit(opts, host, &unit_text, restart, steps)?;
+    member_token(&paths, host, steps)?;
+
     steps.note("recommended: `Defaults always_set_home` in sudoers or `sudo -i`, so root never runs user dotfiles");
-    steps.note("for the team web server (later versions) give it a hostname of its own: server.hostnames in team.toml");
+    let url = team_url(&team_cfg, &paths, cfg.legacy_port);
+    steps.note(format!(
+        "the team web UI is {url} (browsers send cookies to every port of a host: give the team server a \
+         hostname of its own with server.hostnames in team.toml)"
+    ));
+    let fingerprint = cert.map_or_else(|| "<`sudo cinelog tls show`>".to_owned(), |c| c.fingerprint);
+    steps.note(format!(
+        "more members: `sudo cinelog token new NAME`; for `search --team` each member runs \
+         `cinelog token team-login --url {url} --fingerprint {fingerprint}`"
+    ));
+    Ok(())
+}
+
+/// The URL members reach the team server at: the running server's, else what it will bind
+/// (a port in `server.bind`, the port it persisted, root's old viewer port, else 10000).
+/// Members cannot read `/run/cinelog/server.json`, so the install prints it.
+fn team_url(cfg: &Config, paths: &Paths, legacy_port: Option<u16>) -> String {
+    if let Some(live) = ServerInfo::read_live(&paths.runtime_dir) {
+        return live.url;
+    }
+    let bound = cfg.server.bind.iter().find_map(|b| b.parse::<BindSpec>().ok()?.port);
+    let port = bound
+        .or_else(|| persisted_port(&DbPaths::in_dir(&paths.db_dir).meta))
+        .or_else(|| old_server::persisted_port(legacy_port, &paths.migrated_port_file()))
+        .unwrap_or(cinelog_core::server::BASE_PORT);
+    let host = cfg
+        .server
+        .hostnames
+        .first()
+        .cloned()
+        .unwrap_or_else(cinelog_core::paths::hostname);
+    let host = if host.contains(':') { format!("[{host}]") } else { host };
+    format!("https://{host}:{port}")
+}
+
+/// The port the team server persisted in meta.db (read-only; `None` without one).
+fn persisted_port(meta: &Path) -> Option<u16> {
+    use cinelog_index::schema::{self, Access, DbKind};
+    if !meta.exists() {
+        return None;
+    }
+    let conn = schema::open(meta, DbKind::Meta, Access::ReadOnly).ok()?;
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [settings_keys::PORT],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()?
+    .parse()
+    .ok()
+}
+
+/// The log root as the server sees it (unprefixed: the unit is for the real system).
+fn unit_logs_root(cfg: &Config) -> PathBuf {
+    Paths::team(&SystemRoot::real(), &cfg.paths, Path::new("/root")).logs_root
+}
+
+/// The packaged unit, with `BindPaths=` set to the configured log root. Paths systemd
+/// would split or expand are refused.
+pub fn render_unit(logs_root: &Path) -> Result<String> {
+    let logs = logs_root.to_str().context("the team log root is not valid UTF-8")?;
+    if !logs.starts_with('/')
+        || logs
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '%' | ':' | '"' | '\'' | '\\' | '$'))
+    {
+        bail!(
+            "paths.logs = {logs:?} cannot be put into the systemd unit (BindPaths=): use an absolute path \
+             without spaces, ':', '%', quotes, '$' or backslashes"
+        );
+    }
+    debug_assert!(UNIT.contains(UNIT_LOGS_LINE));
+    Ok(UNIT.replacen(UNIT_LOGS_LINE, &format!("BindPaths={logs}\n"), 1))
+}
+
+/// What changed under a running server, besides its unit.
+#[derive(Debug, Clone, Copy, Default)]
+struct Restart {
+    binary: bool,
+    /// The server loads its certificate once, at start.
+    certificate: bool,
+}
+
+/// Writes the unit, then (real installs) reloads systemd, enables and starts the server,
+/// and restarts it when it was running with an older binary, unit or certificate.
+fn install_unit(opts: &Options, host: &Host<'_>, text: &str, changed: Restart, steps: &mut Steps) -> Result<()> {
+    let unit = opts.sys.root.join(team::UNIT);
+    let outcome = fsutil::write_atomic(&unit, text.as_bytes(), 0o644)?;
+    opts.sys.require_secure(&unit)?;
+    steps.file(&outcome, &unit, "(hardened team server unit)", no_home());
+    let Some(systemd) = host.systemd else {
+        steps.note(format!("test install: {UNIT_NAME} was not enabled or started"));
+        return Ok(());
+    };
+    let was_active = systemd.is_active(UNIT_NAME);
+    let unit_changed = outcome != Outcome::Unchanged;
+    if unit_changed {
+        systemd.run(&["daemon-reload"], steps);
+    }
+    systemd.run(&["enable", "--now", UNIT_NAME], steps);
+    if was_active && (unit_changed || changed.binary || changed.certificate) {
+        // Only the server restarts; running recorders keep their (deleted) binary.
+        systemd.run(&["try-restart", UNIT_NAME], steps);
+    }
+    Ok(())
+}
+
+/// Stops root's old Python viewer (`/root/.zim/modules/cinelog/http_server.py`) and checks
+/// that nothing else holds the port it used.
+fn stop_old_server(host: &Host<'_>, legacy_port: Option<u16>, paths: &Paths, steps: &mut Steps) {
+    let Some(proc_root) = &host.proc_root else {
+        return;
+    };
+    let pids = old_server::find(proc_root, 0, Path::new("/root"));
+    if !pids.is_empty() {
+        let list = |p: &[i32]| p.iter().map(i32::to_string).collect::<Vec<_>>().join(", ");
+        let left = old_server::stop(&pids, OLD_SERVER_GRACE);
+        if left.is_empty() {
+            steps.done(format!(
+                "stopped root's old viewer (http_server.py, pid {})",
+                list(&pids)
+            ));
+        } else {
+            steps.warn(format!(
+                "could not stop root's old viewer (http_server.py, pid {})",
+                list(&left)
+            ));
+        }
+    }
+    if let Some(port) = old_server::persisted_port(legacy_port, &paths.migrated_port_file())
+        && old_server::port_listened(proc_root, port)
+    {
+        steps.warn(format!(
+            "something still listens on port {port}, root's viewer port from the old install"
+        ));
+    }
+}
+
+/// The certificate the team server serves after the install.
+#[derive(Debug, Clone)]
+struct Certificate {
+    fingerprint: String,
+    /// Created or replaced just now (missing, expiring, or no longer covering the names).
+    regenerated: bool,
+}
+
+/// Creates the server certificate now (or checks the existing one, as the server would on
+/// start, regenerating it under the same rules), so the install can print the fingerprint
+/// that members pin with `cinelog token team-login`. A failure only warns: the server
+/// creates the certificate itself on its first start.
+fn certificate(cfg: &Config, paths: &Paths, steps: &mut Steps) -> Option<Certificate> {
+    let web = cinelog_web::WebContext {
+        scope: Scope::Team,
+        host: cinelog_core::paths::hostname(),
+        user: "root".into(),
+        uid: 0,
+        config: cfg.clone(),
+        paths: paths.clone(),
+        db: DbPaths::in_dir(&paths.db_dir),
+    };
+    let opts = TlsOptions::from_context(&web, HostAllowlist::new(&web).cert_names());
+    tls::install_provider();
+    match tls::load_or_create(&opts) {
+        Ok(m) => {
+            let origin = match (m.info.self_signed, m.regenerated) {
+                (false, _) => "configured",
+                (true, Some(_)) => "new self-signed",
+                (true, None) => "self-signed",
+            };
+            steps.done(format!(
+                "team server certificate ({origin}, {}): fingerprint {}",
+                m.info.cert_path.display(),
+                m.info.fingerprint
+            ));
+            Some(Certificate {
+                fingerprint: m.info.fingerprint,
+                regenerated: m.regenerated.is_some(),
+            })
+        }
+        Err(e) => {
+            steps.warn(format!(
+                "could not prepare the team server certificate ({e}); the server creates one on start, \
+                 see `sudo cinelog tls show`"
+            ));
+            None
+        }
+    }
+}
+
+/// The first named web token, for the member who runs the install (shown once).
+fn member_token(paths: &Paths, host: &Host<'_>, steps: &mut Steps) -> Result<()> {
+    let Some(user) = host.sudo_user.as_deref().filter(|u| *u != "root") else {
+        steps.note("no $SUDO_USER: create member tokens with `sudo cinelog token new NAME`");
+        return Ok(());
+    };
+    if !cinelog_web::tokens::valid_name(user) {
+        steps.warn(format!(
+            "$SUDO_USER {user:?} is not a valid token name: create one with `sudo cinelog token new NAME`"
+        ));
+        return Ok(());
+    }
+    match crate::token::ensure_named(&paths.auth_file, user, host.now)? {
+        Some(t) => steps.done(format!("team web token for {} (shown once): {}", t.name, t.secret)),
+        None => steps.note(format!("kept the team web token of {user}")),
+    }
     Ok(())
 }
 
@@ -405,7 +686,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn write_binary(opts: &Options, bytes: &[u8], steps: &mut Steps) -> Result<()> {
+/// Whether the installed binary changed.
+fn write_binary(opts: &Options, bytes: &[u8], steps: &mut Steps) -> Result<bool> {
     let target = opts.sys.root.join(team::BINARY);
     let outcome = fsutil::write_atomic(&target, bytes, 0o755)?;
     opts.sys.require_secure(&target)?;
@@ -415,7 +697,7 @@ fn write_binary(opts: &Options, bytes: &[u8], steps: &mut Steps) -> Result<()> {
         &format!("(cinelog {} from {})", opts.binary.version, opts.binary.path.display()),
         no_home(),
     );
-    Ok(())
+    Ok(outcome != Outcome::Unchanged)
 }
 
 /// The files of the module that make up the plugin copy, relative to the module.
@@ -479,6 +761,10 @@ fn install_plugin(opts: &Options, steps: &mut Steps) -> Result<()> {
 /// `install --team --uninstall`: needs neither a module checkout nor a binary, so it also
 /// works from the installed team binary and after rolling the module back.
 pub fn uninstall(sys: &System, steps: &mut Steps) -> Result<()> {
+    uninstall_on(sys, &Host::current(&sys.root), steps)
+}
+
+pub fn uninstall_on(sys: &System, host: &Host<'_>, steps: &mut Steps) -> Result<()> {
     sys.check_privileges()?;
     let root = &sys.root;
     let rc = zshrc::system_zshrc(root);
@@ -497,11 +783,14 @@ pub fn uninstall(sys: &System, steps: &mut Steps) -> Result<()> {
     }
     let unit = root.join(team::UNIT);
     if unit.exists() {
-        if root.is_real() {
-            super::systemctl(&["disable", "--now", "cinelog-team.service"], steps);
+        if let Some(systemd) = host.systemd {
+            systemd.run(&["disable", "--now", UNIT_NAME], steps);
         }
         fsutil::remove_file(&unit)?;
         steps.done(format!("removed {}", unit.display()));
+        if let Some(systemd) = host.systemd {
+            systemd.run(&["daemon-reload"], steps);
+        }
     }
     let tmpfiles = root.join(team::TMPFILES);
     if fsutil::remove_file(&tmpfiles)? {
@@ -509,7 +798,7 @@ pub fn uninstall(sys: &System, steps: &mut Steps) -> Result<()> {
     }
     let paths = team_paths(root);
     steps.note(format!(
-        "kept {} (running recorders use it), {}, {} and the casts in {}",
+        "kept {} (running recorders use it), {} (config, tokens, certificate), {} and the casts in {}",
         root.join(team::BINARY).display(),
         root.join(team::CONFIG_DIR).display(),
         paths.db_dir.display(),
@@ -634,7 +923,11 @@ mod tests {
         assert!(steps.to_string().contains("old viewer port 10500"), "{steps}");
         assert_eq!(mode(&r.join(team::RUNTIME_DIR)), 0o700);
         assert_eq!(mode(&r.join(team::LOGS)), 0o700);
-        assert_eq!(std::fs::read_to_string(r.join(team::TMPFILES)).unwrap(), TMPFILES_LINE);
+        assert_eq!(std::fs::read_to_string(r.join(team::TMPFILES)).unwrap(), TMPFILES_CONF);
+        assert_eq!(mode(&r.join(team::TLS_DIR)), 0o700);
+        assert_eq!(std::fs::read_to_string(r.join(team::UNIT)).unwrap(), UNIT);
+        assert_eq!(mode(&r.join(team::UNIT)), 0o644);
+        assert!(steps.to_string().contains("was not enabled or started"), "{steps}");
         assert_eq!(
             std::fs::read_to_string(r.join(team::PLUGIN_COPY)).unwrap(),
             "# plugin\n"
@@ -857,6 +1150,292 @@ mod tests {
         assert!(std::fs::symlink_metadata(&rc).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&managed).unwrap(), "bindkey -e\n");
         assert_eq!(mode(&managed), 0o640);
+    }
+
+    /// Records `systemctl` calls; `active` is what `is-active` answers.
+    #[derive(Default)]
+    struct FakeSystemd {
+        active: bool,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Systemd for FakeSystemd {
+        fn is_active(&self, _unit: &str) -> bool {
+            self.active
+        }
+        fn run(&self, args: &[&str], steps: &mut Steps) {
+            self.calls.borrow_mut().push(args.join(" "));
+            steps.done(format!("systemctl {}", args.join(" ")));
+        }
+    }
+
+    impl FakeSystemd {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.calls.borrow_mut())
+        }
+    }
+
+    fn host<'a>(systemd: Option<&'a dyn Systemd>, sudo_user: Option<&str>) -> Host<'a> {
+        Host {
+            systemd,
+            proc_root: None,
+            sudo_user: sudo_user.map(Into::into),
+            now: 1_794_139_200.0,
+        }
+    }
+
+    #[test]
+    fn the_packaged_unit_matches_the_team_paths() {
+        let line = |key: &str| {
+            UNIT.lines()
+                .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+                .unwrap_or_else(|| panic!("no {key}= in the unit"))
+        };
+        assert_eq!(line("ExecStart"), format!("{} serve --scope team", team::BINARY));
+        let rw: Vec<&str> = line("ReadWritePaths").split(' ').collect();
+        assert!(rw.contains(&team::RUNTIME_DIR) && rw.contains(&team::TLS_DIR), "{rw:?}");
+        assert_eq!(format!("/var/lib/{}", line("StateDirectory")), team::STATE_DIR);
+        assert_eq!(line("BindPaths"), team::LOGS);
+        assert_eq!(line("CapabilityBoundingSet"), "");
+        assert_eq!(line("ProtectSystem"), "strict");
+        assert_eq!(line("ProtectHome"), "tmpfs");
+        assert!(line("RestrictAddressFamilies").contains("AF_NETLINK"));
+        assert!(UNIT.contains(UNIT_LOGS_LINE));
+        assert!(
+            TMPFILES_CONF
+                .lines()
+                .any(|l| l == format!("d {} 0700 root root -", team::RUNTIME_DIR))
+        );
+        // The unit installed with the default log root is the packaged file itself.
+        assert_eq!(render_unit(Path::new(team::LOGS)).unwrap(), UNIT);
+    }
+
+    #[test]
+    fn the_unit_binds_the_configured_log_root() {
+        let unit = render_unit(Path::new("/srv/cinelog-logs")).unwrap();
+        assert!(unit.contains("\nBindPaths=/srv/cinelog-logs\n"), "{unit}");
+        assert!(!unit.contains("/root/logs"));
+        for bad in ["relative", "/a b", "/a:b", "/100%", "/a\"b", "/$x"] {
+            assert!(render_unit(Path::new(bad)).is_err(), "{bad}");
+        }
+
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let cfg = f.opts.sys.root.join(team::CONFIG);
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "[paths]\nlogs = \"~/team-logs\"\n").unwrap();
+        install_on(&f.opts, &host(None, None), &mut Steps::default()).unwrap();
+        let unit = std::fs::read_to_string(f.opts.sys.root.join(team::UNIT)).unwrap();
+        assert!(unit.contains("\nBindPaths=/root/team-logs\n"), "{unit}");
+        assert!(f.opts.sys.root.join("/root/team-logs").is_dir());
+    }
+
+    #[test]
+    fn systemd_is_reloaded_enabled_and_restarted_only_on_change() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let sd = FakeSystemd::default();
+        install_on(&f.opts, &host(Some(&sd), None), &mut Steps::default()).unwrap();
+        assert_eq!(sd.take(), ["daemon-reload", "enable --now cinelog-team.service"]);
+
+        // Running and unchanged: enable --now is a no-op for systemd, no restart.
+        let sd = FakeSystemd {
+            active: true,
+            ..FakeSystemd::default()
+        };
+        install_on(&f.opts, &host(Some(&sd), None), &mut Steps::default()).unwrap();
+        assert_eq!(sd.take(), ["enable --now cinelog-team.service"]);
+
+        // A new binary restarts the running server.
+        std::fs::write(&f.opts.binary.read, b"\x7fELF newer").unwrap();
+        f.opts.upgrade = true;
+        let mut steps = Steps::default();
+        install_on(&f.opts, &host(Some(&sd), None), &mut steps).unwrap();
+        assert_eq!(
+            sd.take(),
+            ["enable --now cinelog-team.service", "try-restart cinelog-team.service"]
+        );
+        assert!(steps.to_string().contains("systemctl try-restart"), "{steps}");
+
+        uninstall_on(&f.opts.sys, &host(Some(&sd), None), &mut Steps::default()).unwrap();
+        assert_eq!(sd.take(), ["disable --now cinelog-team.service", "daemon-reload"]);
+        assert!(!f.opts.sys.root.join(team::UNIT).exists());
+        assert!(f.opts.sys.root.join(team::TLS_DIR).is_dir(), "the certificate is kept");
+    }
+
+    #[test]
+    fn the_installing_member_gets_the_first_token_once() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let mut steps = Steps::default();
+        install_on(&f.opts, &host(None, Some("alice")), &mut steps).unwrap();
+        let tokens_file = f.opts.sys.root.join(team::TOKENS);
+        let tf = cinelog_web::tokens::TokenFile::load(&tokens_file).unwrap();
+        assert_eq!(tf.tokens.len(), 1);
+        assert_eq!(tf.tokens[0].name, "alice");
+        assert_eq!(mode(&tokens_file), 0o600);
+        let text = steps.to_string();
+        let secret = text
+            .lines()
+            .find_map(|l| l.split("(shown once): ").nth(1))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(tf.verify(secret).map(|t| t.name.as_str()), Some("alice"));
+        assert!(!std::fs::read_to_string(&tokens_file).unwrap().contains(secret));
+
+        let mut again = Steps::default();
+        install_on(&f.opts, &host(None, Some("alice")), &mut again).unwrap();
+        assert!(
+            again.to_string().contains("kept the team web token of alice"),
+            "{again}"
+        );
+        assert!(!again.to_string().contains("shown once"));
+        assert_eq!(cinelog_web::tokens::TokenFile::load(&tokens_file).unwrap(), tf);
+
+        for (user, expect) in [
+            (None, "no $SUDO_USER"),
+            (Some("root"), "no $SUDO_USER"),
+            (Some("a b"), "not a valid"),
+        ] {
+            let mut s = Steps::default();
+            install_on(&f.opts, &host(None, user), &mut s).unwrap();
+            assert!(s.to_string().contains(expect), "{user:?}: {s}");
+        }
+        assert_eq!(
+            cinelog_web::tokens::TokenFile::load(&tokens_file).unwrap().tokens.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_certificate_is_created_once_and_its_fingerprint_printed() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let fingerprint = |steps: &Steps| {
+            let text = steps.to_string();
+            text.lines()
+                .find_map(|l| l.split("fingerprint ").nth(1).map(str::to_owned))
+                .unwrap_or_else(|| panic!("{text}"))
+        };
+        let mut steps = Steps::default();
+        install_on(&f.opts, &host(None, None), &mut steps).unwrap();
+        assert!(steps.to_string().contains("new self-signed"), "{steps}");
+        let first = fingerprint(&steps);
+        let tls_dir = f.opts.sys.root.join(team::TLS_DIR);
+        let opts = TlsOptions {
+            dir: tls_dir.clone(),
+            cert: None,
+            key: None,
+            auto_regen: false,
+            names: Vec::new(),
+        };
+        let info = tls::inspect(&opts).unwrap().expect("a certificate in the team TLS dir");
+        assert_eq!(info.fingerprint, first);
+        assert_eq!(mode(&tls_dir.join("key.pem")) & 0o077, 0, "the key is private");
+
+        // A second install keeps it: the fingerprint members pinned stays valid.
+        let mut again = Steps::default();
+        install_on(&f.opts, &host(None, None), &mut again).unwrap();
+        assert_eq!(fingerprint(&again), first);
+        assert!(!again.to_string().contains("new self-signed"), "{again}");
+    }
+
+    /// The server loads its certificate only at start: one the install regenerated must
+    /// reach the running server, or members would pin a certificate it does not serve.
+    #[test]
+    fn a_regenerated_certificate_restarts_the_running_server() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let sd = FakeSystemd {
+            active: true,
+            ..FakeSystemd::default()
+        };
+        install_on(&f.opts, &host(Some(&sd), None), &mut Steps::default()).unwrap();
+        sd.take();
+        install_on(&f.opts, &host(Some(&sd), None), &mut Steps::default()).unwrap();
+        assert_eq!(sd.take(), ["enable --now cinelog-team.service"], "nothing changed");
+
+        let tls_dir = f.opts.sys.root.join(team::TLS_DIR);
+        for entry in std::fs::read_dir(&tls_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let mut steps = Steps::default();
+        install_on(&f.opts, &host(Some(&sd), None), &mut steps).unwrap();
+        assert!(steps.to_string().contains("new self-signed"), "{steps}");
+        assert_eq!(
+            sd.take(),
+            ["enable --now cinelog-team.service", "try-restart cinelog-team.service"]
+        );
+
+        // Not running: enable --now starts it with the new certificate anyway.
+        for entry in std::fs::read_dir(&tls_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let stopped = FakeSystemd::default();
+        install_on(&f.opts, &host(Some(&stopped), None), &mut Steps::default()).unwrap();
+        assert_eq!(stopped.take(), ["enable --now cinelog-team.service"]);
+    }
+
+    /// The printed URL and team-login command use the port the server has or will have.
+    #[test]
+    fn members_get_the_effective_url_and_the_exact_login_command() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        let note = |f: &Fixture| {
+            let mut steps = Steps::default();
+            install_on(&f.opts, &host(None, None), &mut steps).unwrap();
+            let text = steps.to_string();
+            let fp = text
+                .lines()
+                .find_map(|l| l.split("fingerprint ").nth(1).map(str::to_owned))
+                .unwrap_or_else(|| panic!("{text}"));
+            let login = text
+                .lines()
+                .find_map(|l| {
+                    l.split('`')
+                        .find(|c| c.starts_with("cinelog token team-login"))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(login.split("--fingerprint ").nth(1), Some(fp.as_str()), "{text}");
+            let url = login.split_whitespace().nth(4).unwrap().to_owned();
+            assert!(text.contains(&format!("the team web UI is {url} ")), "{text}");
+            url
+        };
+        let host_name = cinelog_core::paths::hostname();
+        assert_eq!(note(&f), format!("https://{host_name}:10000"));
+
+        let r = f.opts.sys.root.clone();
+        let paths = team_paths(&r);
+        std::fs::write(paths.migrated_port_file(), "10500\n").unwrap();
+        assert_eq!(note(&f), format!("https://{host_name}:10500"), "root's old viewer port");
+
+        let mut meta = cinelog_index::db::open_meta(&DbPaths::in_dir(&paths.db_dir)).unwrap();
+        meta.set_setting(settings_keys::PORT, Some("10003")).unwrap();
+        drop(meta);
+        assert_eq!(
+            note(&f),
+            format!("https://{host_name}:10003"),
+            "the persisted port wins"
+        );
+
+        std::fs::write(
+            r.join(team::CONFIG),
+            "[server]\nhostnames = [\"team.lan\"]\nbind = [\"0.0.0.0:10443\"]\n",
+        )
+        .unwrap();
+        assert_eq!(note(&f), "https://team.lan:10443");
+
+        // A running server knows best.
+        ServerInfo {
+            pid: std::process::id(),
+            url: "https://team.lan:10007".into(),
+            port: 10007,
+            fingerprint: String::new(),
+            version: String::new(),
+        }
+        .write(&paths.runtime_dir)
+        .unwrap();
+        assert_eq!(note(&f), "https://team.lan:10007");
     }
 
     #[test]

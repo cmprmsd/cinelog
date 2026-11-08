@@ -83,7 +83,7 @@ pub fn search(
                 page = pages.next_page()?;
             }
             match picking.finish().context("fzf")? {
-                Picked::Line(line) => enter(&line, &*reader, env, out)?,
+                Picked::Line(line) => enter(&line, args.team, &*reader, env, out)?,
                 // Contract §6.1: 0 or 1; leaving the picker selects nothing.
                 Picked::NoMatch | Picked::Aborted => code::NONE,
             }
@@ -318,8 +318,9 @@ pub fn entry_url(server: &ServerInfo, entry: &EntryRef) -> String {
 }
 
 /// Enter in fzf: the web URL (opened in a local graphical session), or before the web server
-/// exists, the cast path and the `cinelog show` command.
-fn enter(line: &str, reader: &dyn Searcher, env: &Env, out: &mut dyn Write) -> anyhow::Result<u8> {
+/// exists, the cast path and the `cinelog show` command (only `show --team` for a team hit,
+/// whose cast is on the team server).
+fn enter(line: &str, team: bool, reader: &dyn Searcher, env: &Env, out: &mut dyn Write) -> anyhow::Result<u8> {
     let id = line.split('\t').next().unwrap_or_default();
     let entry: EntryRef = id.parse()?;
     if let Some(server) = &env.server {
@@ -328,6 +329,10 @@ fn enter(line: &str, reader: &dyn Searcher, env: &Env, out: &mut dyn Write) -> a
         if env.can_open {
             open_url(&url);
         }
+        return Ok(code::OK);
+    }
+    if team {
+        writeln!(out, "cinelog show --team {entry}")?;
         return Ok(code::OK);
     }
     let session = reader
@@ -719,6 +724,19 @@ mod tests {
         assert_eq!(shown.len(), 1, "one page");
         assert_eq!(shown[0].len(), 2);
         assert!(shown[0].iter().all(|l| l.split('\t').count() == 5));
+    }
+
+    /// A team hit's cast lives on the team server: Enter without a known server URL points
+    /// at `show --team`, not at a local path.
+    #[test]
+    fn enter_prints_show_team_for_team_hits() {
+        let picker = FakePicker {
+            want: Some("grep needle"),
+            ..FakePicker::default()
+        };
+        let (c, out, _) = run(&["needle", "--team"], Ui::Pick(&picker));
+        assert_eq!(c, 0);
+        assert_eq!(out, format!("cinelog show --team {U1}:2\n"));
     }
 
     #[test]

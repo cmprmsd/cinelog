@@ -331,7 +331,12 @@ impl Sandbox {
         for (k, v) in shell {
             s.push_str(&format!("{k} = {v}\n"));
         }
-        s.push_str(&format!("\n[server]\nautostart = \"{}\"\n", opts.autostart));
+        // A `serve` started in the sandbox (autostart, or without --no-http) listens on an
+        // ephemeral loopback port, never on the host's 0.0.0.0:10000+uid.
+        s.push_str(&format!(
+            "\n[server]\nautostart = \"{}\"\nbind = [\"127.0.0.1:0\"]\n",
+            opts.autostart
+        ));
         for line in &opts.extra {
             s.push('\n');
             s.push_str(line);

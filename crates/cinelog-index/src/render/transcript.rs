@@ -208,7 +208,7 @@ pub(crate) struct AvtTranscript {
 
 impl AvtTranscript {
     pub(crate) fn new(cols: u16, rows: u16, opts: RenderOptions) -> Result<Self> {
-        let (cols, rows) = (cols.max(1), rows.max(1));
+        let (cols, rows) = clamp_size(cols, rows);
         Ok(Self {
             term: new_terminal(cols, rows)?,
             opts,
@@ -230,6 +230,11 @@ impl AvtTranscript {
 
     pub(crate) fn restore(state: &TranscriptState, opts: RenderOptions) -> Result<Self> {
         let st: State = serde_json::from_str(&state.state)?;
+        if clamp_size(st.cols, st.rows) != (st.cols, st.rows) {
+            return Err(IndexError::Invalid(
+                "transcript state: terminal size out of range".into(),
+            ));
+        }
         if st.base != state.evicted {
             return Err(IndexError::Invalid("transcript state: evicted counter mismatch".into()));
         }
@@ -272,6 +277,16 @@ impl AvtTranscript {
     fn primary_end(&self) -> u64 {
         self.st.base + occupied(self.term.primary_screen().visible_lines()) as u64
     }
+}
+
+/// Largest terminal the indexer emulates (as the web player serves it): a hostile or broken
+/// `stty cols 65535 rows 65535` would otherwise allocate billions of cells.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 500;
+
+/// A terminal size within `1x1 ..= MAX_COLS x MAX_ROWS`.
+pub(crate) fn clamp_size(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.clamp(1, MAX_COLS), rows.clamp(1, MAX_ROWS))
 }
 
 fn new_terminal(cols: u16, rows: u16) -> Result<Terminal> {
@@ -632,7 +647,7 @@ impl Transcript for AvtTranscript {
     }
 
     fn resize(&mut self, at: Stamp, cols: u16, rows: u16) {
-        let (cols, rows) = (cols.max(1), rows.max(1));
+        let (cols, rows) = clamp_size(cols, rows);
         if (cols, rows) == self.size() {
             return;
         }

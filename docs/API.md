@@ -17,6 +17,17 @@ Live SSE, `/events`, the timeline and annotations are M4 and are only reserved h
   is v6-only). `auto` is 10000 (TEAM) or `10000 + uid` (PERSONAL; hashed into 40000–59999
   above 65535); when taken, the next 16 ports are tried. The chosen port is persisted in
   meta.db `settings.port` and written to `server.json` with the URL and fingerprint.
+- **Certificate:** self-signed (or `server.tls_cert`/`tls_key`), valid for exactly 825 days
+  (notAfter − notBefore, Apple's limit; notBefore is yesterday to allow for clock skew).
+  The SANs are the host names, `server.hostnames` and the *stable* local IPs only: IPv6
+  temporary, deprecated and DAD-failed addresses and every address on a virtual interface
+  (`docker*`, `br-*`, `veth*`, `virbr*`, `vnet*`, `vmnet*`, `vboxnet*`, `lxcbr*`, `lxdbr*`,
+  `incusbr*`, `podman*`, `cni*`, `flannel*`, `cali*`, `kube*`, `tun*`, `tap*`, `wg*`,
+  `tailscale*`, `zt*`, `ppp*`) are left out, so the fingerprint does not change on ordinary
+  restarts. The same stable set drives auto-regeneration (`server.tls_auto_regen`). Those
+  addresses are still accepted as `Host`; to put one in the certificate (for example a
+  WireGuard address), list it in `server.hostnames`. Without a readable
+  `/proc/net/if_inet6` no global IPv6 address goes into the certificate.
 - **JSON:** UTF-8, `Content-Type: application/json`. Field names are snake_case. Every
   field of a response is present; absent values are `null`. Integers are JSON numbers
   (all below 2^53).
@@ -86,15 +97,29 @@ Public routes: `/healthz`, `/link/{uuid}`, `GET`/`POST /api/login` and the SPA a
   manages them; revoking deletes every auth session of that principal.
 - **Login:** `POST /api/login` with `LoginRequest {token}`. Case and surrounding whitespace
   of the token do not matter. Constant-time comparison. At most 5 attempts per minute per
-  client IP (429 with `Retry-After`). Success: **204** and
+  IPv4 address or IPv6 /64 (429 with `Retry-After`); the limiter keeps at most 4096 clients
+  and drops the least recently active ones first. Success: **204** and
   `Set-Cookie: __Host-cl-<port>=<session id>; HttpOnly; Secure; SameSite=Strict; Path=/;
   Max-Age=<absolute TTL>`. The session id is 32 random bytes (base64url); meta.db
   `auth_sessions` stores only its sha256, the principal, the client IP and the sha256 of the
   `User-Agent`. Wrong token: 401.
 - **Sessions:** idle TTL `server.session_idle_hours` (12 h), absolute TTL
-  `server.session_max_days` (7 d). A cookie presented from another client IP or with another
-  `User-Agent` is rejected with 401 and its session is deleted. Tokens and cookie values
-  never appear in URLs or logs. `document.cookie` is empty (HttpOnly).
+  `server.session_max_days` (7 d). A session is bound to the client IP and the sha256 of
+  the `User-Agent` it logged in with:
+  - another `User-Agent`, or another address of the **same** family (including another
+    address in the same IPv6 /64), gets 401 and the session is deleted;
+  - all loopback addresses (`127.0.0.0/8`, `::1`) count as one client, so `localhost`
+    resolving to both does not log the user out;
+  - a request from the **other** family (IPv4 vs IPv6) with the same `User-Agent` gets 401
+    but the session is kept: a dual-stack browser whose happy-eyeballs reconnect uses the
+    other family sees one failed request, not a logout;
+  - a session whose principal no longer has a token (revoked) gets 401 and is deleted.
+
+  IPv6 clients with temporary (privacy) source addresses log in again when their address
+  rotates (about daily with `use_tempaddr=2`). Comparing by /64 was rejected on purpose: the
+  server host often shares the victim's /64, so it would let the cross-port cookie replay
+  of plan §7.2 / Q6 succeed. Tokens and cookie values never appear in URLs or logs.
+  `document.cookie` is empty (HttpOnly).
 - `GET /api/login` (public) → `LoginInfo {version, scope, fingerprint}` for the login page,
   which shows the fingerprint so the user can compare it with what `install` printed.
 - `POST /api/logout` → 204, deletes the session, clears the cookie.
@@ -198,6 +223,21 @@ the range (its `o` events are replaced by one `o` event `[redacted by <by>]`, it
 events dropped). Casts on disk are never rewritten. There is no redaction at index time
 (user decision §15.7).
 
+A command forget (`cmd_seq`, API or `cinelog forget <uuid>:<seq>`) removes the command and
+its output from index.db (the normal command purge). Playback and export mask more: from
+the end of the command before it (the session start for the first one) to its own end, so
+the prompt and the echoed command line are hidden too. That span is playback-only and is
+recorded in meta.db `settings` under `forget_span/<uuid>/<seq>` = `"<from> <to>"` (session
+seconds, `-` for an open end), not as a `range` row, so the daemon's purge never blanks
+other output; `SessionDetail.forgotten` lists only the `command` row, and
+`SessionDetail.masked` (`MaskedSpan {t_from, t_to, by}`) lists every span playback masks, also
+after the command has left index.db (the SPA draws its rail bands from it). The CLI records the
+span before it purges; the server records it the first time it sees a forgotten command
+still in index.db, or recovers it once from a cinelog cast's `cmd`/`done` markers. The
+echoed command line before the command's `cmd` marker belongs to an unattributed index
+chunk, so it stays searchable as output after a command forget; forget the range or the
+session to remove it from search.
+
 ## 6. Playback
 
 1. The client calls `GET /api/sessions/{uuid}/play` → `PlayInfo {mode, url, ready,
@@ -262,10 +302,14 @@ The SPA downloads through `fetch` plus a blob URL, so the cookie applies.
 `cinelog token team-login [--url URL] [--fingerprint SHA256]` reads the member's team token
 (from the terminal without echo, or stdin), logs in once to check it, and stores
 `$XDG_CONFIG_HOME/cinelog/team-token` (0600, TOML: `url`, `token`, `fingerprint`). Without
-`--fingerprint` the first certificate seen is trusted and its fingerprint printed (TOFU).
+`--fingerprint` it first asks the server without a token (`GET /api/login`), shows the
+certificate's fingerprint and asks for confirmation at the terminal (y/N on `/dev/tty`);
+only then is the token read and sent, to that pinned certificate.
 `search --team` then talks HTTPS to that URL with a client that accepts exactly the pinned
 fingerprint: `POST /api/login` (cookie kept in memory), `GET /api/search`, `GET /api/show`
-for the fzf preview. As root, `cinelog search` reads the team DB directly instead.
+for the fzf preview (`cinelog show --team {1}`, a hidden flag). Result URLs (`--json`,
+Enter) point at the team server. As root, `cinelog search` reads the team DB directly
+instead.
 
 ## 9. Reserved for M4
 

@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-cast"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "memchr",
  "proptest",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-core"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "cinelog-proto",
  "getrandom 0.3.4",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-detect"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "cinelog-core",
  "cinelog-detect",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-index"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "avt",
  "cinelog-cast",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-it"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-proto"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "base64 0.22.1",
  "memchr",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-rec"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "cinelog-cast",
  "cinelog-core",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "cinelog-web"
-version = "0.10.0"
+version = "0.12.0"
 dependencies = [
  "async-stream",
  "avt",

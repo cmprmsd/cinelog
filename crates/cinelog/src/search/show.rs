@@ -262,6 +262,7 @@ mod tests {
             id: "../../etc/passwd".into(),
             json: false,
             max_bytes: 10,
+            team: false,
         };
         let r = show(&args, &store, &env(), &mut Vec::new(), &mut Vec::new());
         assert!(r.unwrap_err().to_string().contains("expected <uuid>"));

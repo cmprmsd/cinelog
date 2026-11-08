@@ -1,5 +1,5 @@
 //! The fzf picker of `cinelog search` (§9.5): the hidden first field is the entry id, the
-//! preview runs `cinelog show {1}`.
+//! preview runs `cinelog show {1}` (`show --team {1}` for `search --team`).
 //!
 //! The user's `FZF_DEFAULT_OPTS` (colours, layout, keys) stay in effect. The options that
 //! change what fzf reads or prints are neutralised: `--multi` and `--print-query` are
@@ -46,6 +46,8 @@ pub struct Fzf {
     exe: PathBuf,
     /// The user's fzf defaults turn on `--read0`: lines are fed NUL-terminated.
     read0: bool,
+    /// The entries come from the team server: the preview asks it too.
+    team: bool,
 }
 
 impl Fzf {
@@ -62,12 +64,24 @@ impl Fzf {
             .filter(|p| p.is_file())
             .unwrap_or_else(|| PathBuf::from("cinelog"));
         let read0 = default_opts().is_some_and(|o| reads_nul(&o));
-        Some(Self { bin, exe, read0 })
+        Some(Self {
+            bin,
+            exe,
+            read0,
+            team: false,
+        })
+    }
+
+    /// Previews entries of the team server (`search --team`).
+    pub fn team(mut self, team: bool) -> Self {
+        self.team = team;
+        self
     }
 
     /// fzf's arguments (§9.5).
     pub fn args(&self) -> Vec<OsString> {
-        let preview = format!("{} show {{1}}", shell_quote(&self.exe.to_string_lossy()));
+        let team = if self.team { " --team" } else { "" };
+        let preview = format!("{} show{team} {{1}}", shell_quote(&self.exe.to_string_lossy()));
         [
             "--ansi",
             "--delimiter",
@@ -222,6 +236,7 @@ mod tests {
             bin: "/usr/bin/fzf".into(),
             exe: "/home/a b/.zim/modules/cinelog/bin/cinelog".into(),
             read0: false,
+            team: false,
         };
         let args: Vec<String> = f.args().into_iter().map(|a| a.into_string().unwrap()).collect();
         assert_eq!(
@@ -240,6 +255,13 @@ mod tests {
                 "--no-print-query",
             ]
         );
+        let team: Vec<String> = f
+            .team(true)
+            .args()
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert_eq!(team[6], "'/home/a b/.zim/modules/cinelog/bin/cinelog' show --team {1}");
     }
 
     #[test]
@@ -293,6 +315,7 @@ mod tests {
             bin,
             exe: "cinelog".into(),
             read0: false,
+            team: false,
         }
     }
 

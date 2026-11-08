@@ -22,6 +22,8 @@ pub enum Need {
     Screen,
     Python,
     Script,
+    /// curl with HTTP/2 (the web request matrix of I22).
+    Curl,
     /// `unshare -rm` plus nested `unshare -U --map-user` (I8 full disk, I15).
     UserNs,
     /// A runnable OpenSSH server for the localhost relay case of I6.
@@ -166,6 +168,16 @@ fn check_one(need: Need) -> Result<(), Failure> {
         Need::Screen => tool("screen"),
         Need::Python => tool("python3"),
         Need::Script => tool("script"),
+        Need::Curl => tool("curl").and_then(|()| {
+            let v = std::process::Command::new("curl")
+                .arg("--version")
+                .output()
+                .map_err(|e| e.to_string())?;
+            String::from_utf8_lossy(&v.stdout)
+                .contains("HTTP2")
+                .then_some(())
+                .ok_or_else(|| "curl lacks HTTP/2".into())
+        }),
         Need::UserNs => cached(&USERNS, probe_userns),
         Need::Sshd => cached(&SSHD, || crate::sshd::probe().map_err(Failure::from)),
         Need::Plugin => cached(&PLUGIN, probe_plugin),

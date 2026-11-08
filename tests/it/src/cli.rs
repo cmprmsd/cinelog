@@ -200,8 +200,8 @@ pub fn db_dir_in(state: &Path) -> PathBuf {
     state.join(host_component())
 }
 
-/// A `cinelog serve --no-http` daemon of a sandbox, in its own process group. Dropping it
-/// kills the group.
+/// A `cinelog serve` daemon of a sandbox (`--no-http` unless started with
+/// [`Serve::start_web`]), in its own process group. Dropping it kills the group.
 #[derive(Debug)]
 pub struct Serve {
     child: Child,
@@ -211,6 +211,18 @@ pub struct Serve {
 impl Serve {
     /// Starts `cinelog serve --no-http <extra>`; its stdout and stderr go to `work/<name>.log`.
     pub fn start(sb: &Sandbox, name: &str, extra: &[&str]) -> Result<Self> {
+        let mut args = vec!["--no-http"];
+        args.extend_from_slice(extra);
+        Self::spawn(sb, name, &args)
+    }
+
+    /// Starts `cinelog serve <extra>` with the web server (the sandbox config binds it to an
+    /// ephemeral loopback port).
+    pub fn start_web(sb: &Sandbox, name: &str, extra: &[&str]) -> Result<Self> {
+        Self::spawn(sb, name, extra)
+    }
+
+    fn spawn(sb: &Sandbox, name: &str, args: &[&str]) -> Result<Self> {
         let bin = sb.bin.as_ref().context("this sandbox has no cinelog binary")?;
         let log = sb.work.join(format!("{name}.log"));
         let out = fs::File::create(&log)?;
@@ -218,8 +230,8 @@ impl Serve {
             .env_clear()
             .envs(sb.env())
             .current_dir(&sb.work)
-            .args(["serve", "--no-http"])
-            .args(extra)
+            .arg("serve")
+            .args(args)
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)

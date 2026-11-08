@@ -130,6 +130,8 @@ jobs:
       - if: steps.probe.outputs.present == 'true'
         run: pnpm -C web check
       - if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web lint
+      - if: steps.probe.outputs.present == 'true'
         run: pnpm -C web test
       - if: steps.probe.outputs.present == 'true'
         run: pnpm -C web build
@@ -227,10 +229,14 @@ jobs:
         run: |
           pnpm -C web install --frozen-lockfile
           pnpm -C web exec playwright install --with-deps chromium
-      - if: steps.probe.outputs.present == 'true'
+      - name: E2E against the contract mock
+        if: steps.probe.outputs.present == 'true'
         run: pnpm -C web e2e
+      - name: E2E against a real cinelog serve over the fixture casts
+        if: steps.probe.outputs.present == 'true'
+        run: pnpm -C web exec playwright test
         env:
-          CINELOG_BIN: ${{ github.workspace }}/target/debug/cinelog
+          CINELOG_E2E_BIN: ${{ github.workspace }}/target/debug/cinelog
       - if: failure() && steps.probe.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:

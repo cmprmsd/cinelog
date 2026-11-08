@@ -314,8 +314,12 @@ pub struct SessionDetail {
     /// Oldest first.
     pub markers: Vec<Marker>,
     pub parts: Vec<CastPart>,
-    /// Forgotten ranges of this session; playback shows them masked.
+    /// The `meta.forgotten` rows of this session.
     pub forgotten: Vec<Forgotten>,
+    /// What playback and export mask, by start: forgotten ranges, and each forgotten
+    /// command from the end of the command before it to its own end. Known after the
+    /// command has left index.db, so clients draw these rather than deriving them.
+    pub masked: Vec<MaskedSpan>,
     /// How [`PlayInfo`] will load this session.
     pub play_mode: PlayMode,
 }
@@ -610,6 +614,16 @@ pub struct Forgotten {
     /// Principal who forgot it.
     pub by: String,
     pub at: Seconds,
+}
+
+/// A masked span of a session (session seconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MaskedSpan {
+    pub t_from: Seconds,
+    /// `null`: a forgotten command that has not ended (masked to the end).
+    pub t_to: Option<Seconds>,
+    /// Principal who forgot it.
+    pub by: String,
 }
 
 // ------------------------------------------------------------------ playback
@@ -1052,6 +1066,7 @@ pub fn typescript() -> String {
         ForgetRequest::decl(&cfg),
         ForgetTarget::decl(&cfg),
         Forgotten::decl(&cfg),
+        MaskedSpan::decl(&cfg),
         PlayInfo::decl(&cfg),
         PlayTerm::decl(&cfg),
         PlayTheme::decl(&cfg),

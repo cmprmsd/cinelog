@@ -5,9 +5,9 @@ every command (typed text, expansion, cwd, exit status). One static binary (`cin
 recording; a zim module (`cinelog.plugin.zsh`) starts it and emits the command markers.
 
 Version 0.10 is the first release of the rewrite: recorder, plugin, `link`, `pause`/`resume`,
-`doctor` and `install`. 0.11 adds the index (`cinelog serve --no-http`, live indexing, the
-compressor, the import of old casts) and `cinelog search`/`show`/`forget`; the web UI follows
-in 0.12.
+`doctor` and `install`. 0.11 adds the index (live indexing, the compressor, the import of old
+casts) and `cinelog search`/`show`/`forget`. 0.12 adds the web UI (HTTPS, token login, search,
+segmented playback of large casts, forget and export), the team server and `search --team`.
 The marker protocol and the shell/binary interface are specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Installation
@@ -38,6 +38,9 @@ are no longer needed: `cinelog install` stops a running `http_server.py` of the 
 warns if something else still listens on its port. The indexer runs as
 `~/.config/systemd/user/cinelog.service` (`loginctl enable-linger` keeps it running while you
 are logged out); without systemd, recorded shells start it themselves (`server.autostart`).
+The same process serves the web UI over HTTPS on `10000 + uid` (`server.bind`); `cinelog
+install` prints the login token once and the certificate fingerprint to compare on the login
+page.
 Old casts in `~/logs` are imported read-only on the first run (never written, never
 compressed).
 
@@ -64,14 +67,23 @@ is the installed (possibly older) team binary. Upgrades use `... install --team 
 Team recording is a convenience, not an audit control: pausing and leading-space commands stay
 allowed, and every pause or skip leaves a visible marker.
 
+`install --team` also installs the hardened `cinelog-team.service` (team web server on port
+10000), creates the first named token for the installing user and prints the
+`cinelog token team-login --url … --fingerprint …` command for members. More members:
+`sudo cinelog token new <name>`; `sudo cinelog token revoke <name>` ends that member's web
+sessions. Members then search the team history from their own shell with `cinelog search
+--team`. A separate host name for the team server is recommended (cookies are per host).
+
 ## Usage
 
 | Command | |
 |---|---|
-| `cinelog link [--json]` | session uuid and cast path of the current shell |
+| `cinelog link [--json]` | session uuid, cast path and web URL of the current shell (`shell.title_link = true` also shows the link in the window title) |
 | `cinelog pause [--reason TEXT]`, `cinelog resume` | pause and resume the recording (a pause marker marks the gap); `resume` also continues a recording that stopped on a full disk |
 | `cinelog search [-a] [TERM]` | search commands (and with `-a` their output) in fzf; `--print`/`--json` without fzf; `hist` in a recorded shell is the same |
 | `cinelog show <entry>` | a command with its output (the fzf preview) |
+| `cinelog search --team [TERM]` | the team server's history over HTTPS, after `cinelog token team-login` |
+| `cinelog token new\|list\|revoke`, `cinelog tls show\|regen` | web login tokens; the certificate's fingerprint, names and expiry |
 | `cinelog forget <uuid>[:seq]` | removes a session or command from the index (casts stay on disk) |
 | `cinelog status`, `cinelog import --report` | indexer state; per-file results of the legacy import |
 | `cinelog index --once`, `cinelog index --rebuild` | one-shot indexing, or a rebuild from the casts (meta.db is kept) |
@@ -83,6 +95,20 @@ space leave only a "hidden command" marker. Keystrokes are recorded except at pa
 prompts (echo off, or a prompt ending in `password:`, `passphrase:`, `pin:`, `token:`).
 Configuration lives in `~/.config/cinelog/config.toml`; `cinelog install` writes a commented
 template. `touch ~/.config/cinelog/disable` switches recording off.
+
+## Web UI
+
+`cinelog serve` (the user unit) serves the UI at `https://<host>:<10000+uid>/`; `cinelog link`
+prints the URL of the current session. Sign in with the token `cinelog install` printed (or a
+new one from `cinelog token new`). The certificate is self-signed and valid for 825 days; its
+names are the host names, `server.hostnames` and the stable local addresses (temporary IPv6
+and virtual-interface addresses are left out, add them to `server.hostnames` if needed).
+Sessions are bound to the browser's address and User-Agent and expire after 12 h idle.
+
+Building from source embeds `web/dist` when it exists: `pnpm -C web install --frozen-lockfile
+&& pnpm -C web build`, then `cargo build --release`. `CINELOG_WEB_DIST=<dir>` picks another
+build (a relative path is taken from the repository root); without either the binary serves a
+page that explains how to build the UI.
 
 ## Behaviour notes
 
