@@ -253,7 +253,13 @@ t: number, ts: number, user: string, host: string, pane: string | null, tmux_ses
  * Command hits: `typed` with the matches marked. Output hits: text around the first
  * match. Never empty.
  */
-snippet: Array<SnippetPart>, chunk_kind: ChunkKind | null, approx: boolean, confidence: number | null, legacy: boolean, };
+snippet: Array<SnippetPart>, chunk_kind: ChunkKind | null, approx: boolean, confidence: number | null, legacy: boolean, 
+/**
+ * Tags of the non-deleted annotations on the hit's command (for output hits: the
+ * owning command), sorted and without duplicates; empty for gap output. Span
+ * annotations do not count. Absent from servers before the annotations overview.
+ */
+tags: Array<string>, };
 
 export type SearchResponse = { hits: Array<SearchHit>, next: string | null, 
 /**
@@ -381,6 +387,11 @@ session?: string,
  * Include hidden (`TERM=dumb` legacy) sessions.
  */
 hidden?: boolean, 
+/**
+ * Comma-separated tag names (at most 16): only hits that one non-deleted annotation
+ * carrying all of them is attached to (docs/API.md §5.4).
+ */
+tag?: string, 
 /**
  * 1…500, default 50.
  */
@@ -622,7 +633,44 @@ body: string,
  */
 tags: Array<string>, created_at: number, updated_at: number, deleted_at: number | null, };
 
-export type AnnotationPage = { annotations: Array<Annotation>, next: string | null, };
+export type AnnotationPage = { annotations: Array<Annotation>, next: string | null, 
+/**
+ * With `context=true`: where each annotation of the page sits, by annotation uuid. An
+ * annotation whose session index.db does not have (yet) has no entry. Empty without
+ * `context=true`. Absent from servers before the annotations overview.
+ */
+contexts: { [key in string]: AnnotationContext }, };
+
+export type AnnotationContext = { 
+/**
+ * The session's `user` and `host` (as `Session`).
+ */
+user: string, host: string, 
+/**
+ * tmux pane id (`%7`); `null` outside tmux.
+ */
+pane: string | null, 
+/**
+ * tmux session name.
+ */
+tmux_session: string | null, started_at: number, 
+/**
+ * Command annotations: the command; `null` for span annotations and for a command
+ * index.db does not have.
+ */
+command: AnnotationCommand | null, 
+/**
+ * Wall time of the target: the command's `ts_start`…`ts_end`, or the span's
+ * `t_from`…`t_to` mapped like `TimelineAnnotation` (`started_at + t`, corrected by
+ * `clock` markers). `ts_to` is `null` for a command that is running or never closed.
+ */
+ts_from: number, ts_to: number | null, };
+
+export type AnnotationCommand = { 
+/**
+ * First line of `typed`, cut to 200 characters (as `TimelineBlock.typed`).
+ */
+typed: string, exit: number | null, cwd: string | null, };
 
 export type AnnotationCreate = { session_uuid: string, cmd_seq?: number, t_from?: number, t_to?: number, body?: string, tags?: Array<string>, };
 
@@ -640,6 +688,14 @@ count: number, };
 
 export type TagList = { tags: Array<Tag>, };
 
+export type Author = { name: string, 
+/**
+ * Annotations (not deleted, not gone with a forgotten session or command) they wrote.
+ */
+count: number, };
+
+export type AuthorList = { authors: Array<Author>, };
+
 export type TagRequest = { name: string, color?: string, };
 
 export type TimelineParams = { 
@@ -656,6 +712,8 @@ user?: string, host?: string,
  */
 hidden?: boolean, };
 
+export type SortOrder = "asc" | "desc";
+
 export type AnnotationParams = { 
 /**
  * Session uuid.
@@ -664,7 +722,40 @@ session?: string,
 /**
  * With `session`: one command's annotations.
  */
-cmd_seq?: number, tag?: string, author?: string, 
+cmd_seq?: number, 
+/**
+ * Comma-separated tag names (at most 16): annotations carrying all of them.
+ */
+tag?: string, 
+/**
+ * Exact principal name.
+ */
+author?: string, 
+/**
+ * Only this annotation (uuid).
+ */
+uuid?: string, 
+/**
+ * Body contains this text, case-insensitively (at most 200 characters; blank: no
+ * filter).
+ */
+q?: string, 
+/**
+ * `created_at` lower bound, inclusive.
+ */
+from?: number, 
+/**
+ * `created_at` upper bound, inclusive.
+ */
+to?: number, 
+/**
+ * Default `asc` (oldest first).
+ */
+order?: SortOrder, 
+/**
+ * Fill [`AnnotationPage::contexts`].
+ */
+context?: boolean, 
 /**
  * Include soft-deleted annotations.
  */

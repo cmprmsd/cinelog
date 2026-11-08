@@ -146,6 +146,8 @@ function list(ctx: MockContext, url: URL): AnnotationPage {
   return {
     annotations: rows.filter((a) => !gone(ctx, a)),
     next: rows.length === limit && last ? `${last.created_at}~${last.uuid}` : null,
+    // The overview params (order, q, from/to, tag lists, context) come with the UI work package.
+    contexts: {},
   };
 }
 

@@ -15,6 +15,7 @@
 //! - all text (commands, output, snippets, labels) is untrusted terminal data: render it as
 //!   text nodes, never as HTML.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use cinelog_index::model::{self as im, SNIPPET_CLOSE, SNIPPET_OPEN};
@@ -484,6 +485,11 @@ pub struct SearchHit {
     pub approx: bool,
     pub confidence: Option<f64>,
     pub legacy: bool,
+    /// Tags of the non-deleted annotations on the hit's command (for output hits: the
+    /// owning command), sorted and without duplicates; empty for gap output. Span
+    /// annotations do not count. Absent from servers before the annotations overview.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// `GET /api/search`: newest `ts` first.
@@ -1065,11 +1071,47 @@ pub struct Annotation {
     pub deleted_at: Option<Seconds>,
 }
 
-/// `GET /api/annotations`: oldest `created_at` first.
+/// `GET /api/annotations`: oldest `created_at` first (`order=desc`: newest first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct AnnotationPage {
     pub annotations: Vec<Annotation>,
     pub next: Option<String>,
+    /// With `context=true`: where each annotation of the page sits, by annotation uuid. An
+    /// annotation whose session index.db does not have (yet) has no entry. Empty without
+    /// `context=true`. Absent from servers before the annotations overview.
+    #[serde(default)]
+    pub contexts: BTreeMap<String, AnnotationContext>,
+}
+
+/// Where an annotation sits: its session and its command or span, for lists outside the
+/// session view (the annotations overview).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AnnotationContext {
+    /// The session's `user` and `host` (as `Session`).
+    pub user: String,
+    pub host: String,
+    /// tmux pane id (`%7`); `null` outside tmux.
+    pub pane: Option<String>,
+    /// tmux session name.
+    pub tmux_session: Option<String>,
+    pub started_at: Seconds,
+    /// Command annotations: the command; `null` for span annotations and for a command
+    /// index.db does not have.
+    pub command: Option<AnnotationCommand>,
+    /// Wall time of the target: the command's `ts_start`…`ts_end`, or the span's
+    /// `t_from`…`t_to` mapped like `TimelineAnnotation` (`started_at + t`, corrected by
+    /// `clock` markers). `ts_to` is `null` for a command that is running or never closed.
+    pub ts_from: Seconds,
+    pub ts_to: Option<Seconds>,
+}
+
+/// The annotated command, in an [`AnnotationContext`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AnnotationCommand {
+    /// First line of `typed`, cut to 200 characters (as `TimelineBlock.typed`).
+    pub typed: String,
+    pub exit: Option<i32>,
+    pub cwd: Option<String>,
 }
 
 /// `POST /api/annotations` body: `session_uuid` with `cmd_seq`, or with `t_from` and
@@ -1116,6 +1158,20 @@ pub struct TagList {
     pub tags: Vec<Tag>,
 }
 
+/// One author of annotations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Author {
+    pub name: String,
+    /// Annotations (not deleted, not gone with a forgotten session or command) they wrote.
+    pub count: u64,
+}
+
+/// `GET /api/annotations/authors`: by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AuthorList {
+    pub authors: Vec<Author>,
+}
+
 /// `POST /api/tags` body: creates the tag or sets its colour (absent or `null`: automatic).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
@@ -1153,6 +1209,9 @@ pub struct SearchParams {
     pub session: Option<String>,
     /// Include hidden (`TERM=dumb` legacy) sessions.
     pub hidden: Option<bool>,
+    /// Comma-separated tag names (at most 16): only hits that one non-deleted annotation
+    /// carrying all of them is attached to (docs/API.md §5.4).
+    pub tag: Option<String>,
     /// 1…500, default 50.
     pub limit: Option<u32>,
     pub cursor: Option<String>,
@@ -1231,7 +1290,18 @@ pub struct TimelineParams {
     pub hidden: Option<bool>,
 }
 
-/// Query of `GET /api/annotations`.
+/// `order=` of `GET /api/annotations`, by `(created_at, uuid)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    /// Oldest first (default).
+    #[default]
+    Asc,
+    /// Newest first.
+    Desc,
+}
+
+/// Query of `GET /api/annotations`. All filters combine with AND.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(default)]
@@ -1240,8 +1310,23 @@ pub struct AnnotationParams {
     pub session: Option<String>,
     /// With `session`: one command's annotations.
     pub cmd_seq: Option<u64>,
+    /// Comma-separated tag names (at most 16): annotations carrying all of them.
     pub tag: Option<String>,
+    /// Exact principal name.
     pub author: Option<String>,
+    /// Only this annotation (uuid).
+    pub uuid: Option<String>,
+    /// Body contains this text, case-insensitively (at most 200 characters; blank: no
+    /// filter).
+    pub q: Option<String>,
+    /// `created_at` lower bound, inclusive.
+    pub from: Option<Seconds>,
+    /// `created_at` upper bound, inclusive.
+    pub to: Option<Seconds>,
+    /// Default `asc` (oldest first).
+    pub order: Option<SortOrder>,
+    /// Fill [`AnnotationPage::contexts`].
+    pub context: Option<bool>,
     /// Include soft-deleted annotations.
     pub deleted: Option<bool>,
     /// 1…500, default 200.
@@ -1564,6 +1649,17 @@ pub fn normalize_color(color: &str) -> Result<String, AnnotationRequestError> {
 }
 
 /// Normalised, sorted and de-duplicated tag names.
+/// A `tag=` filter: comma-separated names, each normalised ([`normalize_tag`]), sorted and
+/// without duplicates; empty items are skipped. At most [`MAX_TAGS`].
+pub fn parse_tag_list(list: &str) -> Result<Vec<String>, AnnotationRequestError> {
+    let names: Vec<String> = list
+        .split(',')
+        .filter(|t| !t.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    normalize_tags(&names)
+}
+
 pub fn normalize_tags(tags: &[String]) -> Result<Vec<String>, AnnotationRequestError> {
     let mut out = tags.iter().map(|t| normalize_tag(t)).collect::<Result<Vec<_>, _>>()?;
     out.sort();
@@ -1830,12 +1926,17 @@ pub fn typescript() -> String {
         TimelineAnnotation::decl(&cfg),
         Annotation::decl(&cfg),
         AnnotationPage::decl(&cfg),
+        AnnotationContext::decl(&cfg),
+        AnnotationCommand::decl(&cfg),
         AnnotationCreate::decl(&cfg),
         AnnotationPatch::decl(&cfg),
         Tag::decl(&cfg),
         TagList::decl(&cfg),
+        Author::decl(&cfg),
+        AuthorList::decl(&cfg),
         TagRequest::decl(&cfg),
         TimelineParams::decl(&cfg),
+        SortOrder::decl(&cfg),
         AnnotationParams::decl(&cfg),
     ];
     let mut out = String::from(
@@ -2141,6 +2242,10 @@ mod tests {
             normalize_tags(&["b".into(), "A".into(), "a".into()]),
             Ok(vec!["a".into(), "b".into()])
         );
+        assert_eq!(parse_tag_list(" Ops,,db , ops,"), Ok(vec!["db".into(), "ops".into()]));
+        assert_eq!(parse_tag_list(""), Ok(vec![]));
+        assert_eq!(parse_tag_list("ops,two words"), Err(E::BadTag));
+        assert_eq!(parse_tag_list(&many.join(",")), Err(E::TooManyTags));
         let t = TagRequest {
             name: "Ops".into(),
             color: Some("#ABC".into()),

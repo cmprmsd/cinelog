@@ -783,6 +783,12 @@ impl Searcher for SqliteSearcher {
         if q.limit == 0 {
             return Ok(SearchPage::default());
         }
+        if !q.filters.tags.is_empty() {
+            // Contract only: implemented by the backend work package.
+            return Err(IndexError::Invalid(
+                "the search tag filter is not implemented yet".into(),
+            ));
+        }
         let term = Term::new(&q.term, q.case_sensitive);
         let forget = self.forget_set()?;
         // One read snapshot for every statement of this search.

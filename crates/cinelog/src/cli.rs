@@ -182,6 +182,10 @@ pub struct SearchArgs {
     /// tmux pane id (e.g. `%3`)
     #[arg(long, value_name = "PANE")]
     pub pane: Option<String>,
+    /// Only commands and output an annotation with this tag is attached to; repeat or
+    /// separate with commas: one annotation must carry all of them
+    #[arg(long, value_name = "TAG", value_delimiter = ',')]
+    pub tag: Vec<String>,
     /// Print JSON lines instead of running fzf
     #[arg(long)]
     pub json: bool,

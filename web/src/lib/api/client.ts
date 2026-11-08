@@ -8,6 +8,7 @@ import type {
   AnnotationParams,
   AnnotationPatch,
   ApiError,
+  AuthorList,
   CommandList,
   ErrorCode,
   ExportParams,
@@ -176,6 +177,7 @@ export const api = {
   updateAnnotation: (uuid: string, patch: AnnotationPatch) =>
     request<Annotation>('PATCH', `/api/annotations/${seg(uuid)}`, { body: patch }),
   deleteAnnotation: (uuid: string) => request<void>('DELETE', `/api/annotations/${seg(uuid)}`),
+  annotationAuthors: (signal?: AbortSignal) => get<AuthorList>('/api/annotations/authors', undefined, signal),
   tags: (signal?: AbortSignal) => get<TagList>('/api/tags', undefined, signal),
   putTag: (req: TagRequest) => request<Tag>('POST', '/api/tags', { body: req }),
 };

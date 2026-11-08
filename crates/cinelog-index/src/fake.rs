@@ -459,6 +459,12 @@ fn passes(f: &SearchFilters, s: &SessionMeta, ts: f64, cmd: Option<&Command>) ->
 
 impl Searcher for MemIndex {
     fn search(&self, q: &SearchQuery) -> Result<SearchPage> {
+        if !q.filters.tags.is_empty() {
+            // Contract only: implemented by the backend work package.
+            return Err(IndexError::Invalid(
+                "the search tag filter is not implemented yet".into(),
+            ));
+        }
         let st = self.st();
         let needle = fold(&q.term, q.case_sensitive);
         let mut hits = Vec::new();
@@ -747,13 +753,19 @@ impl MetaStore for MemIndex {
     }
 
     fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
+        // Contract only (annotations overview): implemented by the backend work package.
+        if q.uuid.is_some() || q.text.is_some() || q.since.is_some() || q.until.is_some() || q.newest_first {
+            return Err(IndexError::Invalid(
+                "annotation filters uuid, text, since, until and newest_first are not implemented yet".into(),
+            ));
+        }
         let st = self.st();
         let mut v: Vec<Annotation> = st
             .annotations
             .values()
             .filter(|a| q.sessions.is_empty() || q.sessions.contains(&a.session_uuid))
             .filter(|a| q.cmd_seq.is_none_or(|s| a.cmd_seq == Some(s)))
-            .filter(|a| q.tag.as_ref().is_none_or(|t| a.tags.contains(t)))
+            .filter(|a| q.tags.iter().all(|t| a.tags.contains(t)))
             .filter(|a| q.author.as_ref().is_none_or(|w| a.author == *w))
             .filter(|a| q.include_deleted || a.deleted_at.is_none())
             .filter(|a| {
@@ -784,6 +796,17 @@ impl MetaStore for MemIndex {
                     .filter(|a| a.deleted_at.is_none() && a.tags.contains(name))
                     .count() as u64,
             })
+            .collect())
+    }
+
+    fn authors(&self) -> Result<Vec<AuthorInfo>> {
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for a in self.st().annotations.values().filter(|a| a.deleted_at.is_none()) {
+            *counts.entry(a.author.clone()).or_default() += 1;
+        }
+        Ok(counts
+            .into_iter()
+            .map(|(name, count)| AuthorInfo { name, count })
             .collect())
     }
 

@@ -12,6 +12,7 @@ describe('routes', () => {
     expect(parseRoute('/s/not-a-uuid')).toEqual({ name: 'notfound' });
     expect(parseRoute('/s/%E0%A4%A')).toEqual({ name: 'notfound' });
     expect(parseRoute('/timeline/')).toEqual({ name: 'timeline' });
+    expect(parseRoute('/annotations')).toEqual({ name: 'annotations' });
     expect(parseRoute(`/live/${U.toUpperCase()}`)).toEqual({ name: 'live', uuid: U });
     expect(parseRoute('/live/x')).toEqual({ name: 'notfound' });
     expect(parseRoute('/timeline/x')).toEqual({ name: 'notfound' });

@@ -1633,7 +1633,7 @@ fn check_annotation_queries(m: &mut dyn MetaStore) {
     assert_eq!(uuids(&q), ["a4"]);
     let q = AnnotationQuery {
         sessions: vec![U1.into(), U2.into()],
-        tag: Some("ops".into()),
+        tags: vec!["ops".into()],
         ..all.clone()
     };
     assert_eq!(uuids(&q), ["a1", "a3"]);

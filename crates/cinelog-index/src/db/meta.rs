@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::U64;
 use crate::api::MetaStore;
 use crate::error::{IndexError, Result};
-use crate::model::{Annotation, AnnotationQuery, ForgetTarget, Forgotten, TagInfo};
+use crate::model::{Annotation, AnnotationQuery, AuthorInfo, ForgetTarget, Forgotten, TagInfo};
 use crate::schema::{self, Access, DbKind};
 
 pub(crate) struct SqliteMeta {
@@ -329,6 +329,12 @@ impl MetaStore for SqliteMeta {
     }
 
     fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
+        // Contract only (annotations overview): implemented by the backend work package.
+        if q.uuid.is_some() || q.text.is_some() || q.since.is_some() || q.until.is_some() || q.newest_first {
+            return Err(IndexError::Invalid(
+                "annotation filters uuid, text, since, until and newest_first are not implemented yet".into(),
+            ));
+        }
         let mut clauses = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let mut arg = |clause: &str, value: Box<dyn rusqlite::ToSql>| {
@@ -344,7 +350,7 @@ impl MetaStore for SqliteMeta {
         if let Some(seq) = q.cmd_seq {
             arg("cmd_seq = ?", Box::new(U64(seq)));
         }
-        if let Some(tag) = &q.tag {
+        for tag in &q.tags {
             arg(
                 "id IN (SELECT a.annotation_id FROM annotation_tags a JOIN tags t ON t.id = a.tag_id WHERE t.name = ?)",
                 Box::new(tag.clone()),
@@ -376,6 +382,19 @@ impl MetaStore for SqliteMeta {
 
     fn tags(&self) -> Result<Vec<TagInfo>> {
         read_tags(&self.conn, "")
+    }
+
+    fn authors(&self) -> Result<Vec<AuthorInfo>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT author, count(*) FROM annotations WHERE deleted_at IS NULL GROUP BY author ORDER BY author",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(AuthorInfo {
+                name: r.get(0)?,
+                count: super::u64_at(r, 1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo> {

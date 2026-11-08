@@ -144,6 +144,9 @@ impl Remote {
         if f.include_hidden {
             p.push(("hidden", "true".into()));
         }
+        if !f.tags.is_empty() {
+            p.push(("tag", f.tags.join(",")));
+        }
         p.push(("limit", q.limit.clamp(1, MAX_LIMIT).to_string()));
         if let Some(c) = q.cursor {
             let cursors = self.cursors.lock().expect("cursor lock");
@@ -493,6 +496,7 @@ mod tests {
             approx: false,
             confidence: None,
             legacy: false,
+            tags: Vec::new(),
         }
     }
 

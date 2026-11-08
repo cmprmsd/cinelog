@@ -1,11 +1,13 @@
 // Client routes (plan §8): `/login`, `/` (search), `/s/<uuid>` (session, `?t=` or `?cmd=`),
-// `/timeline` (M4-B, `?from=&to=&group=`), `/live/<uuid>` (M4-D).
+// `/timeline` (M4-B, `?from=&to=&group=`), `/live/<uuid>` (M4-D), `/annotations` (the
+// annotations overview, `?tag=&author=&q=&date=&from=&to=`, docs/API.md §9.6).
 
 export type Route =
   | { name: 'login' }
   | { name: 'search' }
   | { name: 'session'; uuid: string }
   | { name: 'timeline' }
+  | { name: 'annotations' }
   | { name: 'live'; uuid: string }
   | { name: 'notfound' };
 
@@ -20,6 +22,7 @@ export function parseRoute(path: string): Route {
   if (p === '/') return { name: 'search' };
   if (p === '/login') return { name: 'login' };
   if (p === '/timeline') return { name: 'timeline' };
+  if (p === '/annotations') return { name: 'annotations' };
   const m = /^\/(s|live)\/([^/]+)$/.exec(p);
   if (m?.[2]) {
     let id: string;

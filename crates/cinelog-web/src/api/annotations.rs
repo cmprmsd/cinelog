@@ -6,6 +6,7 @@
 //! | `POST /annotations` | `AnnotationCreate` | 201 `Annotation` |
 //! | `PATCH /annotations/{uuid}` | `AnnotationPatch` | `Annotation` |
 //! | `DELETE /annotations/{uuid}` | | 204 |
+//! | `GET /annotations/authors` | | `AuthorList` |
 //! | `GET /tags` | | `TagList` |
 //! | `POST /tags` | `TagRequest` | `Tag` |
 //!
@@ -32,7 +33,8 @@ use super::search::limit;
 use super::sessions::visible_session;
 use super::types::{
     Annotation, AnnotationCreate, AnnotationEvent, AnnotationPage, AnnotationParams, AnnotationPatch,
-    AnnotationRequestError, BusEvent, ChangeOp, Tag, TagList, TagRequest, normalize_tag,
+    AnnotationRequestError, Author, AuthorList, BusEvent, ChangeOp, SortOrder, Tag, TagList, TagRequest,
+    parse_tag_list,
 };
 use crate::bus::Bus;
 use crate::error::{Result, WebError};
@@ -41,12 +43,15 @@ use crate::state::{AppState, Principal, WebContext};
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/annotations", get(list).post(create))
+        .route("/annotations/authors", get(authors))
         .route("/annotations/{uuid}", patch(update).delete(delete))
         .route("/tags", get(tags).post(put_tag))
 }
 
 const DEFAULT_LIMIT: u32 = 200;
 const MAX_LIMIT: u32 = 500;
+/// Longest `q` body filter, in characters.
+const MAX_TEXT_CHARS: usize = 200;
 
 /// Serialises this server's read-modify-write cycles on annotations (an `add_tags` racing
 /// an edit must not lose either change) and their publication, so the bus carries changes
@@ -104,6 +109,10 @@ async fn delete(
 ) -> Result<StatusCode> {
     blocking(move || delete_annotation(&st.ctx, &st.bus, &uuid, &by, now_us)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authors(State(st): State<AppState>) -> Result<Json<AuthorList>> {
+    blocking(move || author_list(&st.ctx)).await.map(Json)
 }
 
 async fn tags(State(st): State<AppState>) -> Result<Json<TagList>> {
@@ -247,16 +256,43 @@ fn query_of(p: &AnnotationParams) -> Result<AnnotationQuery> {
     if p.cmd_seq.is_some() && session.is_none() {
         return Err(WebError::BadRequest("cmd_seq needs session".into()));
     }
+    let text = p.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    if text.is_some_and(|q| q.chars().count() > MAX_TEXT_CHARS) {
+        return Err(WebError::BadRequest(format!(
+            "q is at most {MAX_TEXT_CHARS} characters"
+        )));
+    }
+    for (name, v) in [("from", p.from), ("to", p.to)] {
+        if v.is_some_and(|v| !v.is_finite()) {
+            return Err(WebError::BadRequest(format!("{name} must be a finite number")));
+        }
+    }
+    if let (Some(from), Some(to)) = (p.from, p.to)
+        && from > to
+    {
+        return Err(WebError::BadRequest("from must not be after to".into()));
+    }
     Ok(AnnotationQuery {
         sessions: session.into_iter().collect(),
         cmd_seq: p.cmd_seq,
-        tag: p.tag.as_deref().map(normalize_tag).transpose().map_err(bad)?,
+        tags: p
+            .tag
+            .as_deref()
+            .map(parse_tag_list)
+            .transpose()
+            .map_err(bad)?
+            .unwrap_or_default(),
         author: p
             .author
             .as_deref()
             .map(str::trim)
             .filter(|a| !a.is_empty())
             .map(str::to_owned),
+        uuid: p.uuid.as_deref().map(parse_annotation_uuid).transpose()?,
+        text: text.map(str::to_owned),
+        since: p.from,
+        until: p.to,
+        newest_first: p.order.unwrap_or_default() == SortOrder::Desc,
         include_deleted: p.deleted.unwrap_or(false),
         after: p
             .cursor
@@ -287,7 +323,29 @@ fn list_page(ctx: &WebContext, p: &AnnotationParams) -> Result<AnnotationPage> {
             annotations.push(Annotation::from(a));
         }
     }
-    Ok(AnnotationPage { annotations, next })
+    // Contract only: `context=true` is filled by the backend work package.
+    Ok(AnnotationPage {
+        annotations,
+        next,
+        contexts: Default::default(),
+    })
+}
+
+/// Every author with the number of annotations they wrote.
+// Contract only: leaving out annotations gone with a forgotten session or command (as
+// `tag_list` does) is the backend work package's.
+fn author_list(ctx: &WebContext) -> Result<AuthorList> {
+    let meta = cinelog_index::db::open_meta(&ctx.db)?;
+    Ok(AuthorList {
+        authors: meta
+            .authors()?
+            .into_iter()
+            .map(|a| Author {
+                name: a.name,
+                count: a.count,
+            })
+            .collect(),
+    })
 }
 
 /// Every tag with the number of annotations that carry it, leaving out the ones that are
@@ -1041,7 +1099,7 @@ mod tests {
         assert_eq!(err["error"], "unavailable");
         assert_eq!(
             get(&kit, "/annotations").await,
-            json!({"annotations": [], "next": null})
+            json!({"annotations": [], "next": null, "contexts": {}})
         );
         assert_eq!(get(&kit, "/tags").await, json!({"tags": []}));
     }

@@ -143,6 +143,7 @@ pub fn build_query(args: &SearchArgs, env: &Env) -> anyhow::Result<SearchQuery> 
         pane: args.pane.clone(),
         session: None,
         include_hidden: false,
+        tags: cinelog_web::api::types::normalize_tags(&args.tag).map_err(|e| anyhow::anyhow!("--tag: {e}"))?,
     };
     Ok(q)
 }

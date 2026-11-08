@@ -4,7 +4,8 @@ use cinelog_index::model::{self as im, Cursor, EntryRef, ExitFilter, SearchFilte
 
 use super::db::{self, IndexDb};
 use super::types::{
-    Command, Entry, SearchHit, SearchIn, SearchParams, SearchResponse, ShowParams, SnippetPart, split_snippet,
+    Command, Entry, SearchHit, SearchIn, SearchParams, SearchResponse, ShowParams, SnippetPart, parse_tag_list,
+    split_snippet,
 };
 use crate::error::{Result, WebError};
 use crate::state::WebContext;
@@ -57,6 +58,13 @@ pub(crate) fn query(p: &SearchParams) -> Result<SearchQuery> {
             pane: p.pane.clone(),
             session: p.session.as_deref().map(db::parse_uuid).transpose()?,
             include_hidden: p.hidden.unwrap_or(false),
+            tags: p
+                .tag
+                .as_deref()
+                .map(parse_tag_list)
+                .transpose()
+                .map_err(|e| WebError::BadRequest(e.to_string()))?
+                .unwrap_or_default(),
         },
         limit: limit(p.limit, DEFAULT_LIMIT, MAX_LIMIT)?,
         cursor,
@@ -126,6 +134,8 @@ fn hit(
         approx: h.approx,
         confidence: h.confidence,
         legacy,
+        // Contract only: filled by the backend work package.
+        tags: Vec::new(),
     }
 }
 

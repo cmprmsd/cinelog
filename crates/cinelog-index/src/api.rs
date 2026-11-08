@@ -6,9 +6,9 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::model::{
-    Annotation, AnnotationQuery, Checkpoint, Chunk, CompressCandidate, CompressionUpdate, EntryDetail, ForgetOutcome,
-    ForgetTarget, Forgotten, IndexBatch, IndexStatus, KnownCast, LegacyImportRow, OnceOptions, OnceSummary,
-    OutputStats, Owner, PollBudget, SearchPage, SearchQuery, SessionState, SessionSummary, Stamp, TagInfo,
+    Annotation, AnnotationQuery, AuthorInfo, Checkpoint, Chunk, CompressCandidate, CompressionUpdate, EntryDetail,
+    ForgetOutcome, ForgetTarget, Forgotten, IndexBatch, IndexStatus, KnownCast, LegacyImportRow, OnceOptions,
+    OnceSummary, OutputStats, Owner, PollBudget, SearchPage, SearchQuery, SessionState, SessionSummary, Stamp, TagInfo,
     TranscriptState,
 };
 
@@ -123,10 +123,13 @@ pub trait MetaStore: Send {
     fn annotations(&self, session_uuid: &str) -> Result<Vec<Annotation>>;
     /// One annotation by uuid, soft-deleted ones included.
     fn annotation(&self, uuid: &str) -> Result<Option<Annotation>>;
-    /// Annotations matching `query`, ordered by `(created_at, uuid)`.
+    /// Annotations matching `query`, ordered by `(created_at, uuid)` (descending with
+    /// `newest_first`).
     fn find_annotations(&self, query: &AnnotationQuery) -> Result<Vec<Annotation>>;
     /// Every tag, by name.
     fn tags(&self) -> Result<Vec<TagInfo>>;
+    /// Every author of a non-deleted annotation, by name.
+    fn authors(&self) -> Result<Vec<AuthorInfo>>;
     /// Creates the tag if needed and sets its colour (`None`: automatic). Names are stored
     /// as given (trimmed); callers normalise them.
     fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo>;

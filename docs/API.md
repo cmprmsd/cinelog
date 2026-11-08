@@ -159,12 +159,13 @@ All paths below `/api` need a session (§4).
 | `POST /api/annotations` | `AnnotationCreate` | 201 `Annotation` |
 | `PATCH /api/annotations/{uuid}` | `AnnotationPatch` | `Annotation` |
 | `DELETE /api/annotations/{uuid}` | | 204 |
+| `GET /api/annotations/authors` | | `AuthorList` (§9.4) |
 | `GET /api/tags` | | `TagList` |
 | `POST /api/tags` | `TagRequest` | `Tag` |
 
 Every other non-`/api` path serves the SPA: an existing asset, else `index.html` for paths
 without a file extension (client routes `/login`, `/`, `/s/{uuid}?t=|cmd=`, `/timeline`,
-`/live/{uuid}`), else 404.
+`/annotations`, `/live/{uuid}`), else 404.
 Assets under `/assets/` are content-hashed and `Cache-Control: public, max-age=31536000,
 immutable`; everything else `no-cache`, with an `ETag`.
 
@@ -215,6 +216,28 @@ parent's `children`. Filters: `from`/`to` (sessions active in the window: starte
 - Filters: `user`, `host`, `from`/`to` (`ts`, inclusive), `exit` (`<n>`, `ok`, `fail`;
   `null` exits never match `fail`), `cwd` (prefix: that directory and its subdirectories;
   a trailing `/` is ignored, `/` matches every cwd), `pane`, `session`, `hidden`.
+- `tag`: comma-separated tag names (each normalised like annotation tags, §9.4; at most 16;
+  a malformed name or more than 16 is 400; empty items are skipped). Only hits that **one**
+  non-deleted annotation carrying **all** listed tags is attached to (AND within one
+  annotation, not across several):
+  - a command hit: a command annotation on that command, or a span annotation of the same
+    session whose `t_from`…`t_to` overlaps the command's `t_start`…`t_end` (closed
+    intervals; `t_end: null` counts as open-ended);
+  - an output hit: a command annotation on its owning command, or a span annotation of the
+    same session with `t_from ≤ t ≤ t_to` (the chunk's `t`); gap output only by spans.
+
+  Annotations gone with a forgotten session or command never count. No matching
+  annotation (also an unknown tag) is an empty page with `next: null`, not an error. It
+  combines with `q` and every other filter (empty `q`: the newest annotated commands).
+  The searcher resolves the matching annotations from meta.db once per request (the
+  read-only connection it already holds for `meta.forgotten`) and restricts the index.db
+  candidates to their sessions and targets (a JSON parameter through `json_each`; no
+  `ATTACH`, no cross-database join), so the p95 of a tagged search stays that of an untagged
+  one. At most the newest 10 000 matching annotations are considered; beyond that `capped`
+  is `true`. Cursors are unchanged (`ts`, kind, id); the set is resolved again for every
+  page, so an annotation added or removed between pages can add or drop later hits but never
+  repeats one. `cinelog search --tag TAG` (repeatable or comma-separated, same semantics)
+  applies it to the local database and, with `--team`, sends it as `tag=`.
 - `limit` 1–500, default 50; `cursor`.
 - Order: newest `ts` first. `partial`: a term under 3 characters ran the 500 ms
   newest-first scan and stopped early. `capped`: more than 5000 candidates, refine.
@@ -226,6 +249,11 @@ parent's `children`. Filters: `from`/`to` (sessions active in the window: starte
 - `SearchHit.t` is the seek position (command start, or the output chunk's first write);
   `id` (`c:<n>` / `o:<n>`) is a stable list key; results of one command can be grouped by
   `(session, cmd_seq)`.
+- `SearchHit.tags`: the tags of the non-deleted command annotations on the hit's command
+  (output hits: the owning command), sorted, without duplicates; `[]` for gap output and
+  unannotated commands. Span annotations do not count here (they are not tied to a
+  command). One meta.db lookup per page. Clients show them as tag chips; older servers
+  omit the field (the team client defaults it to `[]`).
 
 ### 5.5 Show
 `GET /api/show?entry=<uuid>[:<seq>|@<t>]&max_bytes=` → `Entry`: the session, the command
@@ -487,9 +515,42 @@ Stored in meta.db (authoritative, keyed by session uuid and command seq, so they
 - **Tags:** normalised by `normalize_tag`: trimmed, lowercase, 1–40 letters, digits or
   `- _ . : / + # @`; at most 16 per annotation, stored sorted. Colours `#rrggbb`
   (`normalize_color` also takes `#rgb`); `null` means the client derives one from the name.
-- `GET /api/annotations` (`AnnotationParams`): filters `session`, `cmd_seq`, `tag`, `author`;
-  soft-deleted ones only with `deleted=true`; oldest `created_at` first (uuid breaks ties);
-  `limit` 1–500, default 200; `next` cursor.
+- `GET /api/annotations` (`AnnotationParams`): every filter combines with AND; soft-deleted
+  ones only with `deleted=true`; `limit` 1–500, default 200; `next` cursor. Malformed
+  values are 400 `bad_request` (`ApiError.message` names the parameter).
+  - `session` (uuid), `cmd_seq` (with `session`, else 400).
+  - `tag`: comma-separated names, each normalised (`normalize_tag`, so `Ops` finds `ops`),
+    at most 16 (`api::types::parse_tag_list`); an annotation matches when it carries
+    **every** listed tag. A single name works as before; empty items are skipped.
+  - `author`: exact principal name (trimmed; blank: no filter).
+  - `uuid`: only that annotation (still subject to the other filters). The overview uses it
+    with `context=true` to add a row announced by the bus.
+  - `q`: the body contains this text, case-insensitively (Unicode lowercase on both sides;
+    trimmed; blank: no filter; more than 200 characters: 400). Tags and context are not
+    searched. Clients that match bus events locally use
+    `body.toLowerCase().includes(q.trim().toLowerCase())`.
+  - `from`/`to`: `created_at` bounds, inclusive; finite, `from ≤ to`.
+  - `order`: `asc` (default: oldest `created_at` first, uuid ascending breaks ties; the
+    session panel relies on it) or `desc` (newest first, uuid descending).
+  - `context=true` fills `AnnotationPage.contexts` (`AnnotationContext` by annotation uuid)
+    for the returned annotations; otherwise it is `{}`. One batched index.db lookup per page
+    (sessions by uuid, commands by `(session, seq)`, `clock` markers for spans): `user`,
+    `host`, `pane`, `tmux_session` and `started_at` of the session; `command {typed (first
+    line, ≤ 200 characters), exit, cwd}` for a command annotation; `ts_from`/`ts_to` the
+    target in wall time (the command's `ts_start`…`ts_end`, or the span mapped like
+    `TimelineAnnotation`). An annotation whose session index.db does not have (yet, e.g.
+    during `index --rebuild`) has no entry; one whose command it does not have gets
+    `command: null`, `ts_from = started_at` and `ts_to: null`. Hidden sessions are
+    included.
+  - Cursors: opaque (`<created_at>~<uuid>` of the last row read), keyset in the requested
+    order, valid only with the same parameters (including `order`). Rows written after the
+    first page never shift later pages; with `order=desc` new rows appear only on a fresh
+    first page (the bus adds them, below). Annotations gone with a forgotten session or
+    command are dropped after the limit, so a page may hold fewer than `limit` rows, even
+    none, while `next` is not `null`: keep following `next`.
+- `GET /api/annotations/authors` → `AuthorList`: every author of a non-deleted
+  annotation, by name, `count` like `Tag.count` (annotations gone with a forgotten session or
+  command left out). The overview's author picker.
 - `POST /api/annotations` (`AnnotationCreate`, validated by `AnnotationCreate::validate`):
   `author` is the principal, `uuid` a new UUIDv7. 404 when the session is unknown or
   forgotten or `cmd_seq` is not one of its commands. 201 with the `Annotation`.
@@ -510,6 +571,15 @@ Stored in meta.db (authoritative, keyed by session uuid and command seq, so they
 - **SPA:** the annotations panel attaches to the current command or the rail selection (`a`),
   lists the session's annotations with author and time, offers tag autocomplete from
   `/api/tags`, shows edit and delete only to the author, and gives the rail its spans.
+- **Overview** (`/annotations`, §9.6): `GET /api/annotations?order=desc&context=true` with
+  the filters from the URL, `limit` 50, following `next` on scroll. Bus `annotation`:
+  `created` that matches the filters locally (tags ⊇ filter, author, `q` as above,
+  `from`/`to` on `created_at`) → fetch `?uuid=<uuid>&context=true` and insert it in
+  `(created_at, uuid)` descending order; `updated` → replace a listed row in place (its
+  context cannot change: the target is fixed), drop it when it no longer matches, fetch and
+  insert it when it now matches but is not listed (e.g. after `add_tags`); `deleted` →
+  remove. Bus `tag` → refresh `/api/tags` (picker counts, chip colours); `forgotten` and a
+  fresh `hello` → reload from the first page.
 
 ### 9.5 Export UI
 The export endpoint is §7. The session view's export menu (`web/src/lib/export/`) offers
@@ -522,7 +592,27 @@ comes from `Content-Disposition`. `e` opens the menu.
 ### 9.6 SPA wiring (contracts; the packages fill in the components)
 - **Routes** (`lib/route.ts`): `/timeline` → `routes/timeline/TimelinePage.svelte` (no
   props); `/live/{uuid}` → `lib/live/LivePage.svelte` (`{uuid}`; root element keeps
-  `data-testid="live-page"` and `data-uuid`). The header has Search and Timeline tabs.
+  `data-testid="live-page"` and `data-uuid`); `/annotations` →
+  `routes/annotations/AnnotationsPage.svelte` (no props; root element
+  `data-testid="annotations-page"`). The header has Search, Timeline and Annotations tabs
+  (`data-testid="nav-annotations"`; in the compact header like the others).
+- **Annotations overview URL:** `/annotations?tag=<a,b>&author=<name>&q=<text>&date=<preset>&from=<epoch>&to=<epoch>`.
+  `tag` comma-separated (AND, as the API), `author` exact, `q` body text, `date` one of
+  `any` (default), `today`, `7d`, `30d`, `custom` with `from`/`to` (epoch seconds, only
+  with `custom`), as on the search page, all on `created_at`. Empty values are left out.
+  A filter change pushes a history entry (back/forward restore the filters); typing in `q`
+  replaces the entry (debounced, like the search field). A row is one annotation, newest
+  first: author, tag chips (clicking one adds it to `tag`), created and (when different)
+  updated time in the UI time zone, the first lines of the body as text (never HTML),
+  and the context (`user@host`, session start, pane, the command with its exit status or
+  the span's time range). Its link is `sessionHref(session, {cmd: cmd_seq})` for a command
+  annotation and `sessionHref(session, {t: t_from})` for a span (no search state kept).
+  Keys: `j`/`k` move, `Enter` opens, `o` opens in a new tab (the result actions of
+  `lib/keys.ts`). Empty state (no annotations at all vs. none matching the filters, with
+  a reset) and an error state with retry.
+- **Search tag filter URL:** `tag=<a,b>` on `/` (`lib/filters.ts` `SearchState.tags`,
+  sent as `SearchParams.tag`); tag chips on annotated results (`SearchHit.tags`) add their
+  tag to the filter.
 - **Keys** (`lib/keys.ts`): `t` timeline, `l` recording ↔ live view of the same session,
   `a` annotate (`AnnotationsPanel.annotate()`), `e` export (`ExportMenu.open()`).
 - **Sidebar:** live sessions from the bus (status badge when paused or degraded), each
@@ -536,7 +626,8 @@ comes from `Content-Disposition`. `e` opens the menu.
   is what the rail draws. A bus `forgotten` for the open session reloads it.
 - **Signed-in principal:** `lib/principal.svelte.ts` (`principal.me`), set by `App`.
 - **API client** (`lib/api/client.ts`): `liveUrl`, `timeline`, `annotations`,
-  `createAnnotation`, `updateAnnotation`, `deleteAnnotation`, `tags`, `putTag`.
+  `createAnnotation`, `updateAnnotation`, `deleteAnnotation`, `annotationAuthors`, `tags`,
+  `putTag`.
 
 ### 9.7 E2E mock
 `web/e2e/mock/server.ts` serves `/api/events` (a `hello` with the live fixtures, and every

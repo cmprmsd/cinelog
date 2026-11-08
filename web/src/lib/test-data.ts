@@ -25,6 +25,7 @@ export function hit(over: Partial<SearchHit> = {}): SearchHit {
     approx: false,
     confidence: null,
     legacy: false,
+    tags: [],
     ...over,
   };
 }

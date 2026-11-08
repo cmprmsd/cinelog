@@ -227,6 +227,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
           approx: c.approx ?? false,
           confidence: c.confidence ?? null,
           legacy: s.legacy,
+          tags: [] as string[],
         };
         if (mode !== 'out' && (!q || match(c.typed) || match(c.cwd))) {
           hits.push({ ...common, id: `c:${s.uuid}:${c.seq}`, kind: 'command', t: c.t_start, snippet: markMatches(c.typed, q, cs), chunk_kind: null });

@@ -854,21 +854,38 @@ pub struct Annotation {
     pub deleted_at: Option<f64>,
 }
 
-/// Filter of `MetaStore::find_annotations`; results are ordered by `(created_at, uuid)`.
+/// Filter of `MetaStore::find_annotations`; results are ordered by `(created_at, uuid)`,
+/// ascending, or descending with `newest_first`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AnnotationQuery {
     /// Only annotations of these sessions; empty means every session.
     pub sessions: Vec<String>,
     pub cmd_seq: Option<Seq>,
-    /// Only annotations carrying this tag (exact name).
-    pub tag: Option<String>,
+    /// Only annotations carrying every one of these tags (exact names); empty: no filter.
+    pub tags: Vec<String>,
     pub author: Option<String>,
+    /// Only the annotation with this uuid.
+    pub uuid: Option<String>,
+    /// Body contains this text, case-insensitively (Unicode lowercase on both sides).
+    pub text: Option<String>,
+    /// `created_at` bounds, inclusive.
+    pub since: Option<f64>,
+    pub until: Option<f64>,
     /// Include soft-deleted annotations.
     pub include_deleted: bool,
-    /// Keyset cursor: only rows strictly after this `(created_at, uuid)`.
+    /// Newest `(created_at, uuid)` first.
+    pub newest_first: bool,
+    /// Keyset cursor: only rows strictly after this `(created_at, uuid)` in the order above.
     pub after: Option<(f64, String)>,
     /// At most this many rows; 0 means no limit.
     pub limit: usize,
+}
+
+/// An annotation author with the number of annotations (not soft-deleted) they wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorInfo {
+    pub name: String,
+    pub count: u64,
 }
 
 /// A `tags` row with the number of annotations (not soft-deleted) that carry it.
@@ -946,6 +963,9 @@ pub struct SearchFilters {
     pub session: Option<String>,
     /// Include `sessions.hidden = 1`.
     pub include_hidden: bool,
+    /// Normalised tag names: only hits that one non-deleted annotation carrying all of them
+    /// is attached to (docs/API.md §5.4); empty: no filter.
+    pub tags: Vec<String>,
 }
 
 /// Pagination cursor `(ts, kind, id)`, ordered by `ts DESC, id DESC` (§6.5).
