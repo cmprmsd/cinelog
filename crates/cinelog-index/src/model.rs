@@ -852,6 +852,32 @@ pub struct Annotation {
     pub deleted_at: Option<f64>,
 }
 
+/// Filter of `MetaStore::find_annotations`; results are ordered by `(created_at, uuid)`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AnnotationQuery {
+    /// Only annotations of these sessions; empty means every session.
+    pub sessions: Vec<String>,
+    pub cmd_seq: Option<Seq>,
+    /// Only annotations carrying this tag (exact name).
+    pub tag: Option<String>,
+    pub author: Option<String>,
+    /// Include soft-deleted annotations.
+    pub include_deleted: bool,
+    /// Keyset cursor: only rows strictly after this `(created_at, uuid)`.
+    pub after: Option<(f64, String)>,
+    /// At most this many rows; 0 means no limit.
+    pub limit: usize,
+}
+
+/// A `tags` row with the number of annotations (not soft-deleted) that carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagInfo {
+    pub name: String,
+    /// `#rrggbb`, or `None` for the automatic colour.
+    pub color: Option<String>,
+    pub count: u64,
+}
+
 // ------------------------------------------------------------------ search
 
 /// Which tables a search covers.

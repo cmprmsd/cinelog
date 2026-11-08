@@ -13,9 +13,10 @@ test.describe('shell', () => {
     // The nested sudo session sits under its parent.
     const parent = tree.locator(`li:has(> a[href="/s/${FIX.needle}"])`);
     await expect(parent.locator(`a[href="/s/${FIX.nested}"]`)).toBeVisible();
+    // A live session opens the live view.
     await live.getByRole('link').first().click();
-    await expect(page).toHaveURL(new RegExp(`/s/${FIX.live}$`));
-    await expect(page.getByTestId('session-view')).toHaveAttribute('data-uuid', FIX.live);
+    await expect(page).toHaveURL(new RegExp(`/live/${FIX.live}$`));
+    await expect(page.getByTestId('live-page')).toHaveAttribute('data-uuid', FIX.live);
   });
 
   test('theme toggle switches and persists; both themes render', async ({ page }) => {

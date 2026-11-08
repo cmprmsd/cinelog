@@ -1,12 +1,13 @@
-# cinelog web API, version 1 (M3)
+# cinelog web API, version 1 (M3, M4)
 
 The HTTPS interface of `cinelog serve` (one server per scope: PERSONAL per user, TEAM for
 root shells). The wire types live in `crates/cinelog-web/src/api/types.rs` and are generated
 to `web/src/lib/api/types.ts` (`CINELOG_WRITE_TS=1 cargo test -p cinelog-web --lib
 api::types`; CI fails when the TS file is stale). Type names below are those types.
 
-Frozen for M3 by the contracts work package (M3-0). Changes are additive and go through it.
-Live SSE, `/events`, the timeline and annotations are M4 and are only reserved here (§9).
+Frozen for M3 by the contracts work package (M3-0) and extended for M4 (M4-0): live viewing,
+the UI bus, the timeline, annotations and tags, the export and live UI (§9). Changes are
+additive and go through the contracts owner.
 
 ---
 
@@ -54,7 +55,7 @@ humans and never contains tokens, terminal content, SQL or paths.
 |---|---|---|
 | `bad_request` | 400 | malformed parameter or body; Host outside the allowlist |
 | `unauthorized` | 401 | no, expired, revoked or rebound session cookie; wrong token |
-| `forbidden` | 403 | `Origin` mismatch on a mutating request |
+| `forbidden` | 403 | `Origin` mismatch on a mutating request; changing another principal's annotation (§9.4) |
 | `not_found` | 404 | unknown route, session, command or segment; forgotten session |
 | `method_not_allowed` | 405 | |
 | `conflict` | 409 | the request conflicts with the current state |
@@ -148,9 +149,19 @@ All paths below `/api` need a session (§4).
 | `GET /api/sessions/{uuid}/play/index.json` | | `PlayIndex` |
 | `GET /api/sessions/{uuid}/play/seg/{n}` | | `PlaySegment` |
 | `GET /api/sessions/{uuid}/export` | `ExportParams` | file download |
+| `GET /api/sessions/{uuid}/live` | | `text/event-stream` (§9.1) |
+| `GET /api/events` | | `text/event-stream` (§9.2) |
+| `GET /api/timeline` | `TimelineParams` | `Timeline` (§9.3) |
+| `GET /api/annotations` | `AnnotationParams` | `AnnotationPage` (§9.4) |
+| `POST /api/annotations` | `AnnotationCreate` | 201 `Annotation` |
+| `PATCH /api/annotations/{uuid}` | `AnnotationPatch` | `Annotation` |
+| `DELETE /api/annotations/{uuid}` | | 204 |
+| `GET /api/tags` | | `TagList` |
+| `POST /api/tags` | `TagRequest` | `Tag` |
 
 Every other non-`/api` path serves the SPA: an existing asset, else `index.html` for paths
-without a file extension (client routes `/login`, `/`, `/s/{uuid}?t=|cmd=`), else 404.
+without a file extension (client routes `/login`, `/`, `/s/{uuid}?t=|cmd=`, `/timeline`,
+`/live/{uuid}`), else 404.
 Assets under `/assets/` are content-hashed and `Cache-Control: public, max-age=31536000,
 immutable`; everything else `no-cache`, with an `ETag`.
 
@@ -167,8 +178,8 @@ immutable`; everything else `no-cache`, with an `ETag`.
 - `GET /api/sessions`: newest `started_at` first; filters `live` (`true` = state `live`,
   `false` = everything else), `host`, `user`, `from`/`to` (`started_at` bounds, inclusive),
   `pane`, `legacy`, `hidden` (hidden sessions are excluded unless `hidden=true`); `limit`
-  1–500, default 100. In M3 the sidebar polls `?live=true` every 5 s (M4 replaces this with
-  `/events`).
+  1–500, default 100. The sidebar takes live sessions from `/api/events` (§9.2) and polls
+  `?live=true` every 5 s only while that stream is down.
 - `Session.duration`: cast seconds as far as indexed; `commands`: indexed commands.
 - `GET /api/sessions/{uuid}` → `SessionDetail`: the session, its parent (`parent_uuid`) and
   nested children (oldest first), recorder markers (`pause`, `resume`, `nested`,
@@ -314,16 +325,196 @@ for the fzf preview (`cinelog show --team {1}`, a hidden flag). Result URLs (`--
 Enter) point at the team server. As root, `cinelog search` reads the team DB directly
 instead.
 
-## 9. Reserved for M4
+## 9. M4: live view, UI bus, timeline, annotations, export UI
 
-`GET /api/sessions/{uuid}/live` (SSE, player `eventsource` driver: first
-`{cols, rows, time, init}`, then `[t, code, data]`, then event `done` or `{state:'offline'}`),
-`GET /api/events` (SSE UI bus: `session-start`, `session-end`, `index-progress`,
-`annotation`, `import-progress`), `GET /api/timeline?from=&to=&group=user|pane`,
-`GET/POST /api/annotations`, `PATCH/DELETE /api/annotations/{uuid}`, `GET/POST /api/tags`.
-These paths return 404 in M3.
+### 9.0 Server-sent events (both streams)
+- `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`. The
+  session cookie authenticates them like every `/api` route (EventSource sends same-origin
+  cookies); errors before the stream starts are normal `ApiError` responses (401, 404, 503).
+- Every `data:` is one line of JSON. No `id:` fields and no `Last-Event-ID` handling: each
+  connection starts from a full state (`LiveInit`, `hello`).
+- A comment line (`: keep-alive`) every 15 s keeps proxies and the browser from timing out.
+- At most 64 streams of each kind per server (`unavailable` beyond). Streams end when the
+  server shuts down (`bus::Bus::closed`).
 
-## 10. Implementation map (M3 work packages)
+### 9.1 Live view: `GET /api/sessions/{uuid}/live`
+The asciinema-player 3.18 `eventsource` driver
+(`AsciinemaPlayer.create({driver: 'eventsource', url}, el, opts)`, `url` from `api.liveUrl`)
+reads unnamed (`message`) events whose data is a `LiveMessage`:
+
+1. **`LiveInit {cols, rows, time, init}`**, always first: the terminal at the join. The
+   server starts from the newest playback checkpoint at or before the end of the cast on disk
+   (index.db `segments` row or `index_state`, else the cast start), feeds the masked events up
+   to the current end through avt and sends its `dump()`; `time` is the session time of the
+   last event read. A late joiner therefore sees the current screen at once; a join reads at
+   most one segment's bytes (about 2 MiB).
+2. **`LiveEvent [t, code, data]`**, absolute session seconds, ascending: everything appended
+   to the cast from then on (polled at least every 100 ms), with the playback rewrite of
+   §6.1: `cmd` markers become `m` `$ <typed>`, other `m` dropped, `o` `i` `r` kept, `x`
+   ends the stream; forgotten ranges are masked (meta.db re-read at least every 2 s and on
+   every bus `forgotten`). Rotation parts are followed (`rotate` marker → next part), `t`
+   stays continuous.
+3. **`LiveOffline {state: "offline"}`** when the recorder died without writing `x` (the
+   session becomes `crashed`, plan §6.4: registry pid/starttime/boot_id dead), then event
+   `done`.
+4. **event `done`** (empty data) after `x` or when the session leaves `live` normally. The
+   player shows the end; the stream closes.
+
+A session that is not `live` at connect (ended, crashed, legacy) gets its final screen as
+`LiveInit`, then (`crashed`) `LiveOffline`, then `done`. Unknown or forgotten sessions: 404.
+While the recorder is paused nothing is appended, the stream just stays open; the pause shows
+from the bus (§9.2). The view is read-only: there is no input path anywhere in the API. The
+browser reconnects the EventSource by itself after network errors; every connection gets a
+fresh `LiveInit`.
+
+### 9.2 UI bus: `GET /api/events`
+Named events: the SSE `event:` is `BusEvent.type`, `data:` the JSON of `BusEvent.data`
+(`BusEvent::name`, `BusEvent::data_json`; the SPA rebuilds the `BusEvent` object). Unknown
+event names must be ignored.
+
+| `type` | `data` | Sent |
+|---|---|---|
+| `hello` | `BusHello {version, server_started_at, live: [LiveSession]}` | first on every connection; a full resync of the live sessions |
+| `session-start` | `LiveSession` | within 1 s of a recorder registry entry appearing |
+| `session-update` | `LiveSession` | recorder status changed (pause, resume, degraded; registry polled every ≤ 500 ms) or index.db metadata of a live session changed (tmux names) |
+| `session-end` | `SessionEnd {session, state, ended_at}` | within 1 s of the registry entry going away or the state leaving `live`; `state` `ended` when the cast has its `x`, else `crashed` |
+| `index-progress` | `IndexProgress` | at most every 2 s while backlog, counts, lag or error change |
+| `import-progress` | `LegacyProgress` | at most every 2 s while a legacy import runs |
+| `annotation` | `AnnotationEvent {op, annotation}` | after every annotation create, change or delete (§9.4) |
+| `tag` | `Tag` | after a tag is created or its colour changes |
+| `forgotten` | `Forgotten` | after `POST /api/forget`, and within 2 s for rows `cinelog forget` adds to meta.db |
+
+`LiveSession {session, status, reason, detail, since}`: `status` `recording`, `paused` or
+`degraded` (the registry state); `reason`/`detail` split the registry `state_reason` at the
+first `": "` (`api::types::split_state_reason`): `multiplexer` / `tmux: client`, `nested` /
+`<child uuid>`, `user` / `<--reason text>`, or the degraded error. A session not yet in
+index.db is sent with what the registry and the cast header give (`commands: 0`, `duration:
+null`) and updated once indexed. A subscriber that falls more than 1024 events behind gets a
+fresh `hello` and should refetch what it shows (annotations, timeline).
+
+Client: `web/src/lib/api/events.svelte.ts` (`bus.subscribe(handler) → unsubscribe`,
+`bus.status`). One EventSource for the app, opened while anything is subscribed; a refused
+stream (HTTP error) is retried after 1 s, doubling up to 30 s, and checks `/api/me` so an
+expired session signs out; while `status !== 'open'` callers fall back to polling.
+
+### 9.3 Timeline: `GET /api/timeline`
+`TimelineParams {from, to, group, user, host, hidden}` → `Timeline`. Plan §8.3, §15.2.
+- **Window:** ts, default the last 24 h; `from < to`, at most 31 days (else 400). Sessions
+  active in the window (started before `to`, not ended before `from`); hidden sessions only
+  with `hidden=true`; forgotten sessions never.
+- **Grouping:** the *person* of a session is `sudo_user`, else `claimed_user`, else `user`
+  (TEAM root shells belong to the member). `group=user` (default): one lane per person
+  (`key` `user:<name>`, by label), one row per pane (`pane:<host>/<tmux server>/<pane>`,
+  label `<tmux session>:<window>.<pane>`) or non-tmux shell (`tty:<host>/<tty>`, else
+  `session:<uuid>`; label `<holder_comm> <tty>`), rows by first activity. `group=pane`: one
+  lane per pane or shell (key as the row key above), one row per person in it
+  (`<lane key>|user:<name>`). Nested sessions (`parent_uuid` in the response) are drawn in
+  their parent's row; `TimelineRow.sessions` lists every session of the row.
+- **Blocks:** one `TimelineBlock` per command overlapping the window, by `ts_start`;
+  `typed` is the first line cut to 200 characters; `ts_end: null` means running (draw to
+  now) or never closed (draw to the session end). Forgotten commands are left out.
+  Colours (client): exit 0 green, non-zero red, unknown grey, `approx` hatched.
+- **Marks** (always sent, also when aggregated): `pause` spans from `pause`/`resume`
+  markers (`reason`, `detail` from the marker; `ts_end: null` while still paused), `skip`
+  points (leading-space commands), `nested` points (`child` = the nested session), `gap`
+  spans (dropped output) and `forgotten` spans (`SessionDetail.masked`; `detail` = who).
+  Every pause or skip is visible (plan §15.2).
+- **Idle:** spans of at least 600 s inside the window without any block in any row
+  (`idle`), drawn collapsed as a break mark.
+- **Aggregation:** more than 20 000 commands in the window: `aggregated = true`, every row's
+  `blocks` is empty and `density` holds the non-empty bins; `bin_secs` is the smallest of 60,
+  300, 900, 1800, 3600, 10800, 21600, 86400 that gives at most 2000 bins over the window.
+  `commands` is the total before aggregation.
+- **Annotations:** the non-deleted annotations of the window's sessions
+  (`MetaStore::find_annotations` with `sessions`), as `TimelineAnnotation` in wall time: a
+  command annotation spans its command (`ts_start`…`ts_end`, or `ts_start` when open), a
+  span annotation `t_from`…`t_to` mapped to wall time like output chunks (`started_at + t`,
+  corrected by `clock` markers); `row` is the session's row key, `color` the first tag
+  colour that is set.
+- **Budget:** one week of team data in under 500 ms server time plus rendering.
+- **SPA:** `/timeline?from=&to=&group=` (window and grouping in the URL). Brush to zoom,
+  `+`/`-`, a date picker; hover shows `typed`, cwd and duration; a click on a block opens
+  that command's commands and player (`SessionView` with `target {cmd}`, or
+  `/s/<uuid>?cmd=<seq>`). It may refetch on bus `session-start`/`session-end`/`annotation`.
+
+### 9.4 Annotations and tags
+Stored in meta.db (authoritative, keyed by session uuid and command seq, so they survive
+`index --rebuild`; part of the nightly backup and `cinelog meta export|import`).
+`cinelog_index::MetaStore` has `put_annotation`, `annotation(uuid)`,
+`find_annotations(&AnnotationQuery)`, `annotations(session)`, `tags()`, `put_tag(name, color)`.
+
+- **Target:** exactly one of `cmd_seq` (a command) or `t_from`+`t_to` (session seconds,
+  `0 ≤ t_from ≤ t_to`). A body or at least one tag is required.
+- **Body:** plain text, at most 16 KiB (`MAX_ANNOTATION_BODY`), trailing whitespace removed.
+  Rendered as text only; `http://` and `https://` URLs become links (`rel="noopener
+  noreferrer"`, `target="_blank"`), nothing else is interpreted (no Markdown to HTML, no
+  `{@html}`).
+- **Tags:** normalised by `normalize_tag`: trimmed, lowercase, 1–40 letters, digits or
+  `- _ . : / + # @`; at most 16 per annotation, stored sorted. Colours `#rrggbb`
+  (`normalize_color` also takes `#rgb`); `null` means the client derives one from the name.
+- `GET /api/annotations` (`AnnotationParams`): filters `session`, `cmd_seq`, `tag`, `author`;
+  soft-deleted ones only with `deleted=true`; oldest `created_at` first (uuid breaks ties);
+  `limit` 1–500, default 200; `next` cursor.
+- `POST /api/annotations` (`AnnotationCreate`, validated by `AnnotationCreate::validate`):
+  `author` is the principal, `uuid` a new UUIDv7. 404 when the session is unknown or
+  forgotten or `cmd_seq` is not one of its commands. 201 with the `Annotation`.
+- `PATCH /api/annotations/{uuid}` (`AnnotationPatch`, `AnnotationPatch::validate`): `body`
+  and `tags` (replace) only by the author, else 403; `add_tags` by any principal (TEAM: any
+  member can add tags). 404 for unknown or deleted annotations. Applied with
+  `AnnotationChange::apply` (the result still needs a body or a tag). 200 with the result.
+- `DELETE /api/annotations/{uuid}`: author only (403), soft delete (`deleted_at` and
+  `updated_at` = now), 204; 404 when unknown or already deleted.
+- `GET /api/tags` → `TagList` (by name, `count` = non-deleted annotations).
+  `POST /api/tags` (`TagRequest`, `TagRequest::validate`) creates the tag or sets its colour;
+  any principal; 200 with the `Tag`.
+- **Sync:** every successful create, change or delete publishes `annotation` (`op`
+  `created`, `updated` or `deleted`, the full row) and every tag change `tag`, after the
+  commit. Open views apply them, so a second browser shows the change within 2 s. Last write
+  wins; there is no version check.
+- **SPA:** the annotations panel attaches to the current command or the rail selection (`a`),
+  lists the session's annotations with author and time, offers tag autocomplete from
+  `/api/tags`, shows edit and delete only to the author, and gives the rail its spans.
+
+### 9.5 Export UI
+The export endpoint is §7. The session view's export menu (`web/src/lib/export/`) offers
+three sources × three formats: the current command (`cmd=<seq>`), the rail selection
+(`from`/`to`) and the whole session; `.cast` (standalone slice: plays in asciinema-player on
+its own), `.txt` (rendered rows) and `.html` (escaped, script-free, own CSP). Downloads go
+through `fetch` plus a blob URL (`lib/download.ts`), so the cookie applies; the file name
+comes from `Content-Disposition`. `e` opens the menu.
+
+### 9.6 SPA wiring (contracts; the packages fill in the components)
+- **Routes** (`lib/route.ts`): `/timeline` → `routes/timeline/TimelinePage.svelte` (no
+  props); `/live/{uuid}` → `lib/live/LivePage.svelte` (`{uuid}`; root element keeps
+  `data-testid="live-page"` and `data-uuid`). The header has Search and Timeline tabs.
+- **Keys** (`lib/keys.ts`): `t` timeline, `l` recording ↔ live view of the same session,
+  `a` annotate (`AnnotationsPanel.annotate()`), `e` export (`ExportMenu.open()`).
+- **Sidebar:** live sessions from the bus (status badge when paused or degraded), each
+  linking to `/live/{uuid}`.
+- **Session view** (`lib/components/SessionView.svelte`) mounts
+  `<ExportMenu {uuid} command selection onnotice>` (exports `open()`, `close()`),
+  `<AnnotationsPanel session commands current currentTime selection onseek bind:spans>`
+  (exports `annotate(): boolean`) and passes `bind:selection` and `annotations={spans}` to
+  `Rail`; a live session shows "Watch live". `selection` is a `TimeRange` (`lib/spans.ts`,
+  session seconds), set by dragging on the rail and cleared with `Esc`; `AnnotationSpan`
+  is what the rail draws. A bus `forgotten` for the open session reloads it.
+- **Signed-in principal:** `lib/principal.svelte.ts` (`principal.me`), set by `App`.
+- **API client** (`lib/api/client.ts`): `liveUrl`, `timeline`, `annotations`,
+  `createAnnotation`, `updateAnnotation`, `deleteAnnotation`, `tags`, `putTag`.
+
+### 9.7 E2E mock
+`web/e2e/mock/server.ts` serves `/api/events` (a `hello` with the live fixtures, and every
+event a handler or `forget` publishes) and hands every other request, before the M3 method
+check, to the M4 handlers in `web/e2e/mock/m4/` (`MockHandler`, `MockContext` in
+`context.ts`): `live.ts` (M4-D), `timeline.ts` (M4-B), `annotations.ts` (M4-C). Each work
+package writes its own specs (`e2e/live.spec.ts`, `e2e/export.spec.ts` M4-D,
+`e2e/timeline.spec.ts` M4-B, `e2e/annotations.spec.ts` M4-C). The Playwright config does not
+override the User-Agent (Chromium drops the override on some navigations while an
+EventSource is open, and sessions are bound to the User-Agent).
+
+## 10. Implementation map
+
+### 10.0 M3 work packages
 
 | Path | Owner |
 |---|---|
@@ -349,6 +540,41 @@ Entry points with frozen signatures (stand-ins until each package lands):
 - Contracts (complete): `server::{router, spawn, bind_all, BindSpec}`, `ServerHandle`,
   `assets::spa`, `tokens::{TokenFile, TokenEntry, NewToken, generate, hash, valid_name}`,
   `tls::{fingerprint, TlsOptions::from_context}`, `cinelog tls show|regen`.
+
+### 10.1 M4 work packages
+
+| Path | Owner |
+|---|---|
+| `docs/API.md` §9, `api/types.rs` M4 types, `src/bus.rs`, route tables (`api/mod.rs`, `server.rs`), `state.rs`; `cinelog-index` `MetaStore` additions (`annotation`, `find_annotations`, `tags`, `put_tag`; `AnnotationQuery`, `TagInfo`); SPA wiring of §9.6 (`App.svelte`, `Shell.svelte`, `Sidebar.svelte`, `SessionView.svelte`, `lib/{route,keys,spans,principal.svelte}.ts`, `lib/api/{client,events.svelte}.ts`); `e2e/mock/server.ts`, `e2e/mock/m4/context.ts`, `playwright.config.ts` | M4-0 contracts |
+| `crates/cinelog-web/src/live/**` | M4-A live SSE and the bus watcher |
+| `crates/cinelog-web/src/api/timeline.rs`, `web/src/routes/timeline/**`, `web/e2e/mock/m4/timeline.ts`, `web/e2e/timeline.spec.ts` | M4-B timeline |
+| `crates/cinelog-web/src/api/annotations.rs`, `web/src/lib/annotations/**`, `web/src/lib/components/Rail.svelte` (the drag selection), `web/e2e/mock/m4/annotations.ts`, `web/e2e/annotations.spec.ts` | M4-C annotations |
+| `web/src/lib/{export,live}/**`, `web/e2e/mock/m4/live.ts`, `web/e2e/{live,export}.spec.ts` | M4-D export UI and live UI |
+
+Entry points with frozen signatures (stand-ins until each package lands; Rust stand-ins
+answer 503 `unavailable`):
+
+- M4-A: `live::{LiveState::new(&WebContext), start(&AppState), routes() ->
+  Router<AppState>}` (`/sessions/{uuid}/live`, `/events`). `start` runs once inside the
+  server runtime. Publishes on `state.bus`; ends streams on `state.bus.closed()`. May reuse
+  the `pub(crate)` playback internals (`play::{source, stream, plan, session}`, `api::db`).
+- M4-B: `api::timeline::routes()` (`GET /timeline`); `TimelinePage.svelte` (no props).
+- M4-C: `api::annotations::routes()` (`/annotations`, `/annotations/{uuid}`, `/tags`);
+  `AnnotationsPanel.svelte` (props of §9.6, `annotate()`); the drag gesture of `Rail`
+  (`selection` is already a bindable prop drawn as a band).
+- M4-D: `ExportMenu.svelte` (props of §9.6, `open()`, `close()`; complete for the three
+  sources), `LivePage.svelte` (`{uuid}`; the stand-in shows the recording).
+- Contracts (complete): `bus::Bus::{new, publish, subscribe, subscribers, close, is_closed,
+  closed}`, `BusEvent::{NAMES, name, data_json}`, `split_state_reason`, the validators
+  (`AnnotationCreate::validate` → `NewAnnotation::into_row`, `AnnotationPatch::validate` →
+  `AnnotationChange::{needs_author, apply}`, `TagRequest::validate`, `normalize_tag`,
+  `normalize_tags`, `normalize_color`), `From<&im::Annotation> for Annotation`,
+  `From<im::TagInfo> for Tag`, `From<RecState> for RecStatus`; the `forgotten` bus event
+  of `POST /api/forget`; the SPA bus client and sidebar.
+
+No new crates or npm packages are needed for M4 (SSE: `axum::response::sse`, broadcast:
+`tokio::sync`, streams: `tokio-stream`/`async-stream`, all present); a package that needs
+one asks the contracts owner.
 
 `cinelog serve` (without `--no-http`) calls `cinelog_web::spawn(ctx.web_context())` after
 opening the index writer; when the web server cannot start (TLS, ports) it logs the error and

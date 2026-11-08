@@ -5,8 +5,13 @@ import { defineConfig, devices } from '@playwright/test';
 // `cinelog serve` over the fixture casts (`e2e/real/`); with `CINELOG_E2E_URL` the specs run
 // against that server, which must carry the same fixtures and accept `CINELOG_E2E_TOKEN`. `CINELOG_CHROMIUM`
 // points at a system Chromium when Playwright's own browser is not installed.
+// Without the device's User-Agent override: Chromium drops the override on some navigations
+// while an EventSource (the UI bus) is open, and sessions are bound to the User-Agent, so a
+// changing one signs the test out.
+const desktopChrome: Partial<(typeof devices)[string]> = { ...devices['Desktop Chrome'] };
+delete desktopChrome.userAgent;
 const chromium = {
-  ...devices['Desktop Chrome'],
+  ...desktopChrome,
   launchOptions: process.env.CINELOG_CHROMIUM ? { executablePath: process.env.CINELOG_CHROMIUM } : {},
 };
 

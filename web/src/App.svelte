@@ -4,6 +4,7 @@
   import type { Me } from './lib/api/types';
   import Login from './lib/components/Login.svelte';
   import Shell from './lib/components/Shell.svelte';
+  import { principal } from './lib/principal.svelte';
   import { parseRoute, safeNext } from './lib/route';
   import { router } from './lib/router.svelte';
 
@@ -11,6 +12,10 @@
 
   let auth = $state<Auth>({ state: 'checking' });
   const route = $derived(parseRoute(router.path));
+
+  $effect(() => {
+    principal.me = auth.state === 'in' ? auth.me : null;
+  });
 
   async function check(): Promise<void> {
     try {

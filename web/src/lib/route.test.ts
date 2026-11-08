@@ -11,7 +11,10 @@ describe('routes', () => {
     expect(parseRoute(`/s/${U.toUpperCase()}`)).toEqual({ name: 'session', uuid: U });
     expect(parseRoute('/s/not-a-uuid')).toEqual({ name: 'notfound' });
     expect(parseRoute('/s/%E0%A4%A')).toEqual({ name: 'notfound' });
-    expect(parseRoute('/timeline')).toEqual({ name: 'notfound' });
+    expect(parseRoute('/timeline/')).toEqual({ name: 'timeline' });
+    expect(parseRoute(`/live/${U.toUpperCase()}`)).toEqual({ name: 'live', uuid: U });
+    expect(parseRoute('/live/x')).toEqual({ name: 'notfound' });
+    expect(parseRoute('/timeline/x')).toEqual({ name: 'notfound' });
   });
 
   it('only returns to same-origin paths after login', () => {

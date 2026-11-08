@@ -16,6 +16,8 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   ApiError,
+  BusEvent,
+  BusHello,
   CommandList,
   ErrorCode,
   ForgetTarget,
@@ -38,6 +40,13 @@ import type {
   TreeNode,
 } from '../../src/lib/api/types.ts';
 import { buildFixtures, FIX, OUTPUT_DELAY, sessionEvents, toCommand, type CastEvent, type FixSession } from './fixtures.ts';
+import { handle as annotationsMock } from './m4/annotations.ts';
+import type { MockContext, MockHandler } from './m4/context.ts';
+import { handle as liveMock } from './m4/live.ts';
+import { handle as timelineMock } from './m4/timeline.ts';
+
+/** M4 handlers, each owned by its work package (docs/API.md §9.7). */
+const M4_HANDLERS: readonly MockHandler[] = [liveMock, timelineMock, annotationsMock];
 
 /** Same policy as `crates/cinelog-web/src/headers.rs`, so the player is tested under it. */
 export const CSP =
@@ -126,6 +135,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
   const sessions = new Map<string, AuthSession>();
   const loginAttempts: number[] = [];
   const forgotten: Forgotten[] = [];
+  const busClients = new Set<ServerResponse>();
   let port = 0;
 
   const isForgottenCmd = (uuid: string, seq: number) =>
@@ -141,6 +151,31 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
     const f = byId.get(uuid.toLowerCase());
     if (!f || sessionForgotten(f.session.uuid)) throw new HttpError(404, 'not_found', 'no such session');
     return f;
+  }
+
+  // ---- UI bus (docs/API.md §9.2) ---------------------------------------------------------
+
+  function publish(event: BusEvent): void {
+    const frame = `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`;
+    for (const res of busClients) res.write(frame);
+  }
+
+  function openBus(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    const hello: BusHello = {
+      version: VERSION,
+      server_started_at: startedAt,
+      live: visible()
+        .filter((f) => f.session.state === 'live')
+        .map((f) => ({ session: f.session, status: 'recording', reason: null, detail: null, since: null })),
+    };
+    res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
+    busClients.add(res);
+    const ping = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
+    req.on('close', () => {
+      clearInterval(ping);
+      busClients.delete(res);
+    });
   }
 
   // ---- search ----------------------------------------------------------------------------
@@ -403,6 +438,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
     if (existing) return existing;
     const row: Forgotten = { target, by, at: Date.now() / 1000 };
     forgotten.push(row);
+    publish({ type: 'forgotten', data: row });
     return row;
   }
 
@@ -533,6 +569,8 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       return void res.end();
     }
     if (method === 'POST' && path === '/api/forget') return json(res, 200, forget(await readJson(req), principal));
+    if (method === 'GET' && path === '/api/events') return openBus(req, res);
+    for (const h of M4_HANDLERS) if (await h(m4, { req, res, url, method, principal })) return;
     if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', 'method not allowed');
 
     const sp = url.searchParams;
@@ -606,6 +644,19 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       last_error: null,
     };
   }
+
+  const m4: MockContext = {
+    fixtures,
+    visible,
+    find,
+    fail: (status, code, message) => {
+      throw new HttpError(status, code, message);
+    },
+    readJson,
+    json,
+    publish,
+    startedAt,
+  };
 
   const server: Server = createServer({ key: tls.key, cert: tls.cert }, (req, res) => {
     res.setHeader('Content-Security-Policy', CSP);

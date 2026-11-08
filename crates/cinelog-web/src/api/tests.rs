@@ -205,10 +205,15 @@ async fn forget_forms_and_effects() {
     ] {
         assert_eq!(kit.post("/forget", &body).await.0, status, "{body}");
     }
+    let mut bus = kit.state.bus.subscribe();
     let (status, f) = kit.post("/forget", &json!({"session_uuid": u, "cmd_seq": 2})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(f["target"], json!({"kind": "command", "uuid": u, "seq": 2}));
     assert_eq!(f["by"], "alice");
+    match bus.try_recv() {
+        Ok(crate::api::types::BusEvent::Forgotten(event)) => assert_eq!(serde_json::to_value(event).unwrap(), f),
+        other => panic!("expected a forgotten bus event, got {other:?}"),
+    }
     let (_, again) = kit.post("/forget", &json!({"session_uuid": u, "cmd_seq": 2})).await;
     assert_eq!(again, f, "repeating returns the existing row");
 

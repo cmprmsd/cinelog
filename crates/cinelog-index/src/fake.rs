@@ -34,6 +34,8 @@ struct State {
     forgotten: Vec<Forgotten>,
     settings: BTreeMap<String, String>,
     annotations: BTreeMap<String, Annotation>,
+    /// Tag name → colour.
+    tags: BTreeMap<String, Option<String>>,
 }
 
 impl State {
@@ -708,7 +710,20 @@ impl MetaStore for MemIndex {
     }
 
     fn put_annotation(&mut self, a: &Annotation) -> Result<()> {
-        self.st().annotations.insert(a.uuid.clone(), a.clone());
+        let mut st = self.st();
+        let mut a = a.clone();
+        a.tags = a
+            .tags
+            .iter()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        a.tags.sort();
+        a.tags.dedup();
+        for t in &a.tags {
+            st.tags.entry(t.clone()).or_default();
+        }
+        st.annotations.insert(a.uuid.clone(), a);
         Ok(())
     }
 
@@ -722,6 +737,63 @@ impl MetaStore for MemIndex {
             .collect();
         v.sort_by(|a, b| a.created_at.total_cmp(&b.created_at));
         Ok(v)
+    }
+
+    fn annotation(&self, uuid: &str) -> Result<Option<Annotation>> {
+        Ok(self.st().annotations.get(uuid).cloned())
+    }
+
+    fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
+        let st = self.st();
+        let mut v: Vec<Annotation> = st
+            .annotations
+            .values()
+            .filter(|a| q.sessions.is_empty() || q.sessions.contains(&a.session_uuid))
+            .filter(|a| q.cmd_seq.is_none_or(|s| a.cmd_seq == Some(s)))
+            .filter(|a| q.tag.as_ref().is_none_or(|t| a.tags.contains(t)))
+            .filter(|a| q.author.as_ref().is_none_or(|w| a.author == *w))
+            .filter(|a| q.include_deleted || a.deleted_at.is_none())
+            .filter(|a| {
+                q.after
+                    .as_ref()
+                    .is_none_or(|(c, u)| a.created_at > *c || (a.created_at == *c && a.uuid.as_str() > u.as_str()))
+            })
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.created_at.total_cmp(&b.created_at).then_with(|| a.uuid.cmp(&b.uuid)));
+        if q.limit > 0 {
+            v.truncate(q.limit);
+        }
+        Ok(v)
+    }
+
+    fn tags(&self) -> Result<Vec<TagInfo>> {
+        let st = self.st();
+        Ok(st
+            .tags
+            .iter()
+            .map(|(name, color)| TagInfo {
+                name: name.clone(),
+                color: color.clone(),
+                count: st
+                    .annotations
+                    .values()
+                    .filter(|a| a.deleted_at.is_none() && a.tags.contains(name))
+                    .count() as u64,
+            })
+            .collect())
+    }
+
+    fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(IndexError::Invalid("empty tag name".into()));
+        }
+        self.st().tags.insert(name.to_owned(), color.map(str::to_owned));
+        self.tags()?
+            .into_iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| IndexError::NotFound(format!("tag {name:?}")))
     }
 
     fn export_jsonl(&self, out: &mut dyn Write) -> Result<u64> {

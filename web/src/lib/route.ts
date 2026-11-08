@@ -1,9 +1,12 @@
-// Client routes (plan §8): `/login`, `/` (search), `/s/<uuid>` (session, `?t=` or `?cmd=`).
+// Client routes (plan §8): `/login`, `/` (search), `/s/<uuid>` (session, `?t=` or `?cmd=`),
+// `/timeline` (M4-B, `?from=&to=&group=`), `/live/<uuid>` (M4-D).
 
 export type Route =
   | { name: 'login' }
   | { name: 'search' }
   | { name: 'session'; uuid: string }
+  | { name: 'timeline' }
+  | { name: 'live'; uuid: string }
   | { name: 'notfound' };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -16,18 +19,22 @@ export function parseRoute(path: string): Route {
   const p = path.replace(/\/+$/, '') || '/';
   if (p === '/') return { name: 'search' };
   if (p === '/login') return { name: 'login' };
-  const m = /^\/s\/([^/]+)$/.exec(p);
-  if (m?.[1]) {
+  if (p === '/timeline') return { name: 'timeline' };
+  const m = /^\/(s|live)\/([^/]+)$/.exec(p);
+  if (m?.[2]) {
     let id: string;
     try {
-      id = decodeURIComponent(m[1]);
+      id = decodeURIComponent(m[2]);
     } catch {
       return { name: 'notfound' };
     }
-    if (isUuid(id)) return { name: 'session', uuid: id.toLowerCase() };
+    if (isUuid(id)) return { name: m[1] === 's' ? 'session' : 'live', uuid: id.toLowerCase() };
   }
   return { name: 'notfound' };
 }
+
+/** The live view of a session. */
+export const liveHref = (uuid: string) => `/live/${uuid}`;
 
 /** A same-origin path to return to after login; anything else falls back to `/`. */
 export function safeNext(next: string | null | undefined): string {

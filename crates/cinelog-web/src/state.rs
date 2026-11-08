@@ -11,7 +11,7 @@ use cinelog_core::{Config, Scope};
 use cinelog_index::model::DbPaths;
 
 use crate::error::WebError;
-use crate::{auth, hosts, play};
+use crate::{auth, bus, hosts, live, play};
 
 /// Who the server is and where its data lives; built by `cinelog serve` from its `Ctx`.
 #[derive(Debug, Clone)]
@@ -88,6 +88,9 @@ pub struct Shared {
     pub auth: auth::Auth,
     pub hosts: hosts::HostAllowlist,
     pub play: play::PlayState,
+    /// UI bus (`GET /api/events`).
+    pub bus: bus::Bus,
+    pub live: live::LiveState,
 }
 
 /// Cheap to clone; derefs to [`Shared`].
@@ -99,6 +102,7 @@ impl AppState {
     pub fn new(ctx: WebContext, bound: Bound, hosts: hosts::HostAllowlist) -> Self {
         let auth = auth::Auth::new(&ctx, bound.port);
         let play = play::PlayState::new(&ctx);
+        let live = live::LiveState::new(&ctx);
         Self(Arc::new(Shared {
             started_at: crate::now(),
             ctx,
@@ -106,6 +110,8 @@ impl AppState {
             auth,
             hosts,
             play,
+            bus: bus::Bus::new(),
+            live,
         }))
     }
 

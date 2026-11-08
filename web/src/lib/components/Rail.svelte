@@ -4,7 +4,10 @@
   import { fmtClock } from '../format';
   import type { Band, NestedPoint } from '../markers';
   import { router } from '../router.svelte';
+  import type { AnnotationSpan, TimeRange } from '../spans';
 
+  // M4: `selection` (a drag on the rail selects a span; M4-C implements the gesture) and
+  // `annotations` (spans from the annotations panel) are drawn as bands.
   interface Props {
     duration: number;
     commands: Command[];
@@ -13,8 +16,20 @@
     hits: number[];
     currentTime: number;
     onseek: (t: number) => void;
+    selection?: TimeRange | null;
+    annotations?: AnnotationSpan[];
   }
-  let { duration, commands, bands, nested, hits, currentTime, onseek }: Props = $props();
+  let {
+    duration,
+    commands,
+    bands,
+    nested,
+    hits,
+    currentTime,
+    onseek,
+    selection = $bindable(null),
+    annotations = [],
+  }: Props = $props();
 
   let rail: HTMLDivElement | undefined = $state();
 
@@ -56,6 +71,23 @@
     {#each bands as b, i (i)}
       <span class={`band ${b.kind}`} style:left={`${pct(b.from, duration)}%`} style:width={`${width(b)}%`} title={b.label}></span>
     {/each}
+    {#each annotations as a (a.uuid)}
+      <span
+        class="band note"
+        style:left={`${pct(a.from, duration)}%`}
+        style:width={`${Math.max(0.4, pct(a.to, duration) - pct(a.from, duration))}%`}
+        style:background={a.color}
+        title={a.label}
+      ></span>
+    {/each}
+    {#if selection}
+      <span
+        class="band selection"
+        style:left={`${pct(selection.from, duration)}%`}
+        style:width={`${Math.max(0.4, pct(selection.to, duration) - pct(selection.from, duration))}%`}
+        data-testid="rail-selection"
+      ></span>
+    {/if}
     {#each commands as c (c.seq)}
       <span class={`tick ${exitClass(c.exit)}`} style:left={`${pct(c.t_start, duration)}%`}></span>
     {/each}
@@ -117,6 +149,10 @@
   }
   .band.forgotten {
     background: repeating-linear-gradient(45deg, var(--forgot) 0 3px, transparent 3px 6px);
+  }
+  .band.selection {
+    background: var(--accent);
+    opacity: 0.25;
   }
   .tick {
     width: 2px;

@@ -48,6 +48,21 @@ describe('api client', () => {
     expect(api.exportUrl('a/b', { format: 'txt', cmd: 2 })).toBe('/api/sessions/a%2Fb/export?format=txt&cmd=2');
   });
 
+  it('sends M4 requests with the right methods and paths', async () => {
+    let fetch = respond(200, {});
+    await api.updateAnnotation('a/1', { add_tags: ['ops'] });
+    expect(fetch.mock.calls[0]![0]).toBe('/api/annotations/a%2F1');
+    expect(fetch.mock.calls[0]![1]).toMatchObject({ method: 'PATCH', body: '{"add_tags":["ops"]}' });
+    fetch = respond(204);
+    await api.deleteAnnotation('x');
+    expect(fetch.mock.calls[0]![1]?.method).toBe('DELETE');
+    expect(fetch.mock.calls[0]![1]?.body).toBeUndefined();
+    fetch = respond(200, {});
+    await api.timeline({ from: 1, group: 'pane' });
+    expect(fetch.mock.calls[0]![0]).toBe('/api/timeline?from=1&group=pane');
+    expect(api.liveUrl('u')).toBe('/api/sessions/u/live');
+  });
+
   it('turns ApiError bodies into ApiFailure', async () => {
     respond(429, { error: 'too_many_requests', message: 'slow down' }, { 'Retry-After': '42' });
     const err = await api.login('x').catch((e: unknown) => e);

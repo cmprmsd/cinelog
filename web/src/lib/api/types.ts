@@ -417,3 +417,251 @@ export type TreeParams = {
 from?: number, to?: number, live?: boolean, hidden?: boolean, };
 
 export type ExportParams = { format: ExportFormat, from?: number, to?: number, cmd?: number, };
+
+export type LiveInit = { cols: number, rows: number, 
+/**
+ * Session seconds at the join (the last event read); the player clock starts here and
+ * every following event carries absolute session seconds.
+ */
+time: number, 
+/**
+ * avt dump of the terminal at `time`, forgotten ranges masked.
+ */
+init: string, };
+
+export type LiveEvent = [number, string, string];
+
+export type LiveStreamState = "offline";
+
+export type LiveOffline = { state: LiveStreamState, };
+
+export type LiveMessage = LiveInit | LiveEvent | LiveOffline;
+
+export type RecStatus = "recording" | "paused" | "degraded";
+
+export type LiveSession = { session: Session, status: RecStatus, 
+/**
+ * `paused`: `multiplexer`, `nested` or `user`; `degraded`: the error. `null` while
+ * recording.
+ */
+reason: string | null, 
+/**
+ * What holds the pause: the multiplexer client's comm (`tmux: client`), the nested
+ * session's uuid, or the `cinelog pause --reason` text.
+ */
+detail: string | null, 
+/**
+ * ts the current status began, when known.
+ */
+since: number | null, };
+
+export type BusHello = { version: string, server_started_at: number, 
+/**
+ * Newest `started_at` first.
+ */
+live: Array<LiveSession>, };
+
+export type SessionEnd = { session: string, 
+/**
+ * `ended`, `crashed` (recorder died: live viewers show offline), `degraded` or `error`.
+ */
+state: SessionState, ended_at: number | null, };
+
+export type IndexProgress = { backlog_bytes: number, commands: number, outputs: number, live: Array<LiveLag>, last_error: string | null, };
+
+export type ChangeOp = "created" | "updated" | "deleted";
+
+export type AnnotationEvent = { op: ChangeOp, annotation: Annotation, };
+
+export type BusEvent = { "type": "hello", "data": BusHello } | { "type": "session-start", "data": LiveSession } | { "type": "session-update", "data": LiveSession } | { "type": "session-end", "data": SessionEnd } | { "type": "index-progress", "data": IndexProgress } | { "type": "import-progress", "data": LegacyProgress } | { "type": "annotation", "data": AnnotationEvent } | { "type": "tag", "data": Tag } | { "type": "forgotten", "data": Forgotten };
+
+export type TimelineGroup = "user" | "pane";
+
+export type Timeline = { from: number, to: number, group: TimelineGroup, 
+/**
+ * By label.
+ */
+lanes: Array<TimelineLane>, 
+/**
+ * Spans of at least 10 min inside `[from, to]` in which no command ran in any row
+ * (drawn collapsed, as a break mark). Ascending.
+ */
+idle: Array<TimeSpan>, 
+/**
+ * Annotations of the sessions in the window, by `ts_from`.
+ */
+annotations: Array<TimelineAnnotation>, 
+/**
+ * Commands in the window (before aggregation).
+ */
+commands: number, 
+/**
+ * More than 20 000 commands: rows carry `density` instead of `blocks`.
+ */
+aggregated: boolean, 
+/**
+ * Width of a density bin when `aggregated`.
+ */
+bin_secs: number | null, };
+
+export type TimelineLane = { 
+/**
+ * `user:<name>` (group `user`) or the row key of the pane (group `pane`).
+ */
+key: string, label: string, 
+/**
+ * By first activity in the window.
+ */
+rows: Array<TimelineRow>, };
+
+export type TimelineRow = { 
+/**
+ * Unique within the response. Pane: `pane:<host>/<tmux server>/<pane>`; shell outside
+ * tmux: `tty:<host>/<tty>` (or `session:<uuid>` without a tty); with group `pane` the
+ * lane's row per person is `<pane key>|user:<name>`.
+ */
+key: string, 
+/**
+ * `<tmux session>:<window>.<pane>` or `<holder_comm> <tty>`; with group `pane` the person.
+ */
+label: string, host: string, 
+/**
+ * The person: `sudo_user`, else `claimed_user`, else `user`.
+ */
+user: string, tmux: TmuxLocation, holder_comm: string | null, tty: string | null, 
+/**
+ * Sessions drawn in this row (nested sessions in their parent's row), oldest first.
+ */
+sessions: Array<TimelineSession>, 
+/**
+ * By `ts_start`; empty when the response is `aggregated`.
+ */
+blocks: Array<TimelineBlock>, 
+/**
+ * Pauses, skips, nested starts, gaps and forgotten spans (always sent), by `ts`.
+ */
+marks: Array<TimelineMark>, 
+/**
+ * Only when `aggregated`: bins with at least one command, ascending.
+ */
+density: Array<DensityBin>, };
+
+export type TimelineSession = { uuid: string, user: string, state: SessionState, started_at: number, ended_at: number | null, parent_uuid: string | null, legacy: boolean, };
+
+export type TimelineBlock = { session: string, seq: number, t_start: number, ts_start: number, 
+/**
+ * `null`: still running (draw to now), or never closed (draw to the session end).
+ */
+ts_end: number | null, exit: number | null, 
+/**
+ * First line of `typed`, at most 200 characters (hover text).
+ */
+typed: string, cwd: string | null, 
+/**
+ * Legacy boundaries (drawn hatched).
+ */
+approx: boolean, depth: number, };
+
+export type TimelineMarkKind = "pause" | "skip" | "nested" | "gap" | "forgotten";
+
+export type TimelineMark = { session: string, kind: TimelineMarkKind, ts: number, 
+/**
+ * End of a span; `null` for points and for a span still open.
+ */
+ts_end: number | null, reason: string | null, detail: string | null, 
+/**
+ * `nested`: the child session.
+ */
+child: string | null, };
+
+export type DensityBin = { 
+/**
+ * Bin start; the bin covers `[ts, ts + bin_secs)`.
+ */
+ts: number, commands: number, 
+/**
+ * Commands with a non-zero exit.
+ */
+failed: number, };
+
+export type TimeSpan = { from: number, to: number, };
+
+export type TimelineAnnotation = { uuid: string, session: string, 
+/**
+ * [`TimelineRow::key`] of the session's row.
+ */
+row: string, cmd_seq: number | null, ts_from: number, ts_to: number, tags: Array<string>, 
+/**
+ * Colour of the first tag that has one.
+ */
+color: string | null, author: string, };
+
+export type Annotation = { uuid: string, session: string, cmd_seq: number | null, 
+/**
+ * Session seconds of a span annotation.
+ */
+t_from: number | null, t_to: number | null, 
+/**
+ * Principal who wrote it; only the author may edit the body or delete it.
+ */
+author: string, 
+/**
+ * Plain text; clients render it as text, with `http(s)://` URLs as links.
+ */
+body: string, 
+/**
+ * Sorted names.
+ */
+tags: Array<string>, created_at: number, updated_at: number, deleted_at: number | null, };
+
+export type AnnotationPage = { annotations: Array<Annotation>, next: string | null, };
+
+export type AnnotationCreate = { session_uuid: string, cmd_seq?: number, t_from?: number, t_to?: number, body?: string, tags?: Array<string>, };
+
+export type AnnotationPatch = { body?: string, tags?: Array<string>, add_tags?: Array<string>, };
+
+export type Tag = { name: string, 
+/**
+ * `#rrggbb`; `null`: the client derives a colour from the name.
+ */
+color: string | null, 
+/**
+ * Annotations (not deleted) carrying it.
+ */
+count: number, };
+
+export type TagList = { tags: Array<Tag>, };
+
+export type TagRequest = { name: string, color?: string, };
+
+export type TimelineParams = { 
+/**
+ * ts bounds; commands overlapping `[from, to]` are included.
+ */
+from?: number, to?: number, group?: TimelineGroup, 
+/**
+ * Only this person (`sudo_user`, else `claimed_user`, else `user`).
+ */
+user?: string, host?: string, 
+/**
+ * Include hidden (`TERM=dumb` legacy) sessions.
+ */
+hidden?: boolean, };
+
+export type AnnotationParams = { 
+/**
+ * Session uuid.
+ */
+session?: string, 
+/**
+ * With `session`: one command's annotations.
+ */
+cmd_seq?: number, tag?: string, author?: string, 
+/**
+ * Include soft-deleted annotations.
+ */
+deleted?: boolean, 
+/**
+ * 1…500, default 200.
+ */
+limit?: number, cursor?: string, };

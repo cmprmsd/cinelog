@@ -1,4 +1,4 @@
-// Keyboard-first shortcuts (plan §8.1). M4 keys (timeline, live, annotate) are not bound yet.
+// Keyboard-first shortcuts (plan §8.1).
 
 export type Action =
   | 'focus-search'
@@ -15,6 +15,9 @@ export type Action =
   | 'back-5'
   | 'forward-5'
   | 'export'
+  | 'timeline'
+  | 'toggle-live'
+  | 'annotate'
   | 'help';
 
 export interface KeyLike {
@@ -38,6 +41,9 @@ const PLAIN: Record<string, Action> = {
   ',': 'back-5',
   '.': 'forward-5',
   e: 'export',
+  t: 'timeline',
+  l: 'toggle-live',
+  a: 'annotate',
   '?': 'help',
 };
 
@@ -78,5 +84,8 @@ export const SHORTCUTS: readonly { keys: string[]; what: string }[] = [
   { keys: ['Space'], what: 'Play / pause' },
   { keys: [',', '.'], what: 'Back / forward 5 s' },
   { keys: ['e'], what: 'Export the current command' },
+  { keys: ['t'], what: 'Team timeline' },
+  { keys: ['l'], what: 'Switch between the recording and the live view' },
+  { keys: ['a'], what: 'Annotate the current command or selection' },
   { keys: ['?'], what: 'This sheet' },
 ];

@@ -6,9 +6,10 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::model::{
-    Annotation, Checkpoint, Chunk, CompressCandidate, CompressionUpdate, EntryDetail, ForgetOutcome, ForgetTarget,
-    Forgotten, IndexBatch, IndexStatus, KnownCast, LegacyImportRow, OnceOptions, OnceSummary, OutputStats, Owner,
-    PollBudget, SearchPage, SearchQuery, SessionState, SessionSummary, Stamp, TranscriptState,
+    Annotation, AnnotationQuery, Checkpoint, Chunk, CompressCandidate, CompressionUpdate, EntryDetail, ForgetOutcome,
+    ForgetTarget, Forgotten, IndexBatch, IndexStatus, KnownCast, LegacyImportRow, OnceOptions, OnceSummary,
+    OutputStats, Owner, PollBudget, SearchPage, SearchQuery, SessionState, SessionSummary, Stamp, TagInfo,
+    TranscriptState,
 };
 
 /// Terminal transcript renderer (M2-A, `render::transcript`): avt 0.20 with a scrollback-0
@@ -120,6 +121,15 @@ pub trait MetaStore: Send {
     fn put_annotation(&mut self, annotation: &Annotation) -> Result<()>;
     /// Annotations of a session, including soft-deleted ones, by `created_at`.
     fn annotations(&self, session_uuid: &str) -> Result<Vec<Annotation>>;
+    /// One annotation by uuid, soft-deleted ones included.
+    fn annotation(&self, uuid: &str) -> Result<Option<Annotation>>;
+    /// Annotations matching `query`, ordered by `(created_at, uuid)`.
+    fn find_annotations(&self, query: &AnnotationQuery) -> Result<Vec<Annotation>>;
+    /// Every tag, by name.
+    fn tags(&self) -> Result<Vec<TagInfo>>;
+    /// Creates the tag if needed and sets its colour (`None`: automatic). Names are stored
+    /// as given (trimmed); callers normalise them.
+    fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo>;
     /// JSON Lines, one `{"table":…,"row":{…}}` per row of every table except
     /// `auth_sessions`. Returns the row count.
     fn export_jsonl(&self, out: &mut dyn Write) -> Result<u64>;

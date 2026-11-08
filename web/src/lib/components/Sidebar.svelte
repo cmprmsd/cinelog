@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, errorText, isAbort } from '../api/client';
-  import type { Session, Status, Tree, TreeParams } from '../api/types';
+  import { bus } from '../api/events.svelte';
+  import type { BusEvent, LiveSession, Session, Status, Tree, TreeParams } from '../api/types';
   import { fmtTs } from '../format';
   import { prefs } from '../prefs.svelte';
+  import { liveHref } from '../route';
   import { router } from '../router.svelte';
   import TreeNodes from './TreeNodes.svelte';
 
@@ -13,7 +15,7 @@
   const LIVE_POLL_MS = 5000;
   const TREE_REFRESH_MS = 60_000;
 
-  let live = $state<Session[]>([]);
+  let live = $state<LiveSession[]>([]);
   let tree = $state<Tree | null>(null);
   let treeError = $state<string | null>(null);
   let status = $state<Status | null>(null);
@@ -21,7 +23,33 @@
   /** Open tree branches; children render only when open (large legacy corpora). */
   let open = $state<Record<string, boolean>>({});
 
-  const liveKey = $derived(live.map((s) => s.uuid).join(','));
+  const liveKey = $derived(live.map((l) => l.session.uuid).join(','));
+
+  /** A polled session (bus down): its recorder status is unknown, shown as recording. */
+  const polled = (session: Session): LiveSession => ({ session, status: 'recording', reason: null, detail: null, since: null });
+
+  function onBus(e: BusEvent): void {
+    switch (e.type) {
+      case 'hello':
+        live = e.data.live;
+        break;
+      case 'session-start':
+      case 'session-update': {
+        const rest = live.filter((l) => l.session.uuid !== e.data.session.uuid);
+        live = [e.data, ...rest].sort((a, b) => b.session.started_at - a.session.started_at);
+        break;
+      }
+      case 'session-end':
+        live = live.filter((l) => l.session.uuid !== e.data.session);
+        break;
+      case 'index-progress':
+        if (status) status = { ...status, ...e.data };
+        break;
+      case 'import-progress':
+        if (status) status = { ...status, legacy: e.data };
+        break;
+    }
+  }
 
   function treeParams(w: Span): TreeParams {
     const now = Math.floor(Date.now() / 1000);
@@ -29,15 +57,21 @@
     return { from: now - (w === '7d' ? 7 : 30) * 86400 };
   }
 
+  // Live sessions come from the UI bus; while it is down (older server, network) they are
+  // polled instead.
   onMount(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = bus.subscribe(onBus);
+    const busOpen = () => bus.status === 'open';
     const poll = async () => {
-      try {
-        const page = await api.sessions({ live: true, limit: 50 });
-        if (!stopped) live = page.sessions;
-      } catch {
-        // Keep the last list; the next poll retries.
+      if (!busOpen()) {
+        try {
+          const page = await api.sessions({ live: true, limit: 50 });
+          if (!stopped && !busOpen()) live = page.sessions.map(polled);
+        } catch {
+          // Keep the last list; the next poll retries.
+        }
       }
       if (!stopped) timer = setTimeout(poll, LIVE_POLL_MS);
     };
@@ -49,6 +83,7 @@
     return () => {
       stopped = true;
       clearTimeout(timer);
+      off();
     };
   });
 
@@ -87,12 +122,16 @@
       <p class="muted empty">No live sessions.</p>
     {:else}
       <ul class="live" data-testid="live-list">
-        {#each live as s (s.uuid)}
+        {#each live as l (l.session.uuid)}
+          {@const s = l.session}
           <li>
-            <a href={`/s/${s.uuid}`} onclick={router.link} class:current={current === s.uuid}>
-              <span class="live-dot" aria-hidden="true"></span>
+            <a href={liveHref(s.uuid)} onclick={router.link} class:current={current === s.uuid} data-status={l.status}>
+              <span class="live-dot" class:paused={l.status !== 'recording'} aria-hidden="true"></span>
               <span class="who">{s.user}@{s.host}</span>
               <span class="muted where">{where(s)}</span>
+              {#if l.status !== 'recording'}
+                <span class="badge" title={[l.reason, l.detail].filter(Boolean).join(': ')}>{l.status}</span>
+              {/if}
             </a>
           </li>
         {/each}
@@ -220,6 +259,10 @@
   }
   .live a.current {
     background: var(--accent-soft);
+  }
+  .live-dot.paused {
+    animation: none;
+    opacity: 0.5;
   }
   .where {
     font-size: 0.85em;

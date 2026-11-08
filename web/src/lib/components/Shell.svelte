@@ -4,8 +4,10 @@
   import { dispatch, useKeys } from '../keymap';
   import { focusKind, shortcutFor } from '../keys';
   import { nextTheme, prefs } from '../prefs.svelte';
-  import type { Route } from '../route';
+  import LivePage from '../live/LivePage.svelte';
+  import { liveHref, type Route } from '../route';
   import { router } from '../router.svelte';
+  import TimelinePage from '../../routes/timeline/TimelinePage.svelte';
   import SearchBar from './SearchBar.svelte';
   import SearchPage from './SearchPage.svelte';
   import SessionPage from './SessionPage.svelte';
@@ -18,7 +20,7 @@
   let sheet: ShortcutSheet | undefined = $state();
   let sidebarOpen = $state(false);
 
-  const current = $derived(route.name === 'session' ? route.uuid : null);
+  const current = $derived(route.name === 'session' || route.name === 'live' ? route.uuid : null);
 
   function onkeydown(e: KeyboardEvent): void {
     const target = e.target;
@@ -43,6 +45,12 @@
     useKeys({
       'focus-search': () => searchBar?.focus(),
       help: () => sheet?.toggle(),
+      timeline: () => router.goto('/timeline'),
+      'toggle-live': () => {
+        if (route.name === 'session') router.goto(liveHref(route.uuid));
+        else if (route.name === 'live') router.goto(`/s/${route.uuid}`);
+        else return false;
+      },
       escape: () => {
         if (sheet?.close()) return;
         if (sidebarOpen) {
@@ -82,6 +90,12 @@
     >
     <a class="brand" href="/" onclick={router.link}>cinelog</a>
     <SearchBar bind:this={searchBar} onsubmit={submitSearch} />
+    <nav class="tabs" aria-label="Views">
+      <a href="/" onclick={router.link} aria-current={route.name === 'search' ? 'page' : undefined}>Search</a>
+      <a href="/timeline" onclick={router.link} aria-current={route.name === 'timeline' ? 'page' : undefined} data-testid="nav-timeline"
+        >Timeline</a
+      >
+    </nav>
     <div class="tools">
       <button
         type="button"
@@ -125,6 +139,10 @@
         <SearchPage />
       {:else if route.name === 'session'}
         <SessionPage uuid={route.uuid} />
+      {:else if route.name === 'timeline'}
+        <TimelinePage />
+      {:else if route.name === 'live'}
+        <LivePage uuid={route.uuid} />
       {:else}
         <div class="notfound">
           <h1>Not found</h1>
@@ -157,6 +175,20 @@
     color: var(--fg);
     text-decoration: none;
     padding-top: 0.25rem;
+  }
+  .tabs {
+    display: flex;
+    gap: 0.5rem;
+    padding-top: 0.3rem;
+    white-space: nowrap;
+  }
+  .tabs a {
+    color: var(--fg-muted);
+    text-decoration: none;
+  }
+  .tabs a[aria-current='page'] {
+    color: var(--fg);
+    font-weight: 600;
   }
   .tools {
     display: flex;

@@ -26,7 +26,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::api::types::Health;
 use crate::error::{Result, WebError};
 use crate::state::{AppState, Bound, WebContext};
-use crate::{VERSION, api, assets, auth, export, headers, hosts, play, tls};
+use crate::{VERSION, api, assets, auth, bus, export, headers, hosts, live, play, tls};
 
 /// Ports probed after the first one when it is in use (§7.1).
 pub const PORT_PROBES: u16 = 16;
@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .merge(api::routes())
         .merge(play::routes())
         .merge(export::routes())
+        .merge(live::routes())
         .route_layer(from_fn_with_state(state.clone(), auth::require_session));
     let api = Router::new()
         .merge(auth::routes())
@@ -186,6 +187,7 @@ fn skippable(e: &io::Error) -> bool {
 pub struct ServerHandle {
     info: ServerInfo,
     runtime_dir: PathBuf,
+    bus: bus::Bus,
     handle: axum_server::Handle<SocketAddr>,
     thread: Option<JoinHandle<()>>,
 }
@@ -196,8 +198,10 @@ impl ServerHandle {
         &self.info
     }
 
-    /// Graceful shutdown (5 s grace), then removes `server.json` if it is still ours.
+    /// Ends the SSE streams, shuts down gracefully (5 s grace), then removes `server.json`
+    /// if it is still ours.
     pub fn shutdown(mut self) {
+        self.bus.close();
         self.handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -258,6 +262,7 @@ pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
         version: VERSION.to_owned(),
     };
     let state = AppState::new(ctx, Bound { port, fingerprint, url }, hosts);
+    let bus = state.bus.clone();
     let app = router(state.clone());
     let handle = axum_server::Handle::new();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -271,6 +276,7 @@ pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
     let thread = std::thread::Builder::new().name("cinelog-web".into()).spawn(move || {
         rt.block_on(async move {
             state.hosts.start_refresh();
+            live::start(&state);
             let mut servers = Vec::new();
             for l in listeners {
                 match axum_server::from_tcp_rustls(l, tls_config.clone()) {
@@ -304,6 +310,7 @@ pub fn spawn(ctx: WebContext) -> Result<ServerHandle> {
     Ok(ServerHandle {
         info,
         runtime_dir,
+        bus,
         handle,
         thread: Some(thread),
     })
@@ -384,6 +391,49 @@ mod tests {
         assert_eq!(r.headers()["location"], "/s/0193a1b2-0000-7000-8000-000000000001");
         let r = link(Path("../x".into())).await;
         assert_eq!(r.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// The M4 routes are mounted behind the session check; unknown `/api` paths are 404.
+    #[tokio::test]
+    async fn m4_routes_are_mounted_behind_auth() {
+        use axum::body::Body;
+        use axum::extract::connect_info::MockConnectInfo;
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let app =
+            router(AppState::for_tests(dir.path())).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
+        let call = |method: Method, path: &str| {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "localhost:10443")
+                .header("origin", "https://localhost:10443")
+                .body(Body::empty())
+                .unwrap();
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let uuid = "0193a1b2-0000-7000-8000-000000000001";
+        for (method, path) in [
+            (Method::GET, format!("/api/sessions/{uuid}/live")),
+            (Method::GET, "/api/events".to_owned()),
+            (Method::GET, "/api/timeline".to_owned()),
+            (Method::GET, "/api/annotations".to_owned()),
+            (Method::POST, "/api/annotations".to_owned()),
+            (Method::PATCH, format!("/api/annotations/{uuid}")),
+            (Method::DELETE, format!("/api/annotations/{uuid}")),
+            (Method::GET, "/api/tags".to_owned()),
+            (Method::POST, "/api/tags".to_owned()),
+        ] {
+            assert_eq!(
+                call(method.clone(), &path).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(call(Method::GET, "/api/nope").await, StatusCode::NOT_FOUND);
     }
 
     #[test]

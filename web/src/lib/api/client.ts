@@ -2,6 +2,11 @@
 // cookie is HttpOnly and travels by itself; nothing secret ever goes into a URL.
 
 import type {
+  Annotation,
+  AnnotationCreate,
+  AnnotationPage,
+  AnnotationParams,
+  AnnotationPatch,
   ApiError,
   CommandList,
   ErrorCode,
@@ -18,6 +23,11 @@ import type {
   SessionPage,
   SessionParams,
   Status,
+  Tag,
+  TagList,
+  TagRequest,
+  Timeline,
+  TimelineParams,
   Tree,
   TreeParams,
 } from './types';
@@ -83,7 +93,9 @@ async function failure(res: Response): Promise<ApiFailure> {
   return new ApiFailure(res.status, code, message, Number.isFinite(ra) && ra > 0 ? ra : null);
 }
 
-export async function request<T>(method: 'GET' | 'POST', path: string, opts: RequestOptions = {}): Promise<T> {
+export type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+
+export async function request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {
   const init: RequestInit = { method, credentials: 'same-origin', signal: opts.signal, headers: {} };
   if (opts.body !== undefined) {
     init.headers = { 'Content-Type': 'application/json' };
@@ -123,6 +135,18 @@ export const api = {
   play: (uuid: string, signal?: AbortSignal) => get<PlayInfo>(`${sessionPath(uuid)}/play`, undefined, signal),
   forget: (req: ForgetRequest) => request<Forgotten>('POST', '/api/forget', { body: req }),
   exportUrl: (uuid: string, params: ExportParams) => `${sessionPath(uuid)}/export${buildQuery(params)}`,
+  // M4 (docs/API.md §9)
+  /** The player's `eventsource` driver URL of a session (`LiveMessage` stream). */
+  liveUrl: (uuid: string) => `${sessionPath(uuid)}/live`,
+  timeline: (params: TimelineParams, signal?: AbortSignal) => get<Timeline>('/api/timeline', params, signal),
+  annotations: (params: AnnotationParams, signal?: AbortSignal) =>
+    get<AnnotationPage>('/api/annotations', params, signal),
+  createAnnotation: (req: AnnotationCreate) => request<Annotation>('POST', '/api/annotations', { body: req }),
+  updateAnnotation: (uuid: string, patch: AnnotationPatch) =>
+    request<Annotation>('PATCH', `/api/annotations/${seg(uuid)}`, { body: patch }),
+  deleteAnnotation: (uuid: string) => request<void>('DELETE', `/api/annotations/${seg(uuid)}`),
+  tags: (signal?: AbortSignal) => get<TagList>('/api/tags', undefined, signal),
+  putTag: (req: TagRequest) => request<Tag>('POST', '/api/tags', { body: req }),
 };
 
 /** A short user-facing text for any thrown value. */

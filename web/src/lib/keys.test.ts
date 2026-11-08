@@ -11,6 +11,9 @@ describe('shortcuts', () => {
     expect(shortcutFor(k('N'), 'none')).toBe('prev-hit');
     expect(shortcutFor(k(']'), 'none')).toBe('next-chapter');
     expect(shortcutFor(k(' '), 'link')).toBe('toggle-play');
+    expect(shortcutFor(k('t'), 'none')).toBe('timeline');
+    expect(shortcutFor(k('l'), 'none')).toBe('toggle-live');
+    expect(shortcutFor(k('a'), 'link')).toBe('annotate');
     expect(shortcutFor(k('x'), 'none')).toBeNull();
   });
 

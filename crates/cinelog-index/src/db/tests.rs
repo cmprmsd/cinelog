@@ -1432,6 +1432,87 @@ fn meta_settings_and_annotations() {
     assert_eq!(other.annotations(U1).unwrap().len(), 2);
 }
 
+/// `find_annotations`, `annotation`, `tags` and `put_tag`, for any [`MetaStore`].
+fn check_annotation_queries(m: &mut dyn MetaStore) {
+    let mut a = |uuid: &str, session: &str, created: f64, tags: &[&str]| {
+        let mut x = annotation(uuid, created, tags);
+        x.session_uuid = session.into();
+        m.put_annotation(&x).unwrap();
+        x
+    };
+    a("a1", U1, 10.0, &["ops"]);
+    a("a3", U1, 20.0, &["ops", "incident"]);
+    a("a2", U1, 20.0, &[]);
+    let mut gone = a("a4", U2, 30.0, &["ops"]);
+    gone.deleted_at = Some(31.0);
+    gone.author = "bob".into();
+    m.put_annotation(&gone).unwrap();
+
+    let uuids =
+        |q: &AnnotationQuery| -> Vec<String> { m.find_annotations(q).unwrap().into_iter().map(|a| a.uuid).collect() };
+    let all = AnnotationQuery::default();
+    assert_eq!(uuids(&all), ["a1", "a2", "a3"], "creation order, uuid breaks ties");
+    let q = AnnotationQuery {
+        include_deleted: true,
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a1", "a2", "a3", "a4"]);
+    let q = AnnotationQuery {
+        sessions: vec![U2.into()],
+        include_deleted: true,
+        author: Some("bob".into()),
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a4"]);
+    let q = AnnotationQuery {
+        sessions: vec![U1.into(), U2.into()],
+        tag: Some("ops".into()),
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a1", "a3"]);
+    let q = AnnotationQuery {
+        after: Some((20.0, "a2".into())),
+        limit: 1,
+        include_deleted: true,
+        ..all.clone()
+    };
+    assert_eq!(uuids(&q), ["a3"], "keyset cursor and limit");
+    let q = AnnotationQuery {
+        cmd_seq: Some(3),
+        ..all.clone()
+    };
+    assert!(uuids(&q).is_empty());
+
+    assert_eq!(m.annotation("a4").unwrap().unwrap().deleted_at, Some(31.0));
+    assert_eq!(m.annotation("nope").unwrap(), None);
+
+    let tag = |name: &str, color: Option<&str>, count| TagInfo {
+        name: name.into(),
+        color: color.map(str::to_owned),
+        count,
+    };
+    assert_eq!(m.tags().unwrap(), [tag("incident", None, 1), tag("ops", None, 2)]);
+    assert_eq!(
+        m.put_tag(" ops ", Some("#ff8800")).unwrap(),
+        tag("ops", Some("#ff8800"), 2)
+    );
+    assert_eq!(m.put_tag("new", None).unwrap(), tag("new", None, 0));
+    assert_eq!(
+        m.put_tag("ops", None).unwrap(),
+        tag("ops", None, 2),
+        "None clears the colour"
+    );
+    assert!(m.put_tag("  ", None).is_err());
+    assert_eq!(m.tags().unwrap().len(), 3);
+}
+
+#[test]
+fn meta_annotation_queries_and_tags() {
+    let env = Env::new();
+    check_annotation_queries(env.meta().as_mut());
+    check_annotation_queries(&mut crate::fake::MemIndex::new());
+}
+
 #[test]
 fn meta_export_import_roundtrip_and_merge() {
     let env = Env::new();

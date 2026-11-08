@@ -1,16 +1,19 @@
 <script lang="ts">
   import { api, ApiFailure, errorText, isAbort } from '../api/client';
-  import type { Command, ExportFormat, ExportParams, SessionDetail } from '../api/types';
+  import AnnotationsPanel from '../annotations/AnnotationsPanel.svelte';
+  import type { BusEvent, Command, SessionDetail } from '../api/types';
+  import { bus } from '../api/events.svelte';
   import { chapterAt, nextChapter, prevChapter, stepHit } from '../chapters';
-  import { download } from '../download';
+  import ExportMenu from '../export/ExportMenu.svelte';
   import { toSearchParams, type SearchState } from '../filters';
-  import { fmtDuration, fmtTs, keyLabel, oneLine, shortId, tzLabel } from '../format';
+  import { fmtDuration, fmtTs, keyLabel, oneLine, tzLabel } from '../format';
   import { useKeys } from '../keymap';
   import { markerBands } from '../markers';
   import { collectHitTimes } from '../results';
   import { playerTheme, prefs } from '../prefs.svelte';
-  import { sessionHref } from '../route';
+  import { liveHref, sessionHref } from '../route';
   import { router } from '../router.svelte';
+  import type { AnnotationSpan, TimeRange } from '../spans';
   import CommandStrip from './CommandStrip.svelte';
   import Player from './Player.svelte';
   import Rail from './Rail.svelte';
@@ -42,7 +45,10 @@
   let keys = $state<string[]>([]);
   let seek = $state({ t: 0, nonce: 0 });
   let notice = $state<string | null>(null);
-  let exportMenu: HTMLDetailsElement | undefined = $state();
+  let exportMenu: ExportMenu | undefined = $state();
+  let annotations: AnnotationsPanel | undefined = $state();
+  let annotationSpans = $state<AnnotationSpan[]>([]);
+  let selection = $state<TimeRange | null>(null);
   let player: Player | undefined = $state();
   let reload = $state(0);
 
@@ -73,6 +79,23 @@
     );
     return () => ctl.abort();
   });
+
+  // Something of this session was forgotten elsewhere (another browser, the CLI): reload.
+  // Our own forget reloads by itself, so its event is skipped once.
+  let ownForget: string | null = null;
+  const forgetKey = (seq: number) => `${uuid}:${seq}`;
+  $effect(() =>
+    bus.subscribe((e: BusEvent) => {
+      if (e.type !== 'forgotten' || e.data.target.uuid !== uuid) return;
+      const t = e.data.target;
+      if (t.kind === 'command' && ownForget === forgetKey(t.seq)) {
+        ownForget = null;
+        return;
+      }
+      seekTo(currentTime);
+      reload += 1;
+    }),
+  );
 
   // Seek target: a time wins; a command resolves once the chapters are known. Each target
   // object seeks once (a reload after forget does not jump back).
@@ -166,14 +189,12 @@
       'toggle-play': () => player?.toggle(),
       'back-5': () => player?.step(-5),
       'forward-5': () => player?.step(5),
-      export: () => {
-        if (!exportMenu) return false;
-        exportMenu.open = true;
-        exportMenu.querySelector<HTMLButtonElement>('button')?.focus();
-      },
+      export: () => exportMenu?.open() ?? false,
+      annotate: () => annotations?.annotate() ?? false,
       escape: () => {
-        if (exportMenu?.open) {
-          exportMenu.open = false;
+        if (exportMenu?.close()) return;
+        if (selection) {
+          selection = null;
           return;
         }
         if (!onclose) return false;
@@ -194,18 +215,6 @@
     }
   }
 
-  async function exportAs(format: ExportFormat, scope: 'command' | 'session'): Promise<void> {
-    if (exportMenu) exportMenu.open = false;
-    const params: ExportParams = { format };
-    if (scope === 'command' && currentCmd) params.cmd = currentCmd.seq;
-    try {
-      const name = await download(api.exportUrl(uuid, params), `cinelog-${shortId(uuid)}.${format}`);
-      flash(`Downloaded ${name}.`);
-    } catch (e) {
-      flash(`Export failed: ${errorText(e)}`);
-    }
-  }
-
   async function forgetCurrent(): Promise<void> {
     const c = currentCmd;
     if (!c) return;
@@ -213,6 +222,7 @@
       `Forget "$ ${oneLine(c.typed).slice(0, 80)}"?\n\nIt is removed from search, and playback and export mask its output. The cast file on disk is not changed.`,
     );
     if (!ok) return;
+    ownForget = forgetKey(c.seq);
     try {
       await api.forget({ session_uuid: uuid, cmd_seq: c.seq });
       flash('Forgotten.');
@@ -222,6 +232,7 @@
       reload += 1;
       onforget?.(uuid, c.seq);
     } catch (e) {
+      ownForget = null;
       flash(`Forget failed: ${errorText(e)}`);
     }
   }
@@ -274,20 +285,11 @@
         {/if}
       </div>
       <div class="actions">
+        {#if s.state === 'live' && router.path !== liveHref(uuid)}
+          <a class="btn" href={liveHref(uuid)} onclick={router.link} data-testid="watch-live">Watch live</a>
+        {/if}
         <button type="button" onclick={copyLink} title="Copy a link to the current command">Copy link</button>
-        <details class="menu" bind:this={exportMenu}>
-          <summary class="btn">Export</summary>
-          <div class="menu-body" role="menu">
-            <span class="muted">Current command{currentCmd ? '' : ' (none)'}</span>
-            {#each ['cast', 'txt', 'html'] as const as f (f)}
-              <button type="button" role="menuitem" disabled={!currentCmd} onclick={() => exportAs(f, 'command')}>.{f}</button>
-            {/each}
-            <span class="muted">Whole session</span>
-            {#each ['cast', 'txt', 'html'] as const as f (f)}
-              <button type="button" role="menuitem" onclick={() => exportAs(f, 'session')}>.{f}</button>
-            {/each}
-          </div>
-        </details>
+        <ExportMenu bind:this={exportMenu} {uuid} command={currentCmd ?? null} {selection} onnotice={flash} />
         <button type="button" onclick={forgetCurrent} disabled={!currentCmd} title="Remove the current command from search and playback"
           >Forget…</button
         >
@@ -315,7 +317,17 @@
       />
     {/key}
 
-    <Rail duration={total} {commands} bands={marks.bands} nested={marks.nested} hits={hitTimes} {currentTime} onseek={seekTo} />
+    <Rail
+      duration={total}
+      {commands}
+      bands={marks.bands}
+      nested={marks.nested}
+      hits={hitTimes}
+      {currentTime}
+      onseek={seekTo}
+      bind:selection
+      annotations={annotationSpans}
+    />
     <CommandStrip {commands} {current} {focusSeq} onseek={seekTo} />
 
     <div class="foot">
@@ -340,6 +352,16 @@
       {/if}
     </div>
     {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+    <AnnotationsPanel
+      bind:this={annotations}
+      bind:spans={annotationSpans}
+      session={uuid}
+      {commands}
+      current={currentCmd ?? null}
+      {currentTime}
+      {selection}
+      onseek={seekTo}
+    />
   {/if}
 </section>
 
@@ -384,33 +406,6 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: flex-start;
-  }
-  .menu {
-    position: relative;
-  }
-  .menu summary {
-    list-style: none;
-  }
-  .menu summary::-webkit-details-marker {
-    display: none;
-  }
-  .menu-body {
-    position: absolute;
-    right: 0;
-    z-index: 10;
-    display: grid;
-    grid-template-columns: repeat(3, auto);
-    gap: 0.3rem;
-    padding: 0.5rem;
-    margin-top: 0.2rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-elev);
-    box-shadow: var(--shadow);
-  }
-  .menu-body span {
-    grid-column: 1 / -1;
-    font-size: 0.85em;
   }
   .foot {
     display: flex;

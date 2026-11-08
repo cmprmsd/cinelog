@@ -1,5 +1,6 @@
-//! Wire types of the JSON API (docs/API.md). Frozen for M3 by the contracts work package:
-//! additive changes only, through the contracts owner. `web/src/lib/api/types.ts` is
+//! Wire types of the JSON API (docs/API.md). Frozen for M3 and extended for M4 (live, UI
+//! bus, timeline, annotations) by the contracts work packages: additive changes only,
+//! through the contracts owner. `web/src/lib/api/types.ts` is
 //! generated from this file (see [`typescript`]); never edit the TS file by hand.
 //!
 //! Conventions:
@@ -118,7 +119,8 @@ pub enum ErrorCode {
     BadRequest,
     /// 401: no, expired or unbound session cookie; wrong token.
     Unauthorized,
-    /// 403: `Origin` mismatch on a mutating request.
+    /// 403: `Origin` mismatch on a mutating request, or a change to another principal's
+    /// annotation that only its author may make.
     Forbidden,
     /// 404: unknown session, command, segment or route.
     NotFound,
@@ -697,6 +699,427 @@ pub struct PlaySegment {
     pub events: Vec<(Seconds, String, String)>,
 }
 
+// ------------------------------------------------------------------ live (M4)
+
+/// First message of every `GET /api/sessions/{uuid}/live` connection: the asciinema-player
+/// `eventsource` driver's reset, carrying the terminal at join time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LiveInit {
+    pub cols: u16,
+    pub rows: u16,
+    /// Session seconds at the join (the last event read); the player clock starts here and
+    /// every following event carries absolute session seconds.
+    pub time: Seconds,
+    /// avt dump of the terminal at `time`, forgotten ranges masked.
+    pub init: String,
+}
+
+/// One live event `[t, code, data]`: absolute session seconds, code `o`, `i`, `r`
+/// (`"COLSxROWS"`) or `m` (`$ <typed>` chapter label), rewritten and masked as `/cast`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LiveEvent(pub Seconds, pub String, pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveStreamState {
+    Offline,
+}
+
+/// The recorder died without ending its cast (session `crashed`). Event `done` follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LiveOffline {
+    pub state: LiveStreamState,
+}
+
+/// `data` of an unnamed (`message`) event of the live stream. The stream ends with an event
+/// named `done` (empty data).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum LiveMessage {
+    Init(LiveInit),
+    Event(LiveEvent),
+    Offline(LiveOffline),
+}
+
+// ------------------------------------------------------------------ UI bus (M4)
+
+/// What a live session's recorder is doing (its registry entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum RecStatus {
+    Recording,
+    /// A multiplexer client (tmux), a nested recording or `cinelog pause` holds the pause.
+    Paused,
+    /// The cast was closed after an I/O error; passthrough only until `cinelog resume`.
+    Degraded,
+}
+
+/// A session being recorded now (`state = live`) with its recorder status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LiveSession {
+    pub session: Session,
+    pub status: RecStatus,
+    /// `paused`: `multiplexer`, `nested` or `user`; `degraded`: the error. `null` while
+    /// recording.
+    pub reason: Option<String>,
+    /// What holds the pause: the multiplexer client's comm (`tmux: client`), the nested
+    /// session's uuid, or the `cinelog pause --reason` text.
+    pub detail: Option<String>,
+    /// ts the current status began, when known.
+    pub since: Option<Seconds>,
+}
+
+/// Bus `hello`: sent first on every (re)connection; a full resync of the live sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct BusHello {
+    pub version: String,
+    pub server_started_at: Seconds,
+    /// Newest `started_at` first.
+    pub live: Vec<LiveSession>,
+}
+
+/// Bus `session-end`: a live session left `live`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SessionEnd {
+    pub session: String,
+    /// `ended`, `crashed` (recorder died: live viewers show offline), `degraded` or `error`.
+    pub state: SessionState,
+    pub ended_at: Option<Seconds>,
+}
+
+/// Bus `index-progress`: the indexer view of `Status`, at most every 2 s while it changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct IndexProgress {
+    pub backlog_bytes: u64,
+    pub commands: u64,
+    pub outputs: u64,
+    pub live: Vec<LiveLag>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeOp {
+    Created,
+    Updated,
+    /// Soft-deleted: `deleted_at` is set.
+    Deleted,
+}
+
+/// Bus `annotation`: an annotation was created, changed or deleted (by anyone).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AnnotationEvent {
+    pub op: ChangeOp,
+    pub annotation: Annotation,
+}
+
+/// One event of `GET /api/events`. On the wire the SSE event name is `type` and the SSE
+/// `data` is the JSON of `data` ([`Self::name`], [`Self::data_json`]); clients rebuild this
+/// object from both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", content = "data", rename_all = "kebab-case")]
+pub enum BusEvent {
+    Hello(BusHello),
+    SessionStart(LiveSession),
+    /// Recorder status or session metadata of a live session changed.
+    SessionUpdate(LiveSession),
+    SessionEnd(SessionEnd),
+    IndexProgress(IndexProgress),
+    /// Legacy import counters, at most every 2 s while an import runs.
+    ImportProgress(LegacyProgress),
+    Annotation(AnnotationEvent),
+    /// A tag was created or its colour changed (`count` as of the change).
+    Tag(Tag),
+    /// Something was forgotten (`POST /api/forget` or `cinelog forget`): drop it from
+    /// lists, reload playback of that session.
+    Forgotten(Forgotten),
+}
+
+impl BusEvent {
+    /// Every SSE event name, in declaration order.
+    pub const NAMES: [&'static str; 9] = [
+        "hello",
+        "session-start",
+        "session-update",
+        "session-end",
+        "index-progress",
+        "import-progress",
+        "annotation",
+        "tag",
+        "forgotten",
+    ];
+
+    /// The SSE event name.
+    pub fn name(&self) -> &'static str {
+        let i = match self {
+            Self::Hello(_) => 0,
+            Self::SessionStart(_) => 1,
+            Self::SessionUpdate(_) => 2,
+            Self::SessionEnd(_) => 3,
+            Self::IndexProgress(_) => 4,
+            Self::ImportProgress(_) => 5,
+            Self::Annotation(_) => 6,
+            Self::Tag(_) => 7,
+            Self::Forgotten(_) => 8,
+        };
+        Self::NAMES[i]
+    }
+
+    /// The SSE `data` line: the JSON of the payload (one line).
+    pub fn data_json(&self) -> String {
+        let r = match self {
+            Self::Hello(d) => serde_json::to_string(d),
+            Self::SessionStart(d) | Self::SessionUpdate(d) => serde_json::to_string(d),
+            Self::SessionEnd(d) => serde_json::to_string(d),
+            Self::IndexProgress(d) => serde_json::to_string(d),
+            Self::ImportProgress(d) => serde_json::to_string(d),
+            Self::Annotation(d) => serde_json::to_string(d),
+            Self::Tag(d) => serde_json::to_string(d),
+            Self::Forgotten(d) => serde_json::to_string(d),
+        };
+        r.unwrap_or_else(|_| "null".to_owned())
+    }
+}
+
+// ------------------------------------------------------------------ timeline (M4)
+
+/// `group=` of `GET /api/timeline`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineGroup {
+    /// Lanes are people, rows their panes and shells (default).
+    #[default]
+    User,
+    /// Lanes are panes and shells, rows the people in them.
+    Pane,
+}
+
+/// `GET /api/timeline`: command blocks of every session active in `[from, to]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Timeline {
+    pub from: Seconds,
+    pub to: Seconds,
+    pub group: TimelineGroup,
+    /// By label.
+    pub lanes: Vec<TimelineLane>,
+    /// Spans of at least 10 min inside `[from, to]` in which no command ran in any row
+    /// (drawn collapsed, as a break mark). Ascending.
+    pub idle: Vec<TimeSpan>,
+    /// Annotations of the sessions in the window, by `ts_from`.
+    pub annotations: Vec<TimelineAnnotation>,
+    /// Commands in the window (before aggregation).
+    pub commands: u64,
+    /// More than 20 000 commands: rows carry `density` instead of `blocks`.
+    pub aggregated: bool,
+    /// Width of a density bin when `aggregated`.
+    pub bin_secs: Option<Seconds>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineLane {
+    /// `user:<name>` (group `user`) or the row key of the pane (group `pane`).
+    pub key: String,
+    pub label: String,
+    /// By first activity in the window.
+    pub rows: Vec<TimelineRow>,
+}
+
+/// One drawn row: a pane (or non-tmux shell) of one person.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineRow {
+    /// Unique within the response. Pane: `pane:<host>/<tmux server>/<pane>`; shell outside
+    /// tmux: `tty:<host>/<tty>` (or `session:<uuid>` without a tty); with group `pane` the
+    /// lane's row per person is `<pane key>|user:<name>`.
+    pub key: String,
+    /// `<tmux session>:<window>.<pane>` or `<holder_comm> <tty>`; with group `pane` the person.
+    pub label: String,
+    pub host: String,
+    /// The person: `sudo_user`, else `claimed_user`, else `user`.
+    pub user: String,
+    pub tmux: TmuxLocation,
+    pub holder_comm: Option<String>,
+    pub tty: Option<String>,
+    /// Sessions drawn in this row (nested sessions in their parent's row), oldest first.
+    pub sessions: Vec<TimelineSession>,
+    /// By `ts_start`; empty when the response is `aggregated`.
+    pub blocks: Vec<TimelineBlock>,
+    /// Pauses, skips, nested starts, gaps and forgotten spans (always sent), by `ts`.
+    pub marks: Vec<TimelineMark>,
+    /// Only when `aggregated`: bins with at least one command, ascending.
+    pub density: Vec<DensityBin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineSession {
+    pub uuid: String,
+    pub user: String,
+    pub state: SessionState,
+    pub started_at: Seconds,
+    pub ended_at: Option<Seconds>,
+    pub parent_uuid: Option<String>,
+    pub legacy: bool,
+}
+
+/// One command. Click: open `/s/<session>?cmd=<seq>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineBlock {
+    pub session: String,
+    pub seq: u64,
+    pub t_start: Seconds,
+    pub ts_start: Seconds,
+    /// `null`: still running (draw to now), or never closed (draw to the session end).
+    pub ts_end: Option<Seconds>,
+    pub exit: Option<i32>,
+    /// First line of `typed`, at most 200 characters (hover text).
+    pub typed: String,
+    pub cwd: Option<String>,
+    /// Legacy boundaries (drawn hatched).
+    pub approx: bool,
+    pub depth: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineMarkKind {
+    /// Recording paused (span; `reason` `multiplexer`, `nested` or `user`).
+    Pause,
+    /// A leading-space command ran unrecorded (point).
+    Skip,
+    /// A nested recording started (point; `child` is its session).
+    Nested,
+    /// Output was dropped (disk full or stalled; span).
+    Gap,
+    /// Masked by a forget (span; `detail` is who forgot it).
+    Forgotten,
+}
+
+/// A visible "not recorded here" marker (plan §15.2: every pause or skip shows).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineMark {
+    pub session: String,
+    pub kind: TimelineMarkKind,
+    pub ts: Seconds,
+    /// End of a span; `null` for points and for a span still open.
+    pub ts_end: Option<Seconds>,
+    pub reason: Option<String>,
+    pub detail: Option<String>,
+    /// `nested`: the child session.
+    pub child: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct DensityBin {
+    /// Bin start; the bin covers `[ts, ts + bin_secs)`.
+    pub ts: Seconds,
+    pub commands: u32,
+    /// Commands with a non-zero exit.
+    pub failed: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimeSpan {
+    pub from: Seconds,
+    pub to: Seconds,
+}
+
+/// An annotation placed on the timeline (wall time; a command annotation spans its command).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineAnnotation {
+    pub uuid: String,
+    pub session: String,
+    /// [`TimelineRow::key`] of the session's row.
+    pub row: String,
+    pub cmd_seq: Option<u64>,
+    pub ts_from: Seconds,
+    pub ts_to: Seconds,
+    pub tags: Vec<String>,
+    /// Colour of the first tag that has one.
+    pub color: Option<String>,
+    pub author: String,
+}
+
+// ------------------------------------------------------------------ annotations and tags (M4)
+
+/// A shared note (meta.db). Exactly one of `cmd_seq` or `t_from`/`t_to` is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Annotation {
+    pub uuid: String,
+    pub session: String,
+    pub cmd_seq: Option<u64>,
+    /// Session seconds of a span annotation.
+    pub t_from: Option<Seconds>,
+    pub t_to: Option<Seconds>,
+    /// Principal who wrote it; only the author may edit the body or delete it.
+    pub author: String,
+    /// Plain text; clients render it as text, with `http(s)://` URLs as links.
+    pub body: String,
+    /// Sorted names.
+    pub tags: Vec<String>,
+    pub created_at: Seconds,
+    pub updated_at: Seconds,
+    pub deleted_at: Option<Seconds>,
+}
+
+/// `GET /api/annotations`: oldest `created_at` first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct AnnotationPage {
+    pub annotations: Vec<Annotation>,
+    pub next: Option<String>,
+}
+
+/// `POST /api/annotations` body: `session_uuid` with `cmd_seq`, or with `t_from` and
+/// `t_to` (session seconds, `t_from ≤ t_to`). A body or at least one tag is required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(optional_fields)]
+pub struct AnnotationCreate {
+    pub session_uuid: String,
+    #[serde(default)]
+    pub cmd_seq: Option<u64>,
+    #[serde(default)]
+    pub t_from: Option<Seconds>,
+    #[serde(default)]
+    pub t_to: Option<Seconds>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// `PATCH /api/annotations/{uuid}` body; at least one field. `body` and `tags` (replace
+/// all) are for the author only; `add_tags` is open to every principal.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(default)]
+pub struct AnnotationPatch {
+    pub body: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub add_tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Tag {
+    pub name: String,
+    /// `#rrggbb`; `null`: the client derives a colour from the name.
+    pub color: Option<String>,
+    /// Annotations (not deleted) carrying it.
+    pub count: u64,
+}
+
+/// `GET /api/tags`: by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TagList {
+    pub tags: Vec<Tag>,
+}
+
+/// `POST /api/tags` body: creates the tag or sets its colour (absent or `null`: automatic).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(optional_fields)]
+pub struct TagRequest {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
 // ------------------------------------------------------------------ query parameters
 
 /// Query of `GET /api/search`. Empty or missing `q` lists the newest commands.
@@ -785,6 +1208,40 @@ pub struct ExportParams {
     pub to: Option<Seconds>,
     #[serde(default)]
     pub cmd: Option<u64>,
+}
+
+/// Query of `GET /api/timeline`. Default window: the last 24 h; at most 31 days.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(default)]
+pub struct TimelineParams {
+    /// ts bounds; commands overlapping `[from, to]` are included.
+    pub from: Option<Seconds>,
+    pub to: Option<Seconds>,
+    pub group: Option<TimelineGroup>,
+    /// Only this person (`sudo_user`, else `claimed_user`, else `user`).
+    pub user: Option<String>,
+    pub host: Option<String>,
+    /// Include hidden (`TERM=dumb` legacy) sessions.
+    pub hidden: Option<bool>,
+}
+
+/// Query of `GET /api/annotations`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(optional_fields)]
+#[serde(default)]
+pub struct AnnotationParams {
+    /// Session uuid.
+    pub session: Option<String>,
+    /// With `session`: one command's annotations.
+    pub cmd_seq: Option<u64>,
+    pub tag: Option<String>,
+    pub author: Option<String>,
+    /// Include soft-deleted annotations.
+    pub deleted: Option<bool>,
+    /// 1…500, default 200.
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 // ------------------------------------------------------------------ conversions
@@ -945,6 +1402,62 @@ impl From<im::LegacyProgress> for LegacyProgress {
     }
 }
 
+impl From<cinelog_core::RecState> for RecStatus {
+    fn from(s: cinelog_core::RecState) -> Self {
+        match s {
+            cinelog_core::RecState::Live => Self::Recording,
+            cinelog_core::RecState::Paused => Self::Paused,
+            cinelog_core::RecState::Degraded => Self::Degraded,
+        }
+    }
+}
+
+impl From<&im::Annotation> for Annotation {
+    fn from(a: &im::Annotation) -> Self {
+        let mut tags = a.tags.clone();
+        tags.sort();
+        tags.dedup();
+        Self {
+            uuid: a.uuid.clone(),
+            session: a.session_uuid.clone(),
+            cmd_seq: a.cmd_seq,
+            t_from: a.t_from,
+            t_to: a.t_to,
+            author: a.author.clone(),
+            body: a.body.clone(),
+            tags,
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+            deleted_at: a.deleted_at,
+        }
+    }
+}
+
+impl From<im::TagInfo> for Tag {
+    fn from(t: im::TagInfo) -> Self {
+        Self {
+            name: t.name,
+            color: t.color,
+            count: t.count,
+        }
+    }
+}
+
+/// The registry's `state_reason` (`multiplexer: tmux: client`, `user: lunch`, …) split into
+/// [`LiveSession::reason`] and [`LiveSession::detail`] at the first `": "`.
+pub fn split_state_reason(state_reason: Option<&str>) -> (Option<String>, Option<String>) {
+    match state_reason.map(str::trim).filter(|r| !r.is_empty()) {
+        None => (None, None),
+        Some(r) => match r.split_once(": ") {
+            Some((reason, detail)) => (
+                Some(reason.to_owned()),
+                Some(detail.to_owned()).filter(|d| !d.is_empty()),
+            ),
+            None => (Some(r.to_owned()), None),
+        },
+    }
+}
+
 /// Validation error of a [`ForgetRequest`] (400).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ForgetRequestError {
@@ -978,6 +1491,213 @@ impl ForgetRequest {
             (Some(_), _, _) => Err(ForgetRequestError::Ambiguous),
             _ => Err(ForgetRequestError::HalfRange),
         }
+    }
+}
+
+// ------------------------------------------------------------------ annotation validation
+
+/// Longest annotation body in bytes.
+pub const MAX_ANNOTATION_BODY: usize = 16 * 1024;
+/// Most tags on one annotation.
+pub const MAX_TAGS: usize = 16;
+/// Longest tag name in characters.
+pub const MAX_TAG_CHARS: usize = 40;
+
+/// Validation error of an annotation or tag request (400).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AnnotationRequestError {
+    #[error("session_uuid is not a uuid")]
+    BadUuid,
+    #[error("give either cmd_seq or both t_from and t_to")]
+    NoTarget,
+    #[error("give either cmd_seq or both t_from and t_to, not both")]
+    Ambiguous,
+    #[error("t_from and t_to come together")]
+    HalfRange,
+    #[error("t_from and t_to must be finite, non-negative and ordered")]
+    BadRange,
+    #[error("an annotation needs a body or a tag")]
+    Empty,
+    #[error("the body is longer than {MAX_ANNOTATION_BODY} bytes")]
+    BodyTooLong,
+    #[error("at most {MAX_TAGS} tags")]
+    TooManyTags,
+    #[error("tag names are 1 to {MAX_TAG_CHARS} letters, digits or - _ . : / + # @")]
+    BadTag,
+    #[error("colours are #rgb or #rrggbb")]
+    BadColor,
+    #[error("nothing to change")]
+    EmptyPatch,
+}
+
+/// A tag name as stored: trimmed, lowercase, 1 to [`MAX_TAG_CHARS`] characters, each a
+/// letter, a digit or one of `-_.:/+#@`.
+pub fn normalize_tag(name: &str) -> Result<String, AnnotationRequestError> {
+    let n = name.trim().to_lowercase();
+    let len = n.chars().count();
+    let ok = (1..=MAX_TAG_CHARS).contains(&len) && n.chars().all(|c| c.is_alphanumeric() || "-_.:/+#@".contains(c));
+    if ok { Ok(n) } else { Err(AnnotationRequestError::BadTag) }
+}
+
+/// A tag colour as stored: `#rrggbb`, lowercase (`#rgb` is expanded).
+pub fn normalize_color(color: &str) -> Result<String, AnnotationRequestError> {
+    let hex = color
+        .trim()
+        .strip_prefix('#')
+        .filter(|h| h.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or(AnnotationRequestError::BadColor)?
+        .to_ascii_lowercase();
+    match hex.len() {
+        6 => Ok(format!("#{hex}")),
+        3 => Ok(hex.chars().fold(String::from("#"), |mut out, c| {
+            out.push(c);
+            out.push(c);
+            out
+        })),
+        _ => Err(AnnotationRequestError::BadColor),
+    }
+}
+
+/// Normalised, sorted and de-duplicated tag names.
+pub fn normalize_tags(tags: &[String]) -> Result<Vec<String>, AnnotationRequestError> {
+    let mut out = tags.iter().map(|t| normalize_tag(t)).collect::<Result<Vec<_>, _>>()?;
+    out.sort();
+    out.dedup();
+    if out.len() > MAX_TAGS {
+        return Err(AnnotationRequestError::TooManyTags);
+    }
+    Ok(out)
+}
+
+fn normalize_body(body: &str) -> Result<String, AnnotationRequestError> {
+    let body = body.trim_end();
+    if body.len() > MAX_ANNOTATION_BODY {
+        return Err(AnnotationRequestError::BodyTooLong);
+    }
+    Ok(body.to_owned())
+}
+
+/// A validated [`AnnotationCreate`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewAnnotation {
+    /// Lowercase hyphenated.
+    pub session_uuid: String,
+    pub cmd_seq: Option<u64>,
+    pub t_from: Option<Seconds>,
+    pub t_to: Option<Seconds>,
+    /// Trailing whitespace removed.
+    pub body: String,
+    /// See [`normalize_tags`].
+    pub tags: Vec<String>,
+}
+
+impl NewAnnotation {
+    /// The meta.db row for `author`, created at `now` (`uuid` a fresh UUIDv7).
+    pub fn into_row(self, uuid: String, author: &str, now: Seconds) -> im::Annotation {
+        im::Annotation {
+            uuid,
+            session_uuid: self.session_uuid,
+            cmd_seq: self.cmd_seq,
+            t_from: self.t_from,
+            t_to: self.t_to,
+            author: author.to_owned(),
+            body: self.body,
+            tags: self.tags,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        }
+    }
+}
+
+impl AnnotationCreate {
+    pub fn validate(&self) -> Result<NewAnnotation, AnnotationRequestError> {
+        let session_uuid = uuid::Uuid::try_parse(self.session_uuid.trim())
+            .map_err(|_| AnnotationRequestError::BadUuid)?
+            .hyphenated()
+            .to_string();
+        match (self.cmd_seq, self.t_from, self.t_to) {
+            (Some(_), None, None) => {}
+            (None, Some(a), Some(b)) => {
+                if !(a.is_finite() && b.is_finite() && 0.0 <= a && a <= b) {
+                    return Err(AnnotationRequestError::BadRange);
+                }
+            }
+            (None, None, None) => return Err(AnnotationRequestError::NoTarget),
+            (Some(_), _, _) => return Err(AnnotationRequestError::Ambiguous),
+            _ => return Err(AnnotationRequestError::HalfRange),
+        }
+        let body = normalize_body(self.body.as_deref().unwrap_or_default())?;
+        let tags = normalize_tags(self.tags.as_deref().unwrap_or_default())?;
+        if body.is_empty() && tags.is_empty() {
+            return Err(AnnotationRequestError::Empty);
+        }
+        Ok(NewAnnotation {
+            session_uuid,
+            cmd_seq: self.cmd_seq,
+            t_from: self.t_from,
+            t_to: self.t_to,
+            body,
+            tags,
+        })
+    }
+}
+
+/// A validated [`AnnotationPatch`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnnotationChange {
+    pub body: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub add_tags: Vec<String>,
+}
+
+impl AnnotationChange {
+    /// Changes only the author may make (`body`, `tags`).
+    pub fn needs_author(&self) -> bool {
+        self.body.is_some() || self.tags.is_some()
+    }
+
+    /// Applies the change to `row` at `now`. The result still needs a body or a tag, and
+    /// at most [`MAX_TAGS`] tags.
+    pub fn apply(&self, row: &mut im::Annotation, now: Seconds) -> Result<(), AnnotationRequestError> {
+        let mut tags = self.tags.clone().unwrap_or_else(|| row.tags.clone());
+        tags.extend(self.add_tags.iter().cloned());
+        tags.sort();
+        tags.dedup();
+        if tags.len() > MAX_TAGS {
+            return Err(AnnotationRequestError::TooManyTags);
+        }
+        let body = self.body.clone().unwrap_or_else(|| row.body.clone());
+        if body.is_empty() && tags.is_empty() {
+            return Err(AnnotationRequestError::Empty);
+        }
+        row.body = body;
+        row.tags = tags;
+        row.updated_at = now;
+        Ok(())
+    }
+}
+
+impl AnnotationPatch {
+    pub fn validate(&self) -> Result<AnnotationChange, AnnotationRequestError> {
+        if self.body.is_none() && self.tags.is_none() && self.add_tags.as_ref().is_none_or(Vec::is_empty) {
+            return Err(AnnotationRequestError::EmptyPatch);
+        }
+        Ok(AnnotationChange {
+            body: self.body.as_deref().map(normalize_body).transpose()?,
+            tags: self.tags.as_deref().map(normalize_tags).transpose()?,
+            add_tags: normalize_tags(self.add_tags.as_deref().unwrap_or_default())?,
+        })
+    }
+}
+
+impl TagRequest {
+    /// The normalised name and colour.
+    pub fn validate(&self) -> Result<(String, Option<String>), AnnotationRequestError> {
+        Ok((
+            normalize_tag(&self.name)?,
+            self.color.as_deref().map(normalize_color).transpose()?,
+        ))
     }
 }
 
@@ -1079,6 +1799,39 @@ pub fn typescript() -> String {
         SessionParams::decl(&cfg),
         TreeParams::decl(&cfg),
         ExportParams::decl(&cfg),
+        LiveInit::decl(&cfg),
+        LiveEvent::decl(&cfg),
+        LiveStreamState::decl(&cfg),
+        LiveOffline::decl(&cfg),
+        LiveMessage::decl(&cfg),
+        RecStatus::decl(&cfg),
+        LiveSession::decl(&cfg),
+        BusHello::decl(&cfg),
+        SessionEnd::decl(&cfg),
+        IndexProgress::decl(&cfg),
+        ChangeOp::decl(&cfg),
+        AnnotationEvent::decl(&cfg),
+        BusEvent::decl(&cfg),
+        TimelineGroup::decl(&cfg),
+        Timeline::decl(&cfg),
+        TimelineLane::decl(&cfg),
+        TimelineRow::decl(&cfg),
+        TimelineSession::decl(&cfg),
+        TimelineBlock::decl(&cfg),
+        TimelineMarkKind::decl(&cfg),
+        TimelineMark::decl(&cfg),
+        DensityBin::decl(&cfg),
+        TimeSpan::decl(&cfg),
+        TimelineAnnotation::decl(&cfg),
+        Annotation::decl(&cfg),
+        AnnotationPage::decl(&cfg),
+        AnnotationCreate::decl(&cfg),
+        AnnotationPatch::decl(&cfg),
+        Tag::decl(&cfg),
+        TagList::decl(&cfg),
+        TagRequest::decl(&cfg),
+        TimelineParams::decl(&cfg),
+        AnnotationParams::decl(&cfg),
     ];
     let mut out = String::from(
         "// Generated from crates/cinelog-web/src/api/types.rs by ts-rs. Do not edit.\n\
@@ -1255,6 +2008,230 @@ mod tests {
         ] {
             assert!(parts.iter().all(|s| !s.text.contains(['\u{E000}', '\u{E001}'])));
         }
+    }
+
+    #[test]
+    fn m4_wire_shapes() {
+        let ts = typescript();
+        assert!(ts.contains("export type LiveEvent = [number, string, string];"), "{ts}");
+        assert!(
+            ts.contains("export type LiveMessage = LiveInit | LiveEvent | LiveOffline;"),
+            "{ts}"
+        );
+        assert!(
+            ts.contains("\"type\": \"session-start\", \"data\": LiveSession"),
+            "{ts}"
+        );
+        assert!(ts.contains("add_tags?: Array<string>"), "{ts}");
+
+        assert_eq!(
+            serde_json::to_value(LiveMessage::Event(LiveEvent(1.5, "o".into(), "x".into()))).unwrap(),
+            json!([1.5, "o", "x"])
+        );
+        assert_eq!(
+            serde_json::to_value(LiveMessage::Offline(LiveOffline {
+                state: LiveStreamState::Offline
+            }))
+            .unwrap(),
+            json!({"state": "offline"})
+        );
+        let init = LiveMessage::Init(LiveInit {
+            cols: 80,
+            rows: 24,
+            time: 3.0,
+            init: "\u{1b}[H".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(&init).unwrap(),
+            json!({"cols": 80, "rows": 24, "time": 3.0, "init": "\u{1b}[H"})
+        );
+        let back: LiveMessage = serde_json::from_value(json!([2.0, "r", "100x30"])).unwrap();
+        assert_eq!(back, LiveMessage::Event(LiveEvent(2.0, "r".into(), "100x30".into())));
+
+        let end = BusEvent::SessionEnd(SessionEnd {
+            session: "u".into(),
+            state: SessionState::Crashed,
+            ended_at: None,
+        });
+        assert_eq!(end.name(), "session-end");
+        assert_eq!(end.data_json(), r#"{"session":"u","state":"crashed","ended_at":null}"#);
+        let v = serde_json::to_value(&end).unwrap();
+        assert_eq!(v["type"], json!(end.name()));
+        assert_eq!(
+            v["data"],
+            serde_json::from_str::<serde_json::Value>(&end.data_json()).unwrap()
+        );
+        // NAMES matches the serde names of every variant.
+        let samples = [
+            BusEvent::Hello(BusHello {
+                version: "v".into(),
+                server_started_at: 0.0,
+                live: vec![],
+            }),
+            BusEvent::ImportProgress(LegacyProgress::default()),
+            BusEvent::Tag(Tag {
+                name: "ops".into(),
+                color: None,
+                count: 0,
+            }),
+            end,
+        ];
+        for e in samples {
+            assert_eq!(serde_json::to_value(&e).unwrap()["type"], json!(e.name()));
+        }
+        for (i, n) in BusEvent::NAMES.iter().enumerate() {
+            assert!(ts.contains(&format!("\"type\": \"{n}\"")), "{n}");
+            assert!(!BusEvent::NAMES[..i].contains(n));
+        }
+        assert_eq!(
+            serde_json::to_value(TimelineMarkKind::Forgotten).unwrap(),
+            json!("forgotten")
+        );
+        assert_eq!(RecStatus::from(cinelog_core::RecState::Live), RecStatus::Recording);
+        let p: TimelineParams = serde_json::from_value(json!({"group": "pane", "from": 1.0})).unwrap();
+        assert_eq!(p.group, Some(TimelineGroup::Pane));
+    }
+
+    #[test]
+    fn state_reasons() {
+        let s = |r| split_state_reason(r);
+        assert_eq!(s(None), (None, None));
+        assert_eq!(s(Some(" ")), (None, None));
+        assert_eq!(s(Some("nested")), (Some("nested".into()), None));
+        assert_eq!(
+            s(Some("multiplexer: tmux: client")),
+            (Some("multiplexer".into()), Some("tmux: client".into()))
+        );
+        assert_eq!(s(Some("user: lunch")), (Some("user".into()), Some("lunch".into())));
+    }
+
+    #[test]
+    fn tags_and_colors() {
+        use AnnotationRequestError as E;
+        assert_eq!(normalize_tag("  Incident-42 ").as_deref(), Ok("incident-42"));
+        assert_eq!(
+            normalize_tag("ops/db:prod+1#@x_y.z").as_deref(),
+            Ok("ops/db:prod+1#@x_y.z")
+        );
+        assert_eq!(normalize_tag("Ünïcode").as_deref(), Ok("ünïcode"));
+        for bad in [
+            "",
+            "  ",
+            "two words",
+            "a,b",
+            "<b>",
+            "x\u{0}",
+            &"x".repeat(MAX_TAG_CHARS + 1),
+        ] {
+            assert_eq!(normalize_tag(bad), Err(E::BadTag), "{bad:?}");
+        }
+        assert_eq!(normalize_color("#FF8800").as_deref(), Ok("#ff8800"));
+        assert_eq!(normalize_color(" #f80").as_deref(), Ok("#ff8800"));
+        for bad in ["ff8800", "#ff88", "#gg0000", "red", "#ff8800;x", ""] {
+            assert_eq!(normalize_color(bad), Err(E::BadColor), "{bad:?}");
+        }
+        let many: Vec<String> = (0..=MAX_TAGS).map(|i| format!("t{i}")).collect();
+        assert_eq!(normalize_tags(&many), Err(E::TooManyTags));
+        assert_eq!(
+            normalize_tags(&["b".into(), "A".into(), "a".into()]),
+            Ok(vec!["a".into(), "b".into()])
+        );
+        let t = TagRequest {
+            name: "Ops".into(),
+            color: Some("#ABC".into()),
+        };
+        assert_eq!(t.validate(), Ok(("ops".into(), Some("#aabbcc".into()))));
+    }
+
+    #[test]
+    fn annotation_requests() {
+        use AnnotationRequestError as E;
+        let u = "0193A1B2-0000-7000-8000-000000000001";
+        let req = |cmd_seq, t_from, t_to| AnnotationCreate {
+            session_uuid: u.into(),
+            cmd_seq,
+            t_from,
+            t_to,
+            body: Some("see https://x.example/a  \n".into()),
+            tags: Some(vec!["Ops".into()]),
+        };
+        let ok = req(Some(3), None, None).validate().unwrap();
+        assert_eq!(ok.session_uuid, u.to_lowercase());
+        assert_eq!(ok.body, "see https://x.example/a");
+        assert_eq!(ok.tags, ["ops"]);
+        assert!(req(None, Some(1.0), Some(1.0)).validate().is_ok(), "a point span");
+        assert_eq!(req(None, None, None).validate(), Err(E::NoTarget));
+        assert_eq!(req(Some(1), Some(1.0), Some(2.0)).validate(), Err(E::Ambiguous));
+        assert_eq!(req(None, Some(1.0), None).validate(), Err(E::HalfRange));
+        assert_eq!(req(None, Some(2.0), Some(1.0)).validate(), Err(E::BadRange));
+        assert_eq!(req(None, Some(-1.0), Some(1.0)).validate(), Err(E::BadRange));
+        assert_eq!(req(None, Some(f64::INFINITY), Some(1.0)).validate(), Err(E::BadRange));
+        let empty = AnnotationCreate {
+            body: Some("  ".into()),
+            tags: None,
+            ..req(Some(1), None, None)
+        };
+        assert_eq!(empty.validate(), Err(E::Empty));
+        let long = AnnotationCreate {
+            body: Some("x".repeat(MAX_ANNOTATION_BODY + 1)),
+            ..req(Some(1), None, None)
+        };
+        assert_eq!(long.validate(), Err(E::BodyTooLong));
+        let bad = AnnotationCreate {
+            session_uuid: "../x".into(),
+            ..req(Some(1), None, None)
+        };
+        assert_eq!(bad.validate(), Err(E::BadUuid));
+
+        let mut row = ok.into_row("a1".into(), "alice", 10.0);
+        assert_eq!(
+            (row.author.as_str(), row.created_at, row.updated_at),
+            ("alice", 10.0, 10.0)
+        );
+
+        assert_eq!(AnnotationPatch::default().validate(), Err(E::EmptyPatch));
+        let add = AnnotationPatch {
+            add_tags: Some(vec!["Later".into(), "ops".into()]),
+            ..AnnotationPatch::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(!add.needs_author());
+        add.apply(&mut row, 11.0).unwrap();
+        assert_eq!(row.tags, ["later", "ops"]);
+        assert_eq!(row.updated_at, 11.0);
+        let edit = AnnotationPatch {
+            body: Some(String::new()),
+            tags: Some(vec![]),
+            ..AnnotationPatch::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(edit.needs_author());
+        assert_eq!(edit.apply(&mut row, 12.0), Err(E::Empty), "nothing would be left");
+        assert_eq!(row.updated_at, 11.0, "a failed change leaves the row alone");
+        let p: AnnotationPatch = serde_json::from_value(json!({"add_tags": ["x"]})).unwrap();
+        assert_eq!(p.add_tags, Some(vec!["x".to_owned()]));
+    }
+
+    #[test]
+    fn annotation_conversion_sorts_tags() {
+        let a = im::Annotation {
+            uuid: "a".into(),
+            session_uuid: "s".into(),
+            cmd_seq: None,
+            t_from: Some(1.0),
+            t_to: Some(2.0),
+            author: "bob".into(),
+            body: "b".into(),
+            tags: vec!["z".into(), "a".into(), "z".into()],
+            created_at: 1.0,
+            updated_at: 2.0,
+            deleted_at: None,
+        };
+        let w = Annotation::from(&a);
+        assert_eq!(w.session, "s");
+        assert_eq!(w.tags, ["a", "z"]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::U64;
 use crate::api::MetaStore;
 use crate::error::{IndexError, Result};
-use crate::model::{Annotation, ForgetTarget, Forgotten};
+use crate::model::{Annotation, AnnotationQuery, ForgetTarget, Forgotten, TagInfo};
 use crate::schema::{self, Access, DbKind};
 
 pub(crate) struct SqliteMeta {
@@ -164,10 +164,11 @@ fn upsert_annotation(conn: &Connection, a: &Annotation, only_if_newer: bool) -> 
     Ok(true)
 }
 
-fn read_annotations(conn: &Connection, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Annotation>> {
+/// Annotations selected and ordered by `tail` (`WHERE … ORDER BY …`).
+fn read_annotations(conn: &Connection, tail: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Annotation>> {
     let mut st = conn.prepare_cached(&format!(
         "SELECT id, uuid, session_uuid, cmd_seq, t_from, t_to, author, body, created_at, updated_at, deleted_at
-         FROM annotations {filter} ORDER BY created_at, id"
+         FROM annotations {tail}"
     ))?;
     let rows = st.query_map(args, |r| {
         Ok((
@@ -195,6 +196,24 @@ fn read_annotations(conn: &Connection, filter: &str, args: &[&dyn rusqlite::ToSq
         a.tags = tags.query_map([*id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     }
     Ok(out.into_iter().map(|(_, a)| a).collect())
+}
+
+/// Tags by name with their live usage count; `only` selects one name (empty: all).
+fn read_tags(conn: &Connection, only: &str) -> Result<Vec<TagInfo>> {
+    let mut st = conn.prepare_cached(
+        "SELECT t.name, t.color,
+           (SELECT count(*) FROM annotation_tags x JOIN annotations a ON a.id = x.annotation_id
+            WHERE x.tag_id = t.id AND a.deleted_at IS NULL)
+         FROM tags t WHERE ?1 = '' OR t.name = ?1 ORDER BY t.name",
+    )?;
+    let rows = st.query_map([only], |r| {
+        Ok(TagInfo {
+            name: r.get(0)?,
+            color: r.get(1)?,
+            count: super::u64_at(r, 2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// A `tags` row of the export (keeps colours; membership travels inside annotations).
@@ -277,7 +296,80 @@ impl MetaStore for SqliteMeta {
     }
 
     fn annotations(&self, session_uuid: &str) -> Result<Vec<Annotation>> {
-        read_annotations(&self.conn, "WHERE session_uuid = ?1", &[&session_uuid])
+        read_annotations(
+            &self.conn,
+            "WHERE session_uuid = ?1 ORDER BY created_at, id",
+            &[&session_uuid],
+        )
+    }
+
+    fn annotation(&self, uuid: &str) -> Result<Option<Annotation>> {
+        Ok(read_annotations(&self.conn, "WHERE uuid = ?1", &[&uuid])?.pop())
+    }
+
+    fn find_annotations(&self, q: &AnnotationQuery) -> Result<Vec<Annotation>> {
+        let mut clauses = Vec::new();
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut arg = |clause: &str, value: Box<dyn rusqlite::ToSql>| {
+            args.push(value);
+            clauses.push(clause.replace('?', &format!("?{}", args.len())));
+        };
+        if !q.sessions.is_empty() {
+            arg(
+                "session_uuid IN (SELECT value FROM json_each(?))",
+                Box::new(serde_json::to_string(&q.sessions)?),
+            );
+        }
+        if let Some(seq) = q.cmd_seq {
+            arg("cmd_seq = ?", Box::new(U64(seq)));
+        }
+        if let Some(tag) = &q.tag {
+            arg(
+                "id IN (SELECT a.annotation_id FROM annotation_tags a JOIN tags t ON t.id = a.tag_id WHERE t.name = ?)",
+                Box::new(tag.clone()),
+            );
+        }
+        if let Some(author) = &q.author {
+            arg("author = ?", Box::new(author.clone()));
+        }
+        if !q.include_deleted {
+            clauses.push("deleted_at IS NULL".to_owned());
+        }
+        if let Some((created_at, uuid)) = &q.after {
+            args.push(Box::new(*created_at));
+            args.push(Box::new(uuid.clone()));
+            let (c, u) = (args.len() - 1, args.len());
+            clauses.push(format!("(created_at > ?{c} OR (created_at = ?{c} AND uuid > ?{u}))"));
+        }
+        let mut tail = String::new();
+        if !clauses.is_empty() {
+            tail = format!("WHERE {}", clauses.join(" AND "));
+        }
+        tail.push_str(" ORDER BY created_at, uuid");
+        if q.limit > 0 {
+            tail.push_str(&format!(" LIMIT {}", q.limit));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        read_annotations(&self.conn, &tail, &refs)
+    }
+
+    fn tags(&self) -> Result<Vec<TagInfo>> {
+        read_tags(&self.conn, "")
+    }
+
+    fn put_tag(&mut self, name: &str, color: Option<&str>) -> Result<TagInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(IndexError::Invalid("empty tag name".into()));
+        }
+        self.conn
+            .prepare_cached(
+                "INSERT INTO tags(name, color) VALUES(?1, ?2) ON CONFLICT(name) DO UPDATE SET color = excluded.color",
+            )?
+            .execute(params![name, color])?;
+        read_tags(&self.conn, name)?
+            .pop()
+            .ok_or_else(|| IndexError::NotFound(format!("tag {name:?}")))
     }
 
     fn export_jsonl(&self, out: &mut dyn Write) -> Result<u64> {
@@ -300,7 +392,7 @@ impl MetaStore for SqliteMeta {
             })?
             .collect::<rusqlite::Result<_>>()?;
         tags.into_iter().map(MetaLine::Tags).try_for_each(&mut emit)?;
-        read_annotations(&tx, "", &[])?
+        read_annotations(&tx, "ORDER BY created_at, id", &[])?
             .into_iter()
             .map(MetaLine::Annotations)
             .try_for_each(&mut emit)?;

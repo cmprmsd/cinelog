@@ -14,12 +14,15 @@
 //! | `GET /search` (`SearchParams`) | `SearchResponse` |
 //! | `GET /show` (`ShowParams`) | `Entry` |
 //! | `GET /import` | `ImportReport` |
-//! | `POST /forget` (`ForgetRequest`) | `Forgotten` (author = the `Principal`) |
+//! | `POST /forget` (`ForgetRequest`) | `Forgotten` (author = the `Principal`; published on the bus) |
+//!
+//! M4 merges `timeline::routes` (M4-B) and `annotations::routes` (M4-C) here.
 //!
 //! Reads go through read-only index.db connections (`cinelog_index::db::open_reader` plus
 //! M3-B's own queries in `api::db`) on `spawn_blocking`; `forget` writes meta.db through
 //! `cinelog_index::db::open_meta` (the serve daemon's forget sync then deletes the rows).
 
+pub(crate) mod annotations;
 pub(crate) mod db;
 pub(crate) mod extract;
 mod search;
@@ -28,6 +31,7 @@ pub(crate) mod sessions;
 pub(crate) mod testkit;
 #[cfg(test)]
 mod tests;
+pub(crate) mod timeline;
 mod tree;
 pub mod types;
 
@@ -39,7 +43,7 @@ use axum::routing::{get, post};
 use self::db::blocking;
 use self::extract::{ApiJson, ApiPath, ApiQuery};
 use self::types::{
-    CommandList, Entry, ForgetRequest, Forgotten, ImportReport, SearchParams, SearchResponse, SessionDetail,
+    BusEvent, CommandList, Entry, ForgetRequest, Forgotten, ImportReport, SearchParams, SearchResponse, SessionDetail,
     SessionPage, SessionParams, ShowParams, Status, Tree, TreeParams,
 };
 use crate::error::Result;
@@ -56,6 +60,8 @@ pub fn routes() -> Router<AppState> {
         .route("/show", get(show))
         .route("/import", get(import))
         .route("/forget", post(forget))
+        .merge(timeline::routes())
+        .merge(annotations::routes())
 }
 
 async fn status(State(st): State<AppState>) -> Result<Json<Status>> {
@@ -97,11 +103,14 @@ async fn forget(
     Principal(by): Principal,
     ApiJson(req): ApiJson<ForgetRequest>,
 ) -> Result<Json<Forgotten>> {
+    let bus = st.bus.clone();
     let forgotten = blocking(move || {
         let f = sessions::forget(&st.ctx, &req, &by)?;
         st.play.invalidate(f.target.uuid());
         Ok(f)
     })
     .await?;
-    Ok(Json((&forgotten).into()))
+    let forgotten: Forgotten = (&forgotten).into();
+    bus.publish(BusEvent::Forgotten(forgotten.clone()));
+    Ok(Json(forgotten))
 }
