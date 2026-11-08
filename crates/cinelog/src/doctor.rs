@@ -2,6 +2,7 @@
 //! when at least one check warns or fails.
 
 mod root_sources;
+pub mod skew;
 
 use std::fmt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -127,59 +128,7 @@ pub fn collect(ctx: &Ctx) -> Report {
 }
 
 fn versions(ctx: &Ctx, r: &mut Report) {
-    let me = cinelog_core::VERSION;
-    match module::current_exe().ok().as_deref().and_then(module::find_from_exe) {
-        Some(m) => match module::version(&m) {
-            Some(v) if v == me => r.add(
-                "version",
-                Status::Ok,
-                format!("binary {me}, plugin {v} ({})", m.display()),
-            ),
-            Some(v) => r.add(
-                "version",
-                Status::Warn,
-                format!("binary {me} but plugin {v} in {}: run cinelog-fetch", m.display()),
-            ),
-            None => r.add("version", Status::Warn, format!("{} has no VERSION file", m.display())),
-        },
-        None => r.add(
-            "version",
-            Status::Info,
-            format!("binary {me}, not inside a module checkout"),
-        ),
-    }
-
-    let team_bin = ctx.root.join(team::BINARY);
-    if !team_bin.exists() {
-        r.add(
-            "team-binary",
-            Status::Info,
-            format!("no team install ({})", module::sudo_install_team("")),
-        );
-        return;
-    }
-    let out = std::process::Command::new(&team_bin).arg("--version").output();
-    let theirs = out
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.split_whitespace().nth(1).map(str::to_owned));
-    match theirs {
-        Some(v) if module::parse_version(&v) < module::parse_version(me) => r.add(
-            "team-binary",
-            Status::Warn,
-            format!(
-                "{} is {v}, older than {me}: {}",
-                team_bin.display(),
-                module::sudo_install_team(" --upgrade")
-            ),
-        ),
-        Some(v) => r.add("team-binary", Status::Ok, format!("{} is {v}", team_bin.display())),
-        None => r.add(
-            "team-binary",
-            Status::Warn,
-            format!("{} does not report a version", team_bin.display()),
-        ),
-    }
+    r.checks.extend(skew::checks(ctx, skew::Reach::Network));
 }
 
 fn config(ctx: &Ctx, r: &mut Report) {

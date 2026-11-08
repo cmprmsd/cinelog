@@ -37,6 +37,7 @@ fn main() -> ExitCode {
         Command::Link(args) => link::run(&args),
         Command::Pause(args) => pause::run(pause::Action::Pause, args.reason),
         Command::Resume => pause::run(pause::Action::Resume, None),
+        Command::Doctor(args) if args.skew => doctor::skew::motd(&ctx::Ctx::load()),
         Command::Doctor(args) => doctor::run(args.json),
         Command::Install(args) => install::run(&args),
         Command::Serve(args) => serve::run(&args),

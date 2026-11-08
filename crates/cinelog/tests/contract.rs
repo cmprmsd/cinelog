@@ -53,3 +53,29 @@ fn version_file_matches_crate_version() {
     let v = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../VERSION")).unwrap();
     assert_eq!(v.trim(), env!("CARGO_PKG_VERSION"));
 }
+
+#[test]
+fn web_package_version_matches_crate_version() {
+    let pkg = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/package.json")).unwrap();
+    let pkg: serde_json::Value = serde_json::from_str(&pkg).unwrap();
+    assert_eq!(pkg["version"], env!("CARGO_PKG_VERSION"));
+}
+
+/// `doctor --skew` (the MOTD line): always exit 0, only `cinelog: ` lines, never a network call.
+#[test]
+fn doctor_skew_prints_only_warning_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cinelog()
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .env("PATH", "/usr/bin:/bin")
+        .args(["doctor", "--skew"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.lines().all(|l| l.starts_with("cinelog: ")), "{text}");
+}

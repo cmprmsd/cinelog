@@ -1,7 +1,7 @@
 {
   "name": "cinelog-web",
   "private": true,
-  "version": "0.12.0",
+  "version": "1.0.0",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "packageManager": "pnpm@11.3.0",
@@ -16,7 +16,8 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
     "e2e": "vite build && playwright test",
-    "e2e:real": "vite build && CINELOG_E2E_BIN=${CINELOG_E2E_BIN:-../target/debug/cinelog} playwright test"
+    "e2e:real": "vite build && CINELOG_E2E_BIN=${CINELOG_E2E_BIN:-../target/debug/cinelog} playwright test",
+    "docs:shots": "vite build && CINELOG_E2E_BIN=${CINELOG_E2E_BIN:-../target/debug/cinelog} playwright test -c e2e/docs/playwright.config.ts"
   },
   "dependencies": {
     "asciinema-player": "3.18.0"

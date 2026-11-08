@@ -24,7 +24,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * `sleep` child standing in for its recorder: pid, starttime and boot id must name a running
  * process, or the server treats the session as crashed. The caller kills the child.
  */
-function registerLive(runtimeDir: string, uuid: string, cast: string): ChildProcess {
+export function registerLive(runtimeDir: string, uuid: string, cast: string): ChildProcess {
   const holder = spawn('sleep', ['infinity'], { stdio: 'ignore' });
   try {
     writeRegistryEntry(runtimeDir, uuid, cast, holder);

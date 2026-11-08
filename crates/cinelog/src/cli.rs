@@ -1,5 +1,5 @@
-//! Frozen command-line surface (see docs/PROTOCOL.md, "Binary interface"): M1 plus the M2
-//! and M3 subcommands. Later milestones add subcommands; existing names and flags do not change.
+//! Frozen command-line surface of 1.x (docs/PROTOCOL.md §6, docs/STABILITY.md): later 1.x
+//! releases may add subcommands and flags; existing names, flags and outputs do not change.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -88,6 +88,10 @@ pub struct PauseArgs {
 pub struct DoctorArgs {
     #[arg(long)]
     pub json: bool,
+    /// Only the local version-skew checks: print one line per warning and always exit 0
+    /// (the plugin's MOTD line)
+    #[arg(long, hide = true, conflicts_with = "json")]
+    pub skew: bool,
 }
 
 #[derive(Debug, Args)]
@@ -395,5 +399,14 @@ mod tests {
         assert!(ok(&["cinelog", "tls", "show", "--json"]).is_ok());
         assert!(ok(&["cinelog", "tls", "regen"]).is_ok());
         assert!(ok(&["cinelog", "search", "--team", "-a", "x"]).is_ok());
+    }
+
+    #[test]
+    fn m5_doctor_skew() {
+        let Command::Doctor(d) = Cli::try_parse_from(["cinelog", "doctor", "--skew"]).unwrap().command else {
+            panic!()
+        };
+        assert!(d.skew && !d.json);
+        assert!(Cli::try_parse_from(["cinelog", "doctor", "--skew", "--json"]).is_err());
     }
 }

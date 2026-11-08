@@ -15,8 +15,12 @@ const chromium = {
   launchOptions: process.env.CINELOG_CHROMIUM ? { executablePath: process.env.CINELOG_CHROMIUM } : {},
 };
 
+// e2e/docs/ holds the documentation screenshots with their own config (`pnpm docs:shots`).
+const docs = /[\\/]e2e[\\/]docs[\\/]/;
+
 export default defineConfig({
   testDir: 'e2e',
+  testIgnore: docs,
   globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   workers: 1,
@@ -33,7 +37,7 @@ export default defineConfig({
     { name: 'login', testMatch: /login\.spec\.ts/, use: chromium, dependencies: ['setup'] },
     {
       name: 'chromium',
-      testIgnore: /login\.spec\.ts/,
+      testIgnore: [/login\.spec\.ts/, docs],
       use: { ...chromium, storageState: 'e2e/.auth/state.json' },
       dependencies: ['setup'],
     },

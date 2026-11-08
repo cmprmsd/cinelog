@@ -60,6 +60,7 @@ _arguments "${_arguments_options[@]}" : \
 (doctor)
 _arguments "${_arguments_options[@]}" : \
 '--json[]' \
+'(--json)--skew[Only the local version-skew checks\: print one line per warning and always exit 0 (the plugin'\''s MOTD line)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
