@@ -160,8 +160,7 @@ fn start(script: &str, opts: Opts) -> Running {
         // CINELOG_TEST_SH runs the scripts under another sh, e.g. dash as on Ubuntu CI.
         std::env::var_os("CINELOG_TEST_SH")
             .as_deref()
-            .unwrap_or("/bin/sh".as_ref())
-            .as_ref(),
+            .unwrap_or("/bin/sh".as_ref()),
         &["-c".into(), full.into()],
         pty::child_env(std::env::vars_os(), &extra),
     )
