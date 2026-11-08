@@ -197,8 +197,8 @@ t_unit_base64_matches_coreutils() {
   local s ref all=
   integer i
   for (( i = 32; i < 127; i++ )); do all+=${(#)i}; done
-  local -a samples=('' a ab abc abcd 'ls -la ~' $'äöü€😀' $all)
-  samples+=("$(head -c 999 /dev/urandom | base64 -w0)")
+  local -a samples=('' a ab abc abcd abcde abcdef 'ls -la ~' $'äöü€😀' $all $'\x80\xff\xfe\0\x01')
+  samples+=("$(head -c 999 /dev/urandom | base64 -w0)" "$(head -c 1600 /dev/urandom)")
   for s in $samples; do
     _cl_b64 $s
     ref=$(print -rn -- $s | base64 -w0); ref=${ref%%=*}
@@ -207,16 +207,17 @@ t_unit_base64_matches_coreutils() {
 }
 
 t_unit_json_escaping_round_trips() {
-  local s back ctl=
+  local s back ctl= qb='"\\'
   integer i
   for (( i = 1; i < 32; i++ )); do ctl+=${(#)i}; done
   local -a samples=($'a"b\\c' $'tab\there\nnl\rcr' $'\x01\x1f\x7f\e[31m' 'C:\temp\new' 'foo\cbar'
-    "grep '\\d+'" $'äöü €' $ctl)
+    "grep '\\d+'" $'äöü €' $ctl $'\x7f' $'x\0y' '\' '"' '\\""' $'\n\n' $'a\n' $'\nb' '$e' '%s'
+    ${(pl:5000::$qb:)} ${(pl:3000::\x01:)} "${(pl:999::\n:)}${(l:999::😀:)}")
   for s in $samples; do
     _cl_jstr $s
     [[ $REPLY == *[$'\0'-$'\x1f'$'\x7f']* ]] && fail "raw control byte in ${(q+)REPLY}"
-    back=$(print -rn -- "{\"s\":\"$REPLY\"}" | jq -j .s)
-    eq "$back" "$s" "JSON round trip of ${(q+)s}"
+    back=$(print -rn -- "{\"s\":\"$REPLY\"}" | jq -j '.s + "."'); back=${back%.}
+    eq "$back" "$s" "JSON round trip of ${(q+)s[1,40]}"
   done
 }
 
@@ -297,6 +298,9 @@ t_unit_hello_fields() {
 }
 
 t_unit_encoding_threshold_and_limits() {
+  # The JSON carries $PWD; a short cwd keeps the 1300-byte case below the threshold.
+  local here=$PWD
+  builtin cd -q /
   _cl_n=0
   capture _cl_preexec ${(l:1300::x:)} x x
   decode_markers $REPLY; eq "$marker_enc" b "≤ 1536 bytes JSON: base64"
@@ -330,6 +334,7 @@ t_unit_encoding_threshold_and_limits() {
   eq ${#markers} 1 "mixed worst case: one marker"
   eq "$(jget $markers[1] .trunc)" true "mixed worst case is truncated"
   [[ $(jget $markers[1] .typed) == $'\n'(#c4000)* ]] || fail "mixed: kept the leading newlines"
+  builtin cd -q $here
 }
 
 t_unit_opts_parsing() {
@@ -363,26 +368,81 @@ t_unit_osc7_percent_encoding() {
   [[ $REPLY == *"file://$HOST${TMP}/dir%20with%20space/%C3%A4%C3%B6"${A}* ]] || fail "OSC 7 encoding: ${(q+)REPLY}"
 }
 
+t_unit_free_space_warnings() {
+  # Regression: df right-aligns the percentage; " 95% /" was never parsed (no extendedglob).
+  mkdir -p $TMP/fakedf
+  print -r -- '#!/bin/sh
+printf "%s\n" "Use% Mounted on" " 95% /" "100% /x" " 50% /home" " 99% /tmp/com.freerdp.1" \
+  " 90% /mnt/with space" "  9% /boot"' >$TMP/fakedf/df
+  chmod 755 $TMP/fakedf/df
+  local -a opath=($path)
+  path=($TMP/fakedf $path); rehash
+  capture _cl_free_space
+  path=($opath); rehash
+  local plain=${REPLY//$'\e'\[[0-9;]#m}
+  local -a want=('Running out of disk space "/ (95%)"' 'Running out of disk space "/x (100%)"'
+    'Running out of disk space "/mnt/with space (90%)"')
+  eq "$plain" "${(F)want}" "warnings for / /x and the mount with a space, none for freerdp or below 90%"
+}
+
+# The §9.2 budget covers the marker alone: _cl_preexec with banners and title off. Each figure
+# is the best of several runs, which filters scheduler noise, so CINELOG_PERF_STRICT=1 can gate
+# a benchmark job. Banner and title are timed apart, for information.
 t_unit_perf_budget() {
-  local cmd="${(l:180::x:)} | grep -v 'y' > /dev/null"
-  local -a ts=()
-  local -F t0 t1
-  integer i
-  for (( i = 0; i < 200; i++ )); do
-    t0=$EPOCHREALTIME; _cl_preexec $cmd x $cmd >/dev/null; t1=$EPOCHREALTIME
-    ts+=($(( (t1 - t0) * 1000 )))
+  local ob=$_cl_opt[banners] ot=$_cl_opt[title]
+  _cl_opt[banners]=0 _cl_opt[title]=0
+  local cmd="${(l:180::x:)} | grep -v 'y' > /dev/null" w
+  local -F t0
+  local -i us p95=999999999 worst dense best run i
+  local -a ts
+  for (( run = 0; run < 5; run++ )); do
+    ts=()
+    for (( i = 0; i < 100; i++ )); do
+      t0=$EPOCHREALTIME; _cl_preexec $cmd x $cmd >/dev/null; (( us = (EPOCHREALTIME - t0) * 1e6 ))
+      ts+=($us)
+    done
+    ts=(${(on)ts})
+    (( ts[95] < p95 )) && p95=$ts[95]
   done
-  ts=(${(on)ts})
-  local -F p95=$ts[190] big
-  local huge=${(l:16384::y:)} mid=${(l:1300::z:)} w
-  for w in $mid $huge; do
-    t0=$EPOCHREALTIME; _cl_preexec $w x $w >/dev/null; t1=$EPOCHREALTIME
-    (( big = (t1 - t0) * 1000 > big ? (t1 - t0) * 1000 : big ))
+  # Any command: just below the 1536-byte base64 limit is the slowest size, then 16 KiB of
+  # text (plain, and a heredoc-like paste with newlines and quotes) and multibyte text.
+  local line='printf "%s\\n" "$HOME/some/path" --flag=value | tee -a /tmp/out.log # comment'$'\n'
+  local -a big=()
+  for (( i = 600; i <= 760; i += 10 )); do big+=(${(l:i::z:)}); done
+  big+=(${(l:16384::y:)} ${(pl:16384::$line:)} ${(l:8000::ä:)})
+  _t_perf_worst $big; worst=$REPLY
+  # Escaping-dense input past the 64 KiB payload limit (16 KiB of control bytes, quotes or
+  # newlines) costs up to three escaping rounds; bounded separately.
+  local qb='"\\'
+  _t_perf_worst ${(pl:16384::$qb:)} ${(pl:16384::\x01:)} ${(pl:16384::\n:)} "${(pl:4000::\n:)}${(l:3000::😀:)}"
+  dense=$REPLY
+  _cl_opt[banners]=1 _cl_opt[title]=1
+  best=999999999
+  for (( run = 0; run < 20; run++ )); do
+    t0=$EPOCHREALTIME; _cl_banner Begin >/dev/null; _cl_title $cmd >/dev/null; (( us = (EPOCHREALTIME - t0) * 1e6 ))
+    (( us < best )) && best=us
   done
-  printf '    preexec p95 (200 B): %.2f ms, worst large command: %.2f ms\n' $p95 $big
-  if (( p95 >= 2 || big >= 5 )); then
-    if [[ -n $CINELOG_PERF_STRICT ]]; then fail "over budget"; else print "    (over budget, not strict)"; fi
+  _cl_opt[banners]=$ob _cl_opt[title]=$ot
+  printf '    marker p95 (200 B): %.2f ms, worst command: %.2f ms, escaping-dense 16 KiB: %.2f ms; banner + title: %.2f ms\n' \
+    $(( p95 / 1e3 )) $(( worst / 1e3 )) $(( dense / 1e3 )) $(( best / 1e3 ))
+  if (( p95 >= 2000 || worst >= 5000 || dense >= 20000 )); then
+    if [[ -n $CINELOG_PERF_STRICT ]]; then fail "over budget (2 ms / 5 ms / 20 ms)"; else print "    (over budget, not strict)"; fi
   fi
+}
+# REPLY = the slowest of the commands $@ in µs, each the best of three runs.
+_t_perf_worst() {
+  local w
+  local -F t0
+  local -i us best run worst=0
+  for w; do
+    best=999999999
+    for (( run = 0; run < 3; run++ )); do
+      t0=$EPOCHREALTIME; _cl_preexec $w x $w >/dev/null; (( us = (EPOCHREALTIME - t0) * 1e6 ))
+      (( us < best )) && best=us
+    done
+    (( best > worst )) && worst=best
+  done
+  REPLY=$worst
 }
 
 # ------------------------------------------------------------------------ session tests
@@ -509,6 +569,27 @@ t_session_kill_switches() {
     "FAKE_CHECK=start personal terminal" || return
   sp_expect s || { fail "no prompt"; sp_stop s; return; }
   sp_log s; eq "$REPLY" "" "disable file"
+  sp_stop s
+}
+
+t_session_kill_switch_drops_handover() {
+  # Regression: a kill switch that appears after the recorder's check returned before the
+  # hand-over cleanup, leaving the nonce fd open and CINELOG_* exported to every child.
+  sp_start s -n -r 'mkdir -p $XDG_CONFIG_HOME/cinelog; : >$XDG_CONFIG_HOME/cinelog/disable' || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  sp_run s 'print -r "<$(env | grep -c CINELOG_)>"'
+  [[ $REPLY == *'<0>'* ]] || fail "disable file: CINELOG_* still exported: ${(q+)REPLY}"
+  sp_run s '[[ -e /proc/$$/fd/3 ]] && print "<fd3-open>" || print "<fd3-closed>"'
+  [[ $REPLY == *'<fd3-closed>'* ]] || fail "disable file: nonce fd left open"
+  decode_markers ${SP_BUF[s]}
+  eq ${#markers} 0 "disabled: no markers"
+  sp_stop s
+  sp_start s -n CINELOG_DISABLE=1 || return
+  sp_expect s || { fail "no prompt"; sp_stop s; return; }
+  sp_run s 'print -r "<${(j:,:)${(f)$(env | grep ^CINELOG_)}}>"'
+  [[ $REPLY == *'<CINELOG_DISABLE=1>'* ]] || fail "CINELOG_DISABLE: only the switch itself stays: ${(q+)REPLY}"
+  sp_run s '[[ -e /proc/$$/fd/3 ]] && print "<fd3-open>" || print "<fd3-closed>"'
+  [[ $REPLY == *'<fd3-closed>'* ]] || fail "CINELOG_DISABLE: nonce fd left open"
   sp_stop s
 }
 
@@ -660,6 +741,47 @@ t_session_p10k_instant_prompt_still_records() {
     local -a got=("${(@f)REPLY}")
     got=("${(@)got[1,${#${(f)want}}]%% /*}")
     eq "${(F)got}" "$want" "$variant: guards see the terminal, check and exec on the tty"
+    sp_stop s
+  done
+}
+
+# The rest of the instant prompt as powerlevel10k has it: the first precmd (put ahead of all
+# others) queues the cleanup with `sched +0`; the cleanup replays the capture file.
+P10K_FULL=$P10K_SIM$'\n''_p9k_instant_prompt_cleanup() {
+  (( ${+__p9k_instant_prompt_active} )) || return 0
+  unset __p9k_instant_prompt_active
+  exec 0<&$__p9k_fd_0 1>&$__p9k_fd_1 2>&$__p9k_fd_2 {__p9k_fd_0}>&- {__p9k_fd_1}>&- {__p9k_fd_2}>&-
+  unset __p9k_fd_0 __p9k_fd_1 __p9k_fd_2
+  print -r -- p10k-cleanup-ran >>$FAKE_LOG
+  command cat $HOME/p10k.out
+}
+_p9k_instant_prompt_precmd_first() {
+  zmodload zsh/sched
+  sched +0 _p9k_instant_prompt_cleanup
+  precmd_functions=(${(@)precmd_functions:#_p9k_instant_prompt_precmd_first})
+}
+precmd_functions=(_p9k_instant_prompt_precmd_first $precmd_functions)'
+
+t_session_p10k_recorded_shell_output_reaches_terminal() {
+  # Regression: in a recorded shell under an instant prompt the session line was dropped
+  # (stdout is the capture file, so not a tty) and the first precmd wrote its markers there.
+  # Both orders: the module after the instant prompt preamble (usual) and before it.
+  local order
+  for order in -r -a; do
+    sp_start s -n $order $P10K_FULL || return
+    sp_expect s || { fail "$order: no first prompt"; sp_stop s; return; }
+    sp_run s 'echo after-p10k'
+    local h=SP_HOME_s
+    local captured=$(<${(P)h}/p10k.out)
+    eq "${(q+)captured}" "''" "$order: nothing written into the instant prompt capture file"
+    sp_log s; [[ $REPLY == *p10k-cleanup-ran* ]] || fail "$order: the p10k cleanup ran"
+    local before=${SP_BUF[s]%%${E}\]7777*}
+    [[ $before == *'cinelog: session 56789abc · https://h:1/s/x,y'* ]] ||
+      fail "$order: session line on the terminal, before the first marker: ${(q+)SP_BUF[s][1,400]}"
+    decode_markers ${SP_BUF[s]}
+    kinds; eq "$REPLY" "hello cmd done" "$order: markers reach the terminal"
+    sp_run s 'print "<${#${(@M)precmd_functions:#_cl_precmd}} ${#${(@M)precmd_functions:#_cl_after_instant_prompt}}>"'
+    [[ $REPLY == *'<1 0>'* ]] || fail "$order: precmd hook registered once, deferral hook gone: ${(q+)REPLY}"
     sp_stop s
   done
 }

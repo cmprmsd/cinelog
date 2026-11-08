@@ -325,6 +325,40 @@ fn team_install_in_prefix_mode() {
     );
 }
 
+/// `sudo cinelog install --team --uninstall` runs /usr/local/bin/cinelog, which is in no
+/// module; after a rollback the module may be gone or have no bin/cinelog either.
+#[test]
+fn team_uninstall_runs_from_a_binary_outside_any_module() {
+    let env = Env::new();
+    let module = fake_module(&env);
+    let prefix = env.path("sys");
+    env.cmd()
+        .args(["install", "--team", "--allow-unverified", "--system-zshrc", "--module"])
+        .arg(&module)
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--binary")
+        .arg(assert_cmd::cargo::cargo_bin("cinelog"))
+        .assert()
+        .success();
+    std::fs::remove_dir_all(&module).unwrap();
+    let lone = env.path("elsewhere/cinelog");
+    std::fs::create_dir_all(lone.parent().unwrap()).unwrap();
+    std::fs::copy(assert_cmd::cargo::cargo_bin("cinelog"), &lone).unwrap();
+
+    let out = StdCommand::new(&lone)
+        .env_clear()
+        .envs(env.vars())
+        .args(["install", "--team", "--uninstall", "--prefix"])
+        .arg(&prefix)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!prefix.join("usr/local/share/cinelog").exists());
+    let rc = std::fs::read_to_string(prefix.join("etc/zsh/zshrc")).unwrap();
+    assert!(!rc.contains("cinelog"), "{rc}");
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let out = StdCommand::new("sha256sum")
         .stdin(Stdio::piped())

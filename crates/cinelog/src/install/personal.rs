@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use cinelog_core::config::legacy;
 use cinelog_core::location;
 use cinelog_core::paths::EnvSnapshot;
+use cinelog_proto::NestedMode;
 
 use super::fsutil::{self, Outcome, Symlinks, pretty};
 use super::{Steps, user_unit_file};
@@ -51,6 +52,9 @@ pub fn install(env: EnvSnapshot, opts: &Options, steps: &mut Steps) -> Result<Ct
     let ctx = Ctx::with(env, cinelog_core::SystemRoot::real());
     if let Some(e) = &ctx.config_error {
         bail!("{e}");
+    }
+    if ctx.config.record.nested == NestedMode::Record {
+        steps.warn(crate::doctor::NESTED_RECORD_WARNING.to_owned());
     }
     let p = &ctx.paths;
     if let Some(problem) = location::db_location_problem(&p.db_dir) {
@@ -236,6 +240,45 @@ mod tests {
         );
         assert!(disk.join("dotconfig/config.toml").is_file());
         assert!(std::fs::read_link(disk.join("bin/cinelog")).is_ok());
+    }
+
+    #[test]
+    fn nested_record_is_warned_about() {
+        let d = tempfile::tempdir().unwrap();
+        let env = test_env(d.path());
+        let cfg = env.config_home().join("cinelog/config.toml");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "[record]\nnested = \"record\"\n").unwrap();
+        let opts = Options {
+            migrate: false,
+            exe: Some(d.path().join("module/bin/cinelog")),
+        };
+        let mut steps = Steps::default();
+        install(env.clone(), &opts, &mut steps).unwrap();
+        assert!(steps.to_string().contains("! record.nested = \"record\""), "{steps}");
+
+        std::fs::write(&cfg, "[record]\nnested = \"pause\"\n").unwrap();
+        let mut steps = Steps::default();
+        install(env, &opts, &mut steps).unwrap();
+        assert!(!steps.to_string().contains("nested"), "{steps}");
+    }
+
+    #[test]
+    fn symlinked_state_inside_a_syncthing_folder_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let env = test_env(d.path());
+        let synced = d.path().join("Sync");
+        std::fs::create_dir_all(synced.join(".stfolder")).unwrap();
+        std::fs::create_dir_all(synced.join("state")).unwrap();
+        // test_env puts state in <d>/state; make that a link into the synced tree.
+        std::os::unix::fs::symlink(synced.join("state"), d.path().join("state")).unwrap();
+        let opts = Options {
+            migrate: false,
+            exe: Some(d.path().join("module/bin/cinelog")),
+        };
+        let err = install(env, &opts, &mut Steps::default()).unwrap_err();
+        assert!(err.to_string().contains("Syncthing"), "{err}");
+        assert!(!synced.join("state/cinelog").exists());
     }
 
     #[test]

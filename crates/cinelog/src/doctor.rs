@@ -1,6 +1,8 @@
 //! `cinelog doctor [--json]` (§10.7, M1 subset): exit 0 when nothing needs attention, 1
 //! when at least one check warns or fails.
 
+mod root_sources;
+
 use std::fmt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,7 @@ use cinelog_core::paths::team;
 use cinelog_core::registry::{RecState, SystemProbe};
 use cinelog_core::server::ServerInfo;
 use cinelog_detect::{Detector, Hidepid, ProcFs, RealProcFs, Reason, StartDecision, TtyIdentity};
+use cinelog_proto::NestedMode;
 use serde::Serialize;
 
 use crate::check::{self, CheckInputs};
@@ -190,6 +193,20 @@ fn config(ctx: &Ctx, r: &mut Report) {
             format!("{} missing, defaults apply (cinelog install writes it)", file.display()),
         ),
     }
+    if let Some(mode) = loose_mode(file) {
+        r.add(
+            "config-mode",
+            Status::Warn,
+            format!(
+                "{} has mode {mode:o}; use 600 (cinelog install{} fixes it)",
+                file.display(),
+                if ctx.env.euid == 0 { " --team" } else { "" }
+            ),
+        );
+    }
+    if ctx.config_error.is_none() && ctx.config.record.nested == NestedMode::Record {
+        r.add("nested", Status::Info, NESTED_RECORD_WARNING);
+    }
     if ctx.is_disabled() {
         r.add(
             "kill-switch",
@@ -200,6 +217,16 @@ fn config(ctx: &Ctx, r: &mut Report) {
             ),
         );
     }
+}
+
+/// What `record.nested = "record"` means for the user (§5.3); `install` and `doctor` say it.
+pub const NESTED_RECORD_WARNING: &str = "record.nested = \"record\": sudo/root sessions are also \
+     recorded into your personal cast, which you can read without root (use \"pause\" to avoid that)";
+
+/// The mode of `file` when it grants group or other bits.
+fn loose_mode(file: &Path) -> Option<u32> {
+    let mode = std::fs::metadata(file).ok()?.permissions().mode() & 0o777;
+    (mode & 0o077 != 0).then_some(mode)
 }
 
 /// The values the plugin's start guards look at (§9.1).
@@ -548,6 +575,38 @@ fn root_hardening(ctx: &Ctx, r: &mut Report) {
             ),
         );
     }
+    let homes = root_sources::Homes::of(&ctx.env.home);
+    let found = root_sources::untrusted(&homes, &rc, 0, Path::new("/"));
+    match found.first() {
+        None => r.add(
+            "root-sources",
+            Status::Ok,
+            format!(
+                "everything {} and the system zshrc source is root-owned",
+                ctx.env.home.display()
+            ),
+        ),
+        Some(first) => {
+            let via = first
+                .via
+                .as_ref()
+                .map(|v| format!(" (sourced by {})", v.display()))
+                .unwrap_or_default();
+            let more = match found.len() {
+                1 => String::new(),
+                n => format!(", and {} more", n - 1),
+            };
+            r.add(
+                "root-sources",
+                Status::Warn,
+                format!(
+                    "root's shell runs code from {}{via}: {}{more}; whoever can write there gets root",
+                    first.bad.path.display(),
+                    first.bad.problem
+                ),
+            );
+        }
+    }
     if let Ok(exe) = module::current_exe()
         && let Some(bad) = location::insecure_component(&exe, 0, Path::new("/"))
     {
@@ -680,6 +739,18 @@ mod tests {
         let late = "if [[ -r \"${XDG_CACHE_HOME}/p10k-instant-prompt-${(%):-%n}.zsh\" ]]; then\nfi\n\
                     source ${ZIM_HOME}/init.zsh\n. ~/cinelog/shell/early.zsh\n";
         assert_eq!(early_placement(late), EarlyPlacement::Late { line: 4, before: 1 });
+    }
+
+    #[test]
+    fn loose_config_modes() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("config.toml");
+        std::fs::write(&f, "").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(loose_mode(&f), Some(0o644));
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(loose_mode(&f), None);
+        assert_eq!(loose_mode(&d.path().join("missing")), None);
     }
 
     #[test]

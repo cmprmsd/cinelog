@@ -1,12 +1,39 @@
 //! tmux integration of pane recorders (plan §5.6, §5.8): identity from `$TMUX`, the
 //! creating client for shared root servers, and `ctx` context queries.
 
+use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use cinelog_proto::{Extra, TmuxContext, TmuxIdentity};
 
 const CTX_FORMAT: &str = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}";
+/// A tmux query that takes longer (stopped or wedged server) is killed: the recorder
+/// queries before the fork (root) and joins the ctx thread at exit, so nothing may hang.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_REPLY: u64 = 64 * 1024;
+
+/// Waits for `child` until `timeout`, then kills and reaps it; `None` on timeout.
+fn wait_deadline(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    let mut nap = Duration::from_millis(1);
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return Some(st),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(nap);
+                nap = (nap * 2).min(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
 
 /// `$TMUX` (`socket,server_pid,session_id`) and `$TMUX_PANE` of a pane shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,18 +117,27 @@ impl TmuxClient {
     }
 
     fn display(&self, format: &str) -> Option<String> {
-        let out = Command::new(self.bin.as_ref()?)
+        let mut child = Command::new(self.bin.as_ref()?)
             .arg("-S")
             .arg(&self.env.socket)
             .args(["display-message", "-p", "-t", &self.env.pane, format])
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env_remove("TMUX")
-            .output()
+            .spawn()
             .ok()?;
-        out.status
+        // The reply is one short line and fits the pipe buffer, so the client never
+        // blocks on its stdout while we wait for it to exit.
+        let status = wait_deadline(&mut child, QUERY_TIMEOUT)?;
+        let stdout = child.stdout.take()?;
+        // Non-blocking: a leftover holder of the pipe's write end cannot stall the read.
+        crate::pty::set_nonblocking(stdout.as_raw_fd()).ok()?;
+        let mut reply = Vec::new();
+        let _ = stdout.take(MAX_REPLY).read_to_end(&mut reply);
+        status
             .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_owned())
+            .then(|| String::from_utf8_lossy(&reply).trim_end_matches('\n').to_owned())
     }
 
     /// Pid of the client tmux reports for the pane (the creating one right after
@@ -189,6 +225,51 @@ mod tests {
         let c = TmuxClient { bin: None, env };
         assert_eq!(c.client_pid(), None);
         assert!(c.context().is_none());
+    }
+
+    /// Regression: a wedged server (here a "tmux" that never answers) made every query,
+    /// and with it the recorder's start (root) and exit (ctx thread join), hang.
+    #[test]
+    fn a_query_that_does_not_answer_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("tmux");
+        let pidfile = dir.path().join("pid");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n", pidfile.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let env = TmuxEnv::parse("/nonexistent/sock,1,0", "%0").unwrap();
+        let c = TmuxClient { bin: Some(fake), env };
+        let started = Instant::now();
+        assert_eq!(c.client_pid(), None);
+        let took = started.elapsed();
+        assert!(
+            took >= QUERY_TIMEOUT && took < QUERY_TIMEOUT + Duration::from_secs(2),
+            "{took:?}"
+        );
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        assert!(
+            !Path::new(&format!("/proc/{}", pid.trim())).exists(),
+            "the hung query was killed and reaped"
+        );
+    }
+
+    #[test]
+    fn query_reply_and_exit_status_are_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("tmux");
+        std::fs::write(&fake, "#!/bin/sh\n[ \"$6\" = '%7' ] && echo 4242\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = |pane: &str| TmuxClient {
+            bin: Some(fake.clone()),
+            env: TmuxEnv::parse("/s,1,0", pane).unwrap(),
+        };
+        assert_eq!(client("%7").client_pid(), Some(4242));
+        assert_eq!(client("%8").client_pid(), None, "non-zero exit");
     }
 
     /// Real tmux on a private `-L cinelog-…` server (skipped when tmux is not installed).

@@ -100,22 +100,24 @@ impl ClockMap {
         self.anchors.is_empty()
     }
 
-    /// Wall clock at cast offset `t_us`, or `None` without any anchor.
+    /// Wall clock at cast offset `t_us`; `None` without any anchor or when the result
+    /// does not fit an `i64` (only possible with corrupt anchors or offsets).
     pub fn epoch_us(&self, t_us: u64) -> Option<i64> {
         let idx = self.anchors.partition_point(|a| a.t_us <= t_us);
         let Some(a) = idx.checked_sub(1).map(|i| self.anchors[i]) else {
             let first = self.anchors.first()?;
-            return Some(first.epoch_us - delta(t_us, first.t_us));
+            return first.epoch_us.checked_sub(delta(t_us, first.t_us)?);
         };
-        let elapsed = delta(a.t_us, t_us);
-        Some(match self.anchors.get(idx) {
+        let elapsed = delta(a.t_us, t_us)?;
+        match self.anchors.get(idx) {
             Some(b) if !b.step => {
-                let span = i128::from(delta(a.t_us, b.t_us));
+                let span = i128::from(delta(a.t_us, b.t_us)?);
                 let gain = i128::from(b.epoch_us) - i128::from(a.epoch_us);
-                a.epoch_us + (i128::from(elapsed) * gain / span) as i64
+                // |elapsed| < 2^63 and |gain| < 2^64, so this cannot overflow i128.
+                i64::try_from(i128::from(a.epoch_us) + i128::from(elapsed) * gain / span).ok()
             }
-            _ => a.epoch_us + elapsed,
-        })
+            _ => a.epoch_us.checked_add(elapsed),
+        }
     }
 
     /// [`Self::epoch_us`] in seconds (the DB's REAL timestamps).
@@ -124,9 +126,9 @@ impl ClockMap {
     }
 }
 
-/// `to - from` in µs as i64 (offsets are far below `i64::MAX`).
-fn delta(from: u64, to: u64) -> i64 {
-    (i128::from(to) - i128::from(from)) as i64
+/// `to - from` in µs, `None` if it does not fit an `i64`.
+fn delta(from: u64, to: u64) -> Option<i64> {
+    i64::try_from(i128::from(to) - i128::from(from)).ok()
 }
 
 #[cfg(test)]
@@ -215,5 +217,49 @@ mod tests {
             data: r#"{"k":"clock","epoch_us":1}"#.into()
         }));
         assert_eq!(m.anchors().len(), 1);
+    }
+
+    #[test]
+    fn overflow_yields_none() {
+        let m = ClockMap::with_start(1_000_000_000);
+        assert_eq!(m.epoch_us(u64::MAX), None);
+        assert_eq!(m.epoch_us(i64::MAX as u64), None);
+        let mut late = ClockMap::new();
+        late.insert(ClockAnchor {
+            t_us: u64::MAX,
+            epoch_us: i64::MIN,
+            step: false,
+        });
+        assert_eq!(late.epoch_us(0), None);
+        let mut slewed = ClockMap::with_start(i64::MIN);
+        slewed.insert(ClockAnchor {
+            t_us: 3,
+            epoch_us: i64::MAX,
+            step: false,
+        });
+        assert_eq!(slewed.epoch_us(0), Some(i64::MIN));
+        assert_eq!(slewed.epoch_us(2), Some(3_074_457_345_618_258_602));
+        assert_eq!(slewed.epoch_us(3), Some(i64::MAX));
+    }
+
+    #[test]
+    fn huge_interval_line_does_not_break_mapping() {
+        use crate::{CastReader, Reader};
+        let cast = concat!(
+            "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n",
+            "[0.0, \"m\", \"{\\\"cl\\\":1,\\\"k\\\":\\\"session\\\",\\\"start_epoch_us\\\":1700000000000000}\"]\n",
+            "[9223372036854, \"o\", \"x\"]\n",
+            "[1.5, \"o\", \"y\"]\n",
+        );
+        let mut r = Reader::new(cast.as_bytes()).unwrap();
+        let mut m = ClockMap::new();
+        let mut epochs = Vec::new();
+        while let Some(ev) = r.next_event() {
+            let ev = ev.unwrap();
+            m.observe(&ev);
+            epochs.push(m.epoch_us(ev.t_us));
+        }
+        assert_eq!(epochs, [Some(1_700_000_000_000_000), Some(1_700_000_001_500_000)]);
+        assert_eq!(r.stats().bad_lines, 1);
     }
 }

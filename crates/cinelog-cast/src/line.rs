@@ -3,15 +3,19 @@
 use crate::json::{decode_json_string, string_literal_end};
 use crate::{EventCode, RawLine};
 
+/// Largest accepted event time (and summed cast offset): 100 years in µs. Anything larger
+/// is corruption; rejecting it keeps all derived offsets and epochs far from overflow.
+pub const MAX_TIME_US: u64 = 100 * 36_525 * 864 * 1_000_000;
+
 /// Splits one event line into time, code and the still-escaped data literal.
 ///
 /// Accepts any JSON whitespace (including a trailing `\r`), integer, decimal and exponent
 /// times, and any single-character code. Decimal times are converted to µs exactly
 /// (rounded at the seventh fractional digit); negative times are clamped to 0. Returns
-/// `None` for anything that is not a complete event.
+/// `None` for anything that is not a complete event, including times above [`MAX_TIME_US`].
 pub fn parse_event_line(line: &[u8]) -> Option<RawLine<'_>> {
     let mut i = expect(line, skip_ws(line, 0), b'[')?;
-    let (time_us, n) = parse_time(&line[i..])?;
+    let (time_us, n) = parse_time(&line[i..]).filter(|&(t, _)| t <= MAX_TIME_US)?;
     i = expect(line, skip_ws(line, i + n), b',')?;
 
     let code_end = i + string_literal_end(&line[i..])?;
@@ -153,6 +157,16 @@ mod tests {
         assert_eq!(parse_time(b"-"), None);
         assert_eq!(parse_time(b"1e"), None);
         assert_eq!(parse_time(b"99999999999999999999"), None);
+    }
+
+    #[test]
+    fn absurd_times_are_bad_lines() {
+        let max_secs = MAX_TIME_US / 1_000_000;
+        assert_eq!(p(&format!(r#"[{max_secs}, "o", "x"]"#)).map(|e| e.0), Some(MAX_TIME_US));
+        assert_eq!(p(&format!(r#"[{}, "o", "x"]"#, max_secs + 1)), None);
+        assert_eq!(p(r#"[9223372036854, "o", "x"]"#), None);
+        assert_eq!(p(r#"[18446744073709, "o", ""]"#), None);
+        assert_eq!(p(r#"[1e300, "o", "x"]"#), None);
     }
 
     #[test]

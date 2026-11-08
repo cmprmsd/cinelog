@@ -66,6 +66,12 @@ fn system_user_name(uid: u32) -> Option<String> {
         .map(|u| u.name)
 }
 
+/// `<dir>/bin/cinelog`: where every install puts the binary (plugin dir, `/usr/local`).
+fn is_installed_binary(exe: &Path) -> bool {
+    exe.file_name().is_some_and(|n| n == RECORDER_COMM)
+        && exe.parent().and_then(Path::file_name).is_some_and(|d| d == "bin")
+}
+
 fn is_ptmx(target: &Path) -> bool {
     target.file_name().is_some_and(|n| n == "ptmx")
 }
@@ -224,25 +230,24 @@ impl<P: ProcFs, R: RegistryLookup> ProcDetector<P, R> {
         }
     }
 
-    fn exe_is_cinelog(&self, pid: Pid) -> bool {
-        match self.proc.exe(pid) {
-            Ok(exe) => {
-                let exe = strip_deleted(&exe);
-                self.self_exe.as_deref() == Some(exe)
-                    || exe
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with(RECORDER_COMM))
-            }
-            // Another uid's recorder: exe is unreadable, comm alone has to do.
-            Err(_) => true,
-        }
+    /// §5.2 step 4: the holder runs our own binary. Same uid: its exe must be readable and
+    /// equal `/proc/self/exe` (` (deleted)` allowed after an upgrade). Another uid may run
+    /// another install of cinelog (root's `/usr/local/bin/cinelog` inside a user's recording
+    /// from the plugin dir), so there an unreadable exe passes, and so does a readable
+    /// `…/bin/cinelog`: the binary's documented name, whatever the plugin dir. This is a
+    /// deliberate widening of the spec for cross-uid nesting only, not a security boundary.
+    fn exe_is_cinelog(&self, pid: Pid, same_uid: bool) -> bool {
+        let Ok(exe) = self.proc.exe(pid) else {
+            return !same_uid;
+        };
+        let exe = strip_deleted(&exe);
+        self.self_exe.as_deref() == Some(exe) || (!same_uid && is_installed_binary(exe))
     }
 
     fn resolve(&self, st: &ProcStat, via: FoundVia, pts: u32, euid: u32) -> Resolved {
         let uid = self.euid_of(st.pid).unwrap_or(u32::MAX);
         let mut entry = None;
-        let class = if st.comm == RECORDER_COMM && self.exe_is_cinelog(st.pid) {
+        let class = if st.comm == RECORDER_COMM && self.exe_is_cinelog(st.pid, uid == euid) {
             if uid != euid {
                 Some(HolderClass::OwnRecorder { same_uid: false })
             } else {
@@ -370,22 +375,34 @@ impl<P: ProcFs, R: RegistryLookup> ProcDetector<P, R> {
             .map_or_else(|| "unknown".to_owned(), |s| s.comm.clone())
     }
 
-    /// First process with real uid ≠ 0 in `pid`'s ancestry (§5.6 rule 1). The second value
-    /// reports whether the walk reached a multiplexer server first (a shared root tmux pane).
-    fn first_non_root(&self, chain: &[ProcStat]) -> (Option<u32>, bool) {
+    /// §5.6 rule 1 over `chain` (nearest first): the first real uid ≠ 0, and whether the walk
+    /// crossed a multiplexer server before reaching it (or at all, when none was found).
+    fn first_non_root(&self, chain: &[ProcStat]) -> RootWalk {
+        let mut crossed_server = false;
         for (i, st) in chain.iter().enumerate() {
             if let Some(ruid) = self.ruid_of(st.pid)
                 && ruid != 0
             {
-                return (Some(ruid), false);
+                return RootWalk {
+                    uid: Some(ruid),
+                    crossed_server,
+                };
             }
             // The walk's own start (a recorder, or a screen client) is never the server.
-            if i > 0 && is_multiplexer_server(&st.comm) {
-                return (None, true);
-            }
+            crossed_server |= i > 0 && is_multiplexer_server(&st.comm);
         }
-        (None, false)
+        RootWalk {
+            uid: None,
+            crossed_server,
+        }
     }
+}
+
+/// Result of [`ProcDetector::first_non_root`].
+#[derive(Debug, Clone, Copy)]
+struct RootWalk {
+    uid: Option<u32>,
+    crossed_server: bool,
 }
 
 impl<P: ProcFs, R: RegistryLookup> Detector for ProcDetector<P, R> {
@@ -523,22 +540,31 @@ impl<P: ProcFs, R: RegistryLookup> Detector for ProcDetector<P, R> {
             login_via,
         };
         let chain = self.ancestry(req.start_pid);
-        let (found, via_tmux) = self.first_non_root(&chain);
-        if let Some(uid) = found {
-            return team(self.user_name(uid), Attribution::Ancestor, None);
-        }
-        let loginuid = self.proc.loginuid(req.start_pid).ok().flatten().filter(|&u| u != 0);
-        if via_tmux {
-            if let Some(client) = req.tmux_client_pid
-                && let (Some(uid), _) = self.first_non_root(&self.ancestry(client))
-            {
+        let walk = self.first_non_root(&chain);
+        let loginuid = || self.proc.loginuid(req.start_pid).ok().flatten().filter(|&u| u != 0);
+        if !walk.crossed_server {
+            if let Some(uid) = walk.uid {
                 return team(self.user_name(uid), Attribution::Ancestor, None);
             }
-            if let Some(uid) = loginuid {
-                return team(self.user_name(uid), Attribution::Inherited, None);
+            if let Some(uid) = loginuid() {
+                return team(self.user_name(uid), Attribution::Loginuid, None);
             }
-        } else if let Some(uid) = loginuid {
-            return team(self.user_name(uid), Attribution::Loginuid, None);
+            return team("root".to_owned(), Attribution::None, Some(self.login_via(&chain)));
+        }
+        // A pane of a shared root multiplexer server. Whoever is above the server only
+        // started it; the client that created the pane names the user, when it is known.
+        if let Some(uid) = req
+            .tmux_client_pid
+            .and_then(|c| self.first_non_root(&self.ancestry(c)).uid)
+        {
+            return team(self.user_name(uid), Attribution::Ancestor, None);
+        }
+        // A screen server stays a child of its first client, `tmux -D` of its shell.
+        if let Some(uid) = walk.uid {
+            return team(self.user_name(uid), Attribution::Ancestor, None);
+        }
+        if let Some(uid) = loginuid() {
+            return team(self.user_name(uid), Attribution::Inherited, None);
         }
         team("root".to_owned(), Attribution::None, Some(self.login_via(&chain)))
     }

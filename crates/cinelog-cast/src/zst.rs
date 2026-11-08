@@ -61,6 +61,9 @@ pub struct FrameEncoder<W: Write> {
     comp: zstd::bulk::Compressor<'static>,
     frame_bytes: usize,
     buf: Vec<u8>,
+    /// `buf[..newline_free]` is known to hold no newline, so writes of a long line do not
+    /// rescan the whole buffer.
+    newline_free: usize,
     frames: Vec<ZstFrame>,
     c_off: u64,
     u_off: u64,
@@ -81,6 +84,7 @@ impl<W: Write> FrameEncoder<W> {
             comp,
             frame_bytes,
             buf: Vec::with_capacity(frame_bytes + 64 * 1024),
+            newline_free: 0,
             frames: Vec::new(),
             c_off: 0,
             u_off: 0,
@@ -113,19 +117,26 @@ impl<W: Write> FrameEncoder<W> {
         self.c_off += compressed.len() as u64;
         self.u_off += n as u64;
         self.buf.drain(..n);
+        self.newline_free = self.newline_free.saturating_sub(n);
         Ok(())
     }
 
-    fn cut(&self) -> Option<usize> {
+    /// Where to end the next frame: after the last newline within `frame_bytes`, else
+    /// after the first one beyond, else at `4 * frame_bytes` (a newline-free run).
+    fn cut(&mut self) -> Option<usize> {
         if self.buf.len() < self.frame_bytes {
             return None;
         }
-        if let Some(i) = memrchr(b'\n', &self.buf[..self.frame_bytes]) {
-            return Some(i + 1);
+        if self.newline_free < self.frame_bytes {
+            if let Some(i) = memrchr(b'\n', &self.buf[self.newline_free..self.frame_bytes]) {
+                return Some(self.newline_free + i + 1);
+            }
+            self.newline_free = self.frame_bytes;
         }
-        if let Some(i) = memchr(b'\n', &self.buf[self.frame_bytes..]) {
-            return Some(self.frame_bytes + i + 1);
+        if let Some(i) = memchr(b'\n', &self.buf[self.newline_free..]) {
+            return Some(self.newline_free + i + 1);
         }
+        self.newline_free = self.buf.len();
         let limit = self.frame_bytes.saturating_mul(4);
         (self.buf.len() >= limit).then_some(limit)
     }
@@ -377,6 +388,62 @@ mod tests {
         // No newline within the first frame size: the frame extends to the newline, then
         // the newline-free remainder is cut once it reaches four frames.
         assert_eq!(frames.iter().map(|f| f.u_len).collect::<Vec<_>>(), [101, 4000, 1000]);
+    }
+
+    /// The incremental newline scan cuts exactly where rescanning the whole buffer on
+    /// every write does.
+    #[test]
+    fn incremental_scan_matches_full_rescan() {
+        fn full_rescan_cut(buf: &[u8], fb: usize) -> Option<usize> {
+            if buf.len() < fb {
+                return None;
+            }
+            if let Some(i) = memrchr(b'\n', &buf[..fb]) {
+                return Some(i + 1);
+            }
+            if let Some(i) = memchr(b'\n', &buf[fb..]) {
+                return Some(fb + i + 1);
+            }
+            (buf.len() >= 4 * fb).then_some(4 * fb)
+        }
+        let mut data = Vec::new();
+        for (run, nl) in [
+            (50, true),
+            (2500, true),
+            (999, true),
+            (7000, false),
+            (3, true),
+            (12_345, false),
+        ] {
+            data.extend(std::iter::repeat_n(b'x', run));
+            if nl {
+                data.push(b'\n');
+            }
+        }
+        for step in [1, 7, 333, 1000, 4096, data.len()] {
+            let mut expected = Vec::new();
+            let mut buf = Vec::new();
+            for chunk in data.chunks(step) {
+                buf.extend_from_slice(chunk);
+                while let Some(n) = full_rescan_cut(&buf, 1000) {
+                    expected.push(n as u64);
+                    buf.drain(..n);
+                }
+            }
+            expected.push(buf.len() as u64);
+
+            let mut enc = FrameEncoder::with_frame_bytes(Vec::new(), 1, 1000).unwrap();
+            for chunk in data.chunks(step) {
+                enc.write_all(chunk).unwrap();
+            }
+            let (z, frames) = enc.finish().unwrap();
+            assert_eq!(
+                frames.iter().map(|f| f.u_len).collect::<Vec<_>>(),
+                expected,
+                "step {step}"
+            );
+            assert_eq!(zstd::decode_all(&z[..]).unwrap(), data);
+        }
     }
 
     #[test]

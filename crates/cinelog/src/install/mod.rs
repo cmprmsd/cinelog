@@ -93,13 +93,17 @@ pub fn systemctl(args: &[&str], steps: &mut Steps) {
     }
 }
 
-fn team_options(args: &InstallArgs) -> Result<team::Options> {
+fn team_system(args: &InstallArgs) -> Result<team::System> {
     let root = args
         .prefix
         .as_ref()
         .map_or_else(SystemRoot::real, |p| SystemRoot::prefixed(p.clone()));
-    let euid = nix::unistd::geteuid().as_raw();
-    team::check_privileges(&root, euid)?;
+    let sys = team::System::new(root, nix::unistd::geteuid().as_raw());
+    team::check_privileges(&sys.root, sys.euid)?;
+    Ok(sys)
+}
+
+fn team_options(args: &InstallArgs, sys: team::System) -> Result<team::Options> {
     let running = module::current_exe().context("cannot locate the running binary")?;
     let module = match &args.module {
         Some(m) => m.clone(),
@@ -113,25 +117,25 @@ fn team_options(args: &InstallArgs) -> Result<team::Options> {
     };
     let binary = team::source_binary(args.binary.as_deref(), &module, &running)?;
     Ok(team::Options {
-        trust: team::Trust::for_root(&root),
-        root,
+        sys,
         module,
         binary,
         system_zshrc: args.system_zshrc,
         upgrade: args.upgrade,
         allow_unverified: args.allow_unverified,
         migrate: !args.no_migrate,
-        euid,
     })
 }
 
 fn execute(args: &InstallArgs, steps: &mut Steps) -> Result<Option<doctor::Report>> {
     if args.team {
-        let opts = team_options(args)?;
+        let sys = team_system(args)?;
         if args.uninstall {
-            team::uninstall(&opts, steps)?;
+            // Resolving a module or binary here would break uninstalling from
+            // /usr/local/bin or after a rollback to a release without bin/cinelog.
+            team::uninstall(&sys, steps)?;
         } else {
-            team::install(&opts, steps)?;
+            team::install(&team_options(args, sys)?, steps)?;
         }
         return Ok(None);
     }

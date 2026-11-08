@@ -91,6 +91,62 @@ mod tests {
         assert_eq!(display_name(b"/usr/bin/\0"), None);
     }
 
+    const CHILD: &str = "CINELOG_REC_TEST_ARGV_CHILD";
+
+    /// Child side of [`rewriting_argv_changes_cmdline_but_not_comm`]; a no-op otherwise.
+    #[test]
+    fn argv_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let comm = std::fs::read("/proc/self/comm").unwrap();
+        let before = std::fs::read("/proc/self/cmdline").unwrap();
+        let mut area = ArgvArea::of_self().expect("argv area");
+        let cmdline = || std::fs::read("/proc/self/cmdline").unwrap();
+        let only_nul = |b: &[u8]| b.iter().all(|&c| c == 0);
+
+        area.set(b"vim");
+        let c = cmdline();
+        assert!(c.starts_with(b"vim\0"), "{c:?}");
+        assert!(only_nul(&c[3..]), "NUL padding up to the old end: {c:?}");
+        assert_eq!(c.len(), before.len());
+
+        area.set(b"ls");
+        let c = cmdline();
+        assert!(c.starts_with(b"ls\0") && only_nul(&c[2..]), "no leftover of vim: {c:?}");
+
+        let long = vec![b'n'; before.len() + 50];
+        area.set(&long);
+        let c = cmdline();
+        assert_eq!(&c[..before.len() - 1], &long[..before.len() - 1], "truncated");
+        assert_eq!(c.last(), Some(&0), "still NUL-terminated");
+
+        assert_eq!(std::fs::read("/proc/self/comm").unwrap(), comm, "comm is untouched");
+        println!("ARGV-OK");
+    }
+
+    /// The argv rewrite is process-wide, so it runs in a re-executed copy of this binary.
+    #[test]
+    fn rewriting_argv_changes_cmdline_but_not_comm() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mirror::tests::argv_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("ARGV-OK"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn name_of_self() {
         let me = name_of(std::process::id()).unwrap();

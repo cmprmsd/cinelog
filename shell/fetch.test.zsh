@@ -6,8 +6,8 @@ emulate -R zsh -o extended_glob -o pipe_fail
 typeset -g FETCH=${${(%):-%x}:A:h}/fetch.zsh ROOT_TMP= VERBOSE=0 FILTER='*'
 [[ $1 == -v ]] && { VERBOSE=1; shift }
 [[ -n $1 ]] && FILTER="*$1*"
-typeset -gi PASS=0 FAIL=0
-typeset -g T VER=9.9.9 TARGET=x86_64-unknown-linux-musl
+typeset -gi PASS=0 FAIL=0 SKIP=0
+typeset -g T VER=9.9.9 TARGET=x86_64-unknown-linux-musl HOST_TRIPLE=x86_64-fake-linux-gnu
 
 ROOT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/cinelog-fetch-test.XXXXXX") || exit 1
 trap 'rm -rf -- $ROOT_TMP' EXIT
@@ -43,20 +43,29 @@ setup() {
   : > $T/log
 }
 
-# Fake cargo: builds bin `cinelog` reporting VERSION; with CL_CARGO_NEED_OFFLINE it only
+# Fake cargo: `-vV` reports host $HOST_TRIPLE (fails with CL_CARGO_NO_HOST); `build` writes a
+# `cinelog` reporting VERSION to the path real cargo uses (--target wins over
+# CARGO_BUILD_TARGET; with neither, target/release). With CL_CARGO_NEED_OFFLINE it only
 # succeeds when --offline is passed; with CL_CARGO_NEED_TOOLCHAIN only under that
 # RUSTUP_TOOLCHAIN; with CL_CARGO_FAIL it always fails. Fake rustup: `rustup default` prints
 # CL_RUSTUP_DEFAULT, or fails like rustup without a default toolchain.
 fake_cargo() {
   print -r -- '#!/bin/sh
+if [ "$1" = -vV ]; then
+  [ -n "$CL_CARGO_NO_HOST" ] && exit 1
+  printf "cargo 1.0.0 (fake)\nrelease: 1.0.0\nhost: '$HOST_TRIPLE'\nos: fake\n"; exit 0
+fi
 echo "cargo${RUSTUP_TOOLCHAIN:+ [tc=$RUSTUP_TOOLCHAIN]} $*" >> "$CL_TEST_LOG"
 [ -n "$CL_CARGO_FAIL" ] && exit 101
 [ -n "$CL_CARGO_NEED_TOOLCHAIN" ] && [ "$RUSTUP_TOOLCHAIN" != "$CL_CARGO_NEED_TOOLCHAIN" ] && exit 1
 case " $* " in *" --offline "*) ;; *) [ -n "$CL_CARGO_NEED_OFFLINE" ] && exit 101 ;; esac
-mkdir -p "$CARGO_TARGET_DIR/release"
+t=$CARGO_BUILD_TARGET prev=
+for a in "$@"; do [ "$prev" = --target ] && t=$a; prev=$a; done
+out=$CARGO_TARGET_DIR${t:+/$t}/release
+mkdir -p "$out"
 v=$(cat VERSION)
-printf "#!/bin/sh\n# built\n[ \"\$1\" = --version ] && echo \"cinelog %s\"\n[ \"\$1\" = install ] && echo \"\$*\" >> \"\$CL_TEST_LOG\"\nexit 0\n" "$v" > "$CARGO_TARGET_DIR/release/cinelog"
-chmod 755 "$CARGO_TARGET_DIR/release/cinelog"' > $T/path/cargo
+printf "#!/bin/sh\n# built\n[ \"\$1\" = --version ] && echo \"cinelog %s\"\n[ \"\$1\" = install ] && echo \"\$*\" >> \"\$CL_TEST_LOG\"\nexit 0\n" "$v" > "$out/cinelog"
+chmod 755 "$out/cinelog"' > $T/path/cargo
   chmod 755 $T/path/cargo
   print -r -- '#!/bin/sh
 [ "$1" = default ] || exit 2
@@ -267,8 +276,8 @@ t_cargo_toolchain_file_falls_back_to_default_toolchain() {
   print -r -- $'[toolchain]\nchannel = "stable"\ncomponents = ["clippy"]' > $T/mod/rust-toolchain.toml
   CL_ENV=(CL_CARGO_NEED_TOOLCHAIN=nightly-test CL_RUSTUP_DEFAULT=nightly-test) run_fetch ||
     fail "$(<$T/err)" || return 1
-  contains $T/log "cargo build --release --locked --bin cinelog --offline" || return 1
-  contains $T/log "cargo [tc=nightly-test] build --release --locked --bin cinelog" || return 1
+  contains $T/log "cargo build --release --locked --bin cinelog --target $HOST_TRIPLE --offline" || return 1
+  contains $T/log "cargo [tc=nightly-test] build --release --locked --bin cinelog --target $HOST_TRIPLE" || return 1
   contains $T/err "default toolchain nightly-test" || return 1
   contains $T/mod/bin/cinelog "# built" || return 1
   leftovers
@@ -281,7 +290,7 @@ t_cargo_default_toolchain_retry_offline() {
   print -r -- $'[toolchain]\nchannel = "stable"' > $T/mod/rust-toolchain.toml
   CL_ENV=(CL_CARGO_NEED_TOOLCHAIN=nightly-test CL_CARGO_NEED_OFFLINE=1 CL_RUSTUP_DEFAULT=nightly-test) \
     run_fetch || fail "$(<$T/err)" || return 1
-  contains $T/log "cargo [tc=nightly-test] build --release --locked --bin cinelog --offline" || return 1
+  contains $T/log "cargo [tc=nightly-test] build --release --locked --bin cinelog --target $HOST_TRIPLE --offline" || return 1
   contains $T/mod/bin/cinelog "# built"
 }
 
@@ -465,16 +474,218 @@ t_concurrent_runs_serialize() {
   assert_eq "$(grep -c refresh $T/log)" 1 "refresh ran more than once"
 }
 
+# Regression: zparseopts kept the '=' of `--opt=value`, so `--arch=aarch64` was "unsupported"
+# and silently built from source, and `--dir=X` became "$PWD/=X".
+t_gnu_style_option_values() {
+  setup gnu_equals
+  fake_cargo
+  run_fetch --arch=aarch64 --base-url=file://$T/rel || fail "$(<$T/err)" || return 1
+  contains $T/mod/bin/cinelog "# arm" || return 1
+  not_contains $T/log cargo || return 1
+  mkdir -p $T/other/shell && cp $FETCH $T/other/shell/fetch.zsh
+  rm $T/mod/bin/cinelog
+  ( cd $T/tmp && env -i PATH=/usr/bin:/bin HOME=$T/home XDG_STATE_HOME=$T/state TMPDIR=$T/tmp \
+      CL_TEST_LOG=$T/log zsh -f $T/other/shell/fetch.zsh --dir=$T/mod --base-url=file://$T/rel \
+      --arch=x86_64 ) 2>$T/err || fail "--dir=: $(<$T/err)" || return 1
+  assert_eq $(sha $T/mod/bin/cinelog) $(sha $T/rel/v$VER/cinelog-$TARGET) || return 1
+  [[ ! -e $T/other/bin && -z $(print -l $T/tmp/=*(N)) ]] || fail "--dir= went elsewhere"
+}
+
+t_empty_option_value_is_usage_error() {
+  setup empty_value
+  local a
+  for a in --dir= --arch= --base-url=; do
+    run_fetch $a; assert_eq $? 2 "$a" || return 1
+  done
+  run_fetch --dir ''; assert_eq $? 2 "--dir ''" || return 1
+  [[ ! -e $T/mod/bin ]] || fail "ran despite a usage error"
+}
+
+# Regression: with build.target / CARGO_BUILD_TARGET set, cargo writes target/<triple>/release,
+# and the fallback copied a missing or stale target/release/cinelog.
+t_cargo_build_target_config_is_overridden() {
+  setup build_target
+  rm -r $T/rel/v$VER $T/mod/shell/checksums/v$VER.sha256
+  fake_cargo
+  mkdir -p $T/mod/target/release && fake_bin $T/mod/target/release/cinelog 9.9.8 stale
+  CL_ENV=(CARGO_BUILD_TARGET=riscv64gc-unknown-linux-gnu) run_fetch || fail "$(<$T/err)" || return 1
+  contains $T/log "--target $HOST_TRIPLE" || return 1
+  contains $T/mod/bin/cinelog "# built" || return 1
+  [[ ! -e $T/mod/target/riscv64gc-unknown-linux-gnu ]] || fail "built for CARGO_BUILD_TARGET"
+}
+
+t_cargo_without_host_triple_fails() {
+  setup no_host
+  rm -r $T/rel/v$VER $T/mod/shell/checksums/v$VER.sha256
+  fake_cargo
+  CL_ENV=(CL_CARGO_NO_HOST=1) run_fetch && fail "succeeded without a host triple"
+  not_contains $T/log "cargo build" || return 1
+  [[ ! -e $T/mod/bin/cinelog ]] || fail "installed something"
+}
+
+# A tag-pinned checkout never receives the checksum commit on main; say so instead of
+# implying that a later pull fixes it.
+t_pinned_checkout_warns_about_release_sums() {
+  setup tag_checkout
+  rm $T/mod/shell/checksums/v$VER.sha256
+  mkdir -p $T/mod/.git
+  print -r -- ${(l:40::a:)} > $T/mod/.git/HEAD
+  run_fetch || fail "$(<$T/err)" || return 1
+  contains $T/err "not in the repo yet" || return 1
+  contains $T/err "module is pinned" || return 1
+  rm $T/mod/bin/cinelog
+  print -r -- "ref: refs/heads/main" > $T/mod/.git/HEAD
+  run_fetch || return 1
+  not_contains $T/err "module is pinned"
+}
+
+# --- as root: a user + mount + network namespace where our uid is 0, chrooted into $R --------
+# Everything created under $R is root-owned there; host files (the bind-mounted /usr) appear
+# as uid 65534. The environment mimics `sudo -E`: HOME, XDG_STATE_HOME, TMPDIR, PATH and
+# CARGO_TARGET_DIR all point at user-controlled places. Skipped without user namespaces,
+# unless CINELOG_FETCH_TEST_ROOT=1 (CI) turns that into a failure.
+
+typeset -g R
+userns_ok() { unshare -rmn true 2>/dev/null }
+
+setup_root() {
+  if ! userns_ok; then
+    [[ -z ${CINELOG_FETCH_TEST_ROOT:-} ]] || { fail "unprivileged user namespaces are not available"; return 1 }
+    return 77
+  fi
+  setup $1
+  R=$T/root
+  mkdir -p $R/{usr,etc,tmp,root,dev,home/user/bin,home/user/.cargo/bin,evil-tmp,evil-state}
+  chmod 1777 $R/tmp; chmod 0700 $R/root
+  local d
+  for d in bin sbin lib lib64 lib32 libx32; do
+    if [[ -h /$d ]]; then ln -s $(readlink /$d) $R/$d
+    elif [[ -d /$d ]]; then mkdir $R/$d
+    fi
+  done
+  print -r -- root:x:0:0:root:/root:/bin/sh > $R/etc/passwd
+  [[ -r /etc/ld.so.cache ]] && cp /etc/ld.so.cache $R/etc/
+  : > $R/dev/null
+  mv $T/mod $T/rel $R/
+  : > $R/log
+}
+
+run_root() {
+  unshare -rmn zsh -fc '
+    R=$1; shift
+    for d in usr bin sbin lib lib64 lib32 libx32; do
+      if [[ -d $R/$d && ! -h $R/$d ]]; then mount --rbind /$d $R/$d || exit 99; fi
+    done
+    mount --bind /dev/null $R/dev/null || exit 99
+    exec chroot $R /usr/bin/env -i "$@"' zsh $R \
+    PATH=/home/user/bin:/home/user/.cargo/bin:/usr/bin:/bin HOME=/home/user \
+    XDG_STATE_HOME=/evil-state TMPDIR=/evil-tmp CARGO_TARGET_DIR=/evil-target CL_TEST_LOG=/log \
+    ${CL_ENV[@]} zsh -f /mod/shell/fetch.zsh "$@" 2>$T/err
+}
+
+t_root_fresh_install() {
+  setup_root root_fresh || return
+  run_root --base-url=file:///rel --arch x86_64 || fail "exit $? $(<$T/err)" || return 1
+  assert_eq $(sha $R/mod/bin/cinelog) $(sha $R/rel/v$VER/cinelog-$TARGET) || return 1
+  assert_eq "$(<$R/log)" "" "install --refresh ran as root" || return 1
+  [[ -e $R/root/.local/state/cinelog/fetch.lock ]] || fail "lock not under root's passwd home" || return 1
+  [[ -z $(print -l $R/evil-state/*(DN) $R/evil-tmp/*(DN)) ]] || fail "used XDG_STATE_HOME or TMPDIR" || return 1
+  contains $T/err "install --team --upgrade" || return 1
+  run_root --base-url=file:///rel --arch x86_64 || return 1
+  contains $T/err "up to date"
+}
+
+t_root_refuses_writable_module() {
+  setup_root root_writable || return
+  chmod g+w $R/mod
+  run_root --base-url=file:///rel --arch x86_64; assert_eq $? 1 || return 1
+  contains $T/err "refusing to run as root" || return 1
+  [[ ! -e $R/mod/bin ]] || fail "created bin/"
+}
+
+t_root_refuses_foreign_owned_module() {
+  setup_root root_foreign || return
+  run_root --dir=/usr/share --base-url=file:///rel --arch x86_64; assert_eq $? 1 || return 1
+  contains $T/err "refusing to run as root"
+}
+
+# Regression: as root, CINELOG_FETCH_BASE_URL (kept by sudo -E) chose where the release
+# SHA256SUMS came from, i.e. the attacker supplied both the binary and its checksum.
+t_root_ignores_env_base_url() {
+  setup_root root_env_base || return
+  rm $R/mod/shell/checksums/v$VER.sha256
+  mkdir -p $R/evil/v$VER
+  fake_bin $R/evil/v$VER/cinelog-$TARGET $VER evil
+  ( cd $R/evil/v$VER && sha256sum cinelog-* > SHA256SUMS )
+  CL_ENV=(CINELOG_FETCH_BASE_URL=file:///evil) run_root --arch x86_64 && fail "succeeded offline"
+  contains $T/err "ignoring CINELOG_FETCH_BASE_URL" || return 1
+  [[ ! -e $R/mod/bin/cinelog ]] || fail "installed the env-supplied binary"
+}
+
+# Regression: as root the cargo fallback ran $HOME/.cargo/bin/cargo or a PATH cargo and built
+# into $CARGO_TARGET_DIR, all user-controlled under sudo -E.
+t_root_never_runs_cargo() {
+  setup_root root_cargo || return
+  rm -r $R/rel/v$VER $R/mod/shell/checksums/v$VER.sha256
+  : > $R/mod/Cargo.toml; : > $R/mod/Cargo.lock
+  local c
+  for c in $R/home/user/bin/cargo $R/home/user/.cargo/bin/cargo; do
+    print -r -- '#!/bin/sh
+echo "cargo $*" >> /log; exit 1' > $c
+    chmod 755 $c
+  done
+  run_root --base-url=file:///rel --arch x86_64 && fail "succeeded without a release"
+  not_contains $R/log cargo || return 1
+  contains $T/err "not building from source as root" || return 1
+  run_root --source --base-url=file:///rel && fail "--source succeeded as root"
+  not_contains $R/log cargo
+}
+
+# Regression: as root an existing bin/cinelog was executed (--version) without an ownership
+# check.
+t_root_does_not_run_writable_binary() {
+  setup_root root_bin || return
+  mkdir -p $R/mod/bin
+  print -r -- "#!/bin/sh
+echo ran >> /log; echo cinelog $VER" > $R/mod/bin/cinelog
+  chmod 0757 $R/mod/bin/cinelog
+  run_root --base-url=file:///rel --arch x86_64 || fail "$(<$T/err)" || return 1
+  not_contains $R/log ran || return 1
+  contains $T/err "not running it" || return 1
+  assert_eq $(sha $R/mod/bin/cinelog) $(sha $R/rel/v$VER/cinelog-$TARGET)
+}
+
+# Regression: `: >> fetch.lock` followed a planted symlink, so root created files anywhere.
+t_root_refuses_unsafe_state_dir() {
+  setup_root root_state || return
+  mkdir -p $R/root/.local/state/cinelog
+  ln -s /victim $R/root/.local/state/cinelog/fetch.lock
+  run_root --base-url=file:///rel --arch x86_64; assert_eq $? 1 "symlinked lock" || return 1
+  contains $T/err "refusing to run as root" || return 1
+  [[ ! -e $R/victim ]] || fail "followed the lock symlink" || return 1
+  rm $R/root/.local/state/cinelog/fetch.lock
+  chmod 0777 $R/root/.local/state
+  run_root --base-url=file:///rel --arch x86_64; assert_eq $? 1 "world-writable state dir" || return 1
+  [[ ! -e $R/mod/bin/cinelog ]] || fail "installed despite an unsafe state dir"
+}
+
+t_root_background_refused() {
+  setup_root root_bg || return
+  run_root --background; assert_eq $? 1 || return 1
+  contains $T/err "not allowed for root"
+}
+
 # ------------------------------------------------------------------------------------------
 
 typeset -ga CL_ENV=()
 for t in ${(ok)functions[(I)t_*]}; do
   [[ ${t#t_} == $~FILTER ]] || continue
-  if ( $t ) 2>$ROOT_TMP/.stderr; then
-    (( PASS++ )); (( VERBOSE )) && print -r -- "ok   ${t#t_}"
-  else
-    (( FAIL++ )); print -r -- "FAIL ${t#t_}"; sed 's/^/     /' $ROOT_TMP/.stderr
-  fi
+  ( $t ) 2>$ROOT_TMP/.stderr
+  case $? in
+    0)  (( PASS++ )); (( VERBOSE )) && print -r -- "ok   ${t#t_}" ;;
+    77) (( SKIP++ )); print -r -- "skip ${t#t_} (no unprivileged user namespaces)" ;;
+    *)  (( FAIL++ )); print -r -- "FAIL ${t#t_}"; sed 's/^/     /' $ROOT_TMP/.stderr ;;
+  esac
 done
-print -r -- "fetch.zsh: $PASS passed, $FAIL failed"
+print -r -- "fetch.zsh: $PASS passed, $FAIL failed, $SKIP skipped"
 (( FAIL == 0 ))

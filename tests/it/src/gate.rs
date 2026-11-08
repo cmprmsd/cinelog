@@ -207,7 +207,7 @@ fn cached(cell: &'static Probe, f: impl FnOnce() -> Result<(), Failure>) -> Resu
 
 fn probe_userns() -> Result<(), Failure> {
     tool("unshare")?;
-    let dir = tempfile::tempdir().map_err(|e| Failure::broken(e.to_string()))?;
+    let dir = crate::util::scratch_dir().map_err(|e| Failure::broken(format!("{e:#}")))?;
     let (uid, gid) = (nix::unistd::getuid(), nix::unistd::getgid());
     let script = format!(
         "mount -t tmpfs -o size=64k tmpfs \"$1\" && exec unshare -U --map-user={uid} --map-group={gid} sh -c 'test \"$(id -u)\" = {uid}'"

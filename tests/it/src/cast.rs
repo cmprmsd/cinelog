@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn finds_casts_and_raw_bytes() {
-        let d = tempfile::tempdir().unwrap();
+        let d = crate::util::scratch_dir().unwrap();
         fs::create_dir_all(d.path().join("2026-11")).unwrap();
         fs::write(d.path().join("2026-11/a.cast"), "x secret y").unwrap();
         fs::write(d.path().join("b.txt"), "nothing").unwrap();

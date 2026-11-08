@@ -30,7 +30,12 @@ pub fn ensure_config(
     let mut out = ConfigOutcome::default();
     if config_file.exists() {
         Config::load(config_file).with_context(|| "fix or remove it, then run install again".to_owned())?;
-        out.notes.push(format!("kept {}", config_file.display()));
+        match fsutil::tighten_file(config_file, 0o600, symlinks)? {
+            Outcome::Tightened(old) => out
+                .notes
+                .push(format!("kept {}, tightened from {old:o} to 600", config_file.display())),
+            _ => out.notes.push(format!("kept {}", config_file.display())),
+        }
         return Ok(out);
     }
     let mut overrides = Vec::new();
@@ -100,6 +105,41 @@ mod tests {
         let again = ensure_config(Scope::Personal, &cfg, Some(&legacy), Symlinks::Refuse).unwrap();
         assert!(!again.created && again.legacy_port.is_none());
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text);
+    }
+
+    #[test]
+    fn an_existing_world_readable_config_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config.toml");
+        std::fs::write(&cfg, "[record]\n").unwrap();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let out = ensure_config(Scope::Personal, &cfg, None, Symlinks::Refuse).unwrap();
+        assert_eq!(mode(&cfg), 0o600);
+        assert!(out.notes.join("\n").contains("tightened from 644"), "{:?}", out.notes);
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "[record]\n");
+
+        // Narrower modes are kept as they are.
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o400)).unwrap();
+        ensure_config(Scope::Personal, &cfg, None, Symlinks::Refuse).unwrap();
+        assert_eq!(mode(&cfg), 0o400);
+
+        // A symlinked config: followed only when allowed, and the target is tightened.
+        let real = d.path().join("dotfiles/config.toml");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let link = d.path().join("linked.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(ensure_config(Scope::Team, &link, None, Symlinks::Refuse).is_err());
+        assert_eq!(mode(&real), 0o664);
+        let uid = nix::unistd::geteuid().as_raw();
+        ensure_config(Scope::Personal, &link, None, Symlinks::FollowOwnedBy(uid)).unwrap();
+        assert_eq!(mode(&real), 0o600);
+        let other = Symlinks::FollowOwnedBy(uid.wrapping_add(1));
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(ensure_config(Scope::Personal, &link, None, other).is_err());
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub struct V3Writer<W: Write> {
     last_us: u64,
     bytes: u64,
     header_written: bool,
+    /// A failed write may have left part of a line in the sink.
+    broken: bool,
 }
 
 impl<W: Write> V3Writer<W> {
@@ -46,6 +48,7 @@ impl<W: Write> V3Writer<W> {
             last_us: 0,
             bytes: 0,
             header_written: false,
+            broken: false,
         }
     }
 
@@ -66,8 +69,19 @@ impl<W: Write> V3Writer<W> {
         self.w
     }
 
+    /// Writes the pending line. After a failed write (ENOSPC, EIO) the sink may end in a
+    /// fragment, so the next line starts with a newline: the fragment stays one bad line
+    /// instead of swallowing the next event (e.g. the recorder's `error` marker).
     fn emit_line(&mut self) -> Result<(), CastError> {
-        self.w.write_all(&self.line)?;
+        if self.broken {
+            self.w.write_all(b"\n")?;
+            self.bytes += 1;
+            self.broken = false;
+        }
+        if let Err(e) = self.w.write_all(&self.line) {
+            self.broken = true;
+            return Err(e.into());
+        }
         self.bytes += self.line.len() as u64;
         Ok(())
     }
@@ -212,6 +226,66 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), w.bytes_written());
         assert!(matches!(create(&path), Err(CastError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists));
+    }
+
+    #[test]
+    fn line_after_failed_write_starts_fresh() {
+        /// Accepts `budget` bytes, then fails once with ENOSPC (after a short write).
+        struct Full {
+            out: Vec<u8>,
+            budget: usize,
+            failed: bool,
+        }
+        impl Write for Full {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.budget == 0 && !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::from_raw_os_error(28));
+                }
+                let n = buf.len().min(if self.failed { usize::MAX } else { self.budget });
+                self.budget -= n.min(self.budget);
+                self.out.extend_from_slice(&buf[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Escaped output beyond the buffer capacity bypasses the buffer, as in `create`.
+        let sink = Full {
+            out: Vec::new(),
+            budget: usize::MAX,
+            failed: false,
+        };
+        let mut w = V3Writer::new(BufWriter::with_capacity(WRITE_BUFFER, sink));
+        w.write_header(&header()).unwrap();
+        w.write_event(1_000_000, EventCode::Output, "a").unwrap();
+        w.flush().unwrap();
+        w.get_mut().get_mut().budget = 7;
+        let big = "\u{1b}".repeat(20_000);
+        assert!(matches!(
+            w.write_event(2_000_000, EventCode::Output, &big),
+            Err(CastError::Io(_))
+        ));
+        w.write_event(3_000_000, EventCode::Marker, r#"{"k":"error"}"#).unwrap();
+        w.flush().unwrap();
+        let out = &w.get_ref().get_ref().out;
+        assert_eq!(w.bytes_written(), out.len() as u64 - 7);
+
+        let mut r = crate::Reader::new(out.as_slice()).unwrap();
+        let evs: Vec<_> = std::iter::from_fn(|| crate::CastReader::next_event(&mut r))
+            .map(|e| e.unwrap())
+            .map(|e| (e.t_us, e.code, e.data))
+            .collect();
+        assert_eq!(
+            evs,
+            [
+                (1_000_000, EventCode::Output, "a".to_owned()),
+                (3_000_000, EventCode::Marker, r#"{"k":"error"}"#.to_owned()),
+            ]
+        );
+        assert_eq!(crate::CastReader::stats(&r).bad_lines, 1);
     }
 
     /// Any `Write` sink is a `CastWriter` (contract): a sink that is not a file, and a

@@ -36,3 +36,22 @@ expect valid pts=13 => false
 expect check tty=pts:14 start=731 euid=1000 => start personal unknown
 expect holder pts=14 start=731 => pid=730 class=other
 expect check tty=pts:15 start=741 euid=1000 => start personal unknown
+
+# Same uid, exe must equal ours (regression: any readable `cinelog*` or an unreadable exe
+# used to pass): another install of cinelog with a valid registry entry ...
+proc pid=750 ppid=100 comm=cinelog exe=/home/alice/.zim/modules/cinelog/bin/cinelog tty=pts/1 ptmx=5:16 start=7500
+proc pid=751 ppid=750 comm=zsh tty=pts/16
+registry pts=16 pid=750 uuid=01930a3e-0000-7000-8000-000000000016
+expect check tty=pts:16 start=751 euid=1000 => start personal unknown
+expect holder pts=16 start=751 => pid=750 class=other
+# ... a lookalike name ...
+proc pid=760 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog-old tty=pts/1 ptmx=5:17 start=7600
+proc pid=761 ppid=760 comm=zsh tty=pts/17
+registry pts=17 pid=760 uuid=01930a3e-0000-7000-8000-000000000017
+expect check tty=pts:17 start=761 euid=1000 => start personal unknown
+# ... and an exe we may not read although the uid is ours
+proc pid=770 ppid=100 comm=cinelog exe=/usr/local/bin/cinelog tty=pts/1 ptmx=5:18 start=7700 deny=exe
+proc pid=771 ppid=770 comm=zsh tty=pts/18
+registry pts=18 pid=770 uuid=01930a3e-0000-7000-8000-000000000018
+expect check tty=pts:18 start=771 euid=1000 => start personal unknown
+expect holder pts=18 start=771 => pid=770 class=other

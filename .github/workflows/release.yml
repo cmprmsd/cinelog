@@ -162,11 +162,27 @@ jobs:
         run: |
           read -ra targets <<< "$TARGETS"
           assets=("${targets[@]/#/cinelog-}" SHA256SUMS)
+          # Once shell/checksums/v<VER>.sha256 is on main, every fetch.zsh verifies against it.
+          # Builds are not reproducible, so from then on the assets of this version are final.
+          file="shell/checksums/v$VERSION.sha256"
+          committed=false
+          if gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GH_REPO/contents/$file?ref=main" \
+              > committed.sums 2> api.err; then
+            committed=true
+          elif ! grep -q 'HTTP 404' api.err; then
+            cat api.err >&2; echo "::error::could not check $file on main"; exit 1
+          fi
+          final="v$VERSION is final: re-run only the failed jobs, or bump VERSION and tag a new release; do not delete or replace its assets"
+          if $committed && ! cmp -s committed.sums SHA256SUMS; then
+            echo "::error::$file is already committed to main and differs from this build. $final"; exit 1
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx SHA256SUMS; then
               gh release download "$TAG" -p SHA256SUMS -O published.sums
               if cmp -s published.sums SHA256SUMS; then echo "already published"; exit 0; fi
-              echo "::error::release $TAG already has different assets; delete the release to rebuild"; exit 1
+              if $committed; then echo "::error::release $TAG has assets that differ from $file on main. $final"; exit 1; fi
+              echo "::error::release $TAG already has different assets. No checksum is committed to main yet, so it is still safe to delete the release and re-run this workflow to rebuild, or re-run only the failed jobs"
+              exit 1
             fi
             gh release upload "$TAG" "${assets[@]}"
           else

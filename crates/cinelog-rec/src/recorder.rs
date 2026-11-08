@@ -25,7 +25,7 @@ use crate::control::{Control, ControlConfig, FastPoll, Probe};
 use crate::events::{self, QUEUE_BUDGET};
 use crate::input::InputRules;
 use crate::mirror::{self, ArgvArea};
-use crate::pty::{self, ChildSpec, RawGuard, Winsize};
+use crate::pty::{self, ChildSpec, HostOut, RawGuard, Winsize};
 use crate::reg::RegistryHandle;
 use crate::tmux::TmuxClient;
 use crate::writer::{CastFactory, HeaderInfo, Writer, WriterConfig, WriterShared};
@@ -269,19 +269,20 @@ pub(crate) fn record(mut l: Launch) -> Result<i32, SpawnError> {
         stop: AtomicBool::new(false),
         host_dead: AtomicBool::new(false),
     });
+    let host_out = Arc::new(HostOut::open(l.host.output));
     let announce = l.host.announce.then(|| nested_info(&l.session));
     if let Some(info) = &announce {
         let msg = cinelog_proto::encode_marker(NonceField::Recorder, &WireMessage::NestedStart(info.clone()));
-        let _ = pty::write_all(l.host.output, &msg, &flags.stop);
+        let _ = host_out.write_all(&msg, &flags.stop);
     }
 
     let output = {
         let scanner = Scanner::new(Some(l.nonce), l.record.strip_markers);
-        let (control, flags) = (Arc::clone(&control), Arc::clone(&flags));
-        let (master, host_out) = (l.master.as_raw_fd(), l.host.output);
+        let (control, flags, host_out) = (Arc::clone(&control), Arc::clone(&flags), Arc::clone(&host_out));
+        let master = l.master.as_raw_fd();
         std::thread::Builder::new()
             .name("cinelog-output".into())
-            .spawn(move || output_loop(master, host_out, scanner, &control, &flags, done_w))
+            .spawn(move || output_loop(master, &host_out, scanner, &control, &flags, done_w))
             .expect("spawn output thread")
     };
     let ctx = l.tmux.take().map(|client| spawn_ctx(client, Arc::clone(&control)));
@@ -311,8 +312,9 @@ pub(crate) fn record(mut l: Launch) -> Result<i32, SpawnError> {
     let hangup = main.run(&signals, wake_r.as_fd(), &done_r);
     let reaped = main.status;
 
-    // Shutdown: stop the output thread, close the master (hangs up any remaining slave
-    // holder), then reap the shell with a deadline.
+    // Shutdown: stop the output thread (its host writes give up once `stop` is set, even
+    // if the host stopped reading), close the master (hangs up any remaining slave holder),
+    // then reap the shell with a deadline.
     if hangup {
         if reaped.is_none() {
             let pid = nix::unistd::Pid::from_raw(child as i32);
@@ -341,7 +343,7 @@ pub(crate) fn record(mut l: Launch) -> Result<i32, SpawnError> {
             ..info
         };
         let msg = cinelog_proto::encode_marker(NonceField::Recorder, &WireMessage::NestedEnd(end));
-        let _ = pty::write_all(l.host.output, &msg, &AtomicBool::new(true));
+        let _ = host_out.write_all(&msg, &AtomicBool::new(true));
     }
     if let Some(reg) = &registry {
         reg.remove();
@@ -405,7 +407,7 @@ fn reap(child: u32) -> i32 {
 /// Output thread: master → scanner → host tty → control (events).
 fn output_loop(
     master: RawFd,
-    host_out: RawFd,
+    host_out: &HostOut,
     mut scanner: Scanner,
     control: &Mutex<Control>,
     flags: &Flags,
@@ -460,7 +462,7 @@ fn output_loop(
 }
 
 fn emit_output(
-    host_out: RawFd,
+    host_out: &HostOut,
     out: &[u8],
     markers: &[cinelog_proto::ScannedMarker],
     control: &Mutex<Control>,
@@ -469,10 +471,7 @@ fn emit_output(
     if out.is_empty() && markers.is_empty() {
         return;
     }
-    if !out.is_empty()
-        && !flags.host_dead.load(Ordering::Relaxed)
-        && pty::write_all(host_out, out, &flags.stop).is_err()
-    {
+    if !out.is_empty() && !flags.host_dead.load(Ordering::Relaxed) && host_out.write_all(out, &flags.stop).is_err() {
         flags.host_dead.store(true, Ordering::SeqCst);
     }
     lock(control).on_output(out, markers);
@@ -645,15 +644,19 @@ impl MainLoop<'_> {
             // The shell's own pgrp is cheap (leader comm only, catches `exec tmux`); other
             // jobs are rescanned every second (`sh -c '…; tmux a'` changes comm later).
             if changed || pg == self.shell_pgrp || now.saturating_sub(self.fg.last_scan) >= FG_RESCAN_US {
+                // The scan runs without the lock (it can take a while); a marker handled
+                // meanwhile makes the reading stale and it is dropped.
+                let generation = lock(self.control).fg_generation();
                 let fg = self
                     .detector
                     .foreground(pg, self.shell_pgrp, &self.record.pause_on_multiplexer);
                 self.fg.relay = self.rules.relay
                     && pg != self.shell_pgrp
                     && self.detector.relay_in_foreground(pg, &self.record.relays);
-                self.fg.pgrp = Some(pg);
+                let applied = lock(self.control).on_foreground(&fg, generation);
+                // A dropped reading is retaken on the next tick.
+                self.fg.pgrp = applied.then_some(pg);
                 self.fg.last_scan = now;
-                lock(self.control).on_foreground(&fg);
             }
             if let Some(argv) = &mut self.argv
                 && (self.fg.mirror_pgrp != Some(pg) || now.saturating_sub(self.fg.last_mirror) >= MIRROR_RECHECK_US)

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::line::MAX_TIME_US;
 use crate::reader::{ResumePoint, open, open_at};
 use crate::{CastError, CastReader, Event, EventCode, Format, Header, ReadStats, format_resize, parse_resize};
 
@@ -279,7 +280,11 @@ impl PartsReader {
                 self.base = clock;
                 0
             }
-            Some(end) => clock.offset_from(&self.base).unwrap_or(end).max(end),
+            Some(end) => clock
+                .offset_from(&self.base)
+                .filter(|&o| o <= MAX_TIME_US)
+                .unwrap_or(end)
+                .max(end),
         };
         if let Some(last) = self.offsets.last_mut() {
             *last = Some(offset);
@@ -296,7 +301,7 @@ impl PartsReader {
             }
         }
         if let Some(mut ev) = first {
-            ev.t_us += offset;
+            ev.t_us = ev.t_us.saturating_add(offset);
             self.pending.push_back(ev);
         }
         self.pending_pos = (!self.pending.is_empty()).then_some(pos);
@@ -412,7 +417,7 @@ impl CastReader for PartsReader {
             }
             match self.cur.next_event() {
                 Some(Ok(mut ev)) => {
-                    ev.t_us += self.part_offset();
+                    ev.t_us = ev.t_us.saturating_add(self.part_offset());
                     return Some(Ok(self.emit(ev)));
                 }
                 Some(Err(e)) => return Some(Err(e)),
@@ -599,6 +604,38 @@ mod tests {
         let mut resumed = PartsReader::resume(find_parts(&p1), 1, 2_000_000, at).unwrap();
         assert_eq!(resumed.part_offsets(), [None, Some(2_000_000)]);
         assert_eq!(collect(&mut resumed), [(5_000_000, 'o', "c".into())]);
+    }
+
+    #[test]
+    fn huge_corrupt_times_do_not_overflow_stitching() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("z.cast");
+        let p2 = dir.path().join("z_part2.cast");
+        let p3 = dir.path().join("z_part3.cast");
+        std::fs::write(
+            &p1,
+            format!(
+                "{}\n[1.0, \"m\", {}]\n[18446744073709, \"o\", \"\"]\n[0.5, \"o\", \"a\"]\n",
+                r#"{"version":3,"term":{"cols":80,"rows":24}}"#,
+                serde_json::to_string(&session(1, 0, 0)).unwrap()
+            ),
+        )
+        .unwrap();
+        // A session marker claiming an absurd boot time distance falls back to concatenation.
+        write_part(&p2, (80, 24), &[(0, EventCode::Marker, session(2, u64::MAX, 0))]);
+        write_part(&p3, (80, 24), &[(1_000_000, EventCode::Output, "b".into())]);
+
+        let mut r = PartsReader::open(&p1).unwrap();
+        let times: Vec<u64> = collect(&mut r).iter().map(|e| e.0).collect();
+        assert_eq!(times, [1_000_000, 1_500_000, 1_500_000, 2_500_000]);
+        assert_eq!(r.stats().bad_lines, 1);
+
+        let at = ResumePoint {
+            offset: 0,
+            t_us: u64::MAX,
+        };
+        let mut resumed = PartsReader::resume(find_parts(&p1), 2, u64::MAX - 10, at).unwrap();
+        assert_eq!(collect(&mut resumed)[0].0, u64::MAX);
     }
 
     #[test]

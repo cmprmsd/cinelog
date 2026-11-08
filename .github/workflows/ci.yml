@@ -96,7 +96,11 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends zsh jq
       - name: zsh -n
         run: for f in cinelog.plugin.zsh shell/*.zsh shell/tests/*.zsh; do echo "$f"; zsh -n "$f"; done
-      - run: zsh -f shell/fetch.test.zsh -v
+      - name: fetch.zsh tests (root mode runs in a user namespace)
+        run: |
+          # Ubuntu 24.04's AppArmor blocks unprivileged user namespaces by default.
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          CINELOG_FETCH_TEST_ROOT=1 zsh -f shell/fetch.test.zsh -v
       - name: Plugin tests (unit + interactive zsh on zpty)
         run: zsh shell/tests/plugin_test.zsh -v
 
@@ -176,6 +180,9 @@ jobs:
         env:
           CINELOG_IT_ROOT: "1"
           CINELOG_IT_REQUIRE: "1"
+          # Sandboxes below the runner temp dir; sockets in short /tmp/clit-<id> dirs (sun_path).
+          CINELOG_IT_TMPDIR: ${{ runner.temp }}
+          CINELOG_IT_SOCKDIR: /tmp
           CINELOG_IT_BIN: ${{ github.workspace }}/target/debug/cinelog
           CINELOG_IT_BIN_TESTHOOKS: ${{ github.workspace }}/target/testhooks/debug/cinelog
 

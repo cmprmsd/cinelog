@@ -89,6 +89,9 @@ pub(crate) struct Control {
     gate: PromptGate,
     last_cwd: Option<String>,
     last_ctx: Option<TmuxContext>,
+    /// Bumped whenever a marker changes the pause state or re-reads the foreground; the
+    /// main thread's readings taken before that are stale and dropped.
+    fg_gen: u64,
     bad_markers: u64,
     scanner_bad: u64,
 }
@@ -120,6 +123,7 @@ impl Control {
             gate: PromptGate::default(),
             last_cwd: None,
             last_ctx: None,
+            fg_gen: 0,
             bad_markers: 0,
             scanner_bad: 0,
         }
@@ -179,10 +183,9 @@ impl Control {
         }
     }
 
+    /// Writes the markers of a pause transition and mirrors the state into the registry
+    /// (also without markers: the remaining cause may have changed).
     fn emit(&mut self, t: u64, markers: Vec<CastMarker>) {
-        if markers.is_empty() {
-            return;
-        }
         for m in markers {
             let fixup = matches!(&m, CastMarker::Resume(r) if r.alt_fixup);
             self.tx.marker(t, m);
@@ -202,6 +205,7 @@ impl Control {
         if self.pause.is_paused()
             && let Some(fg) = self.probe.foreground()
         {
+            self.fg_gen += 1;
             let alt = self.alt_open();
             let ms = self.pause.on_foreground(&fg, alt);
             self.emit(t, ms);
@@ -223,6 +227,15 @@ impl Control {
             self.bad_markers += 1;
             return;
         };
+        if matches!(
+            msg,
+            WireMessage::NestedStart(_)
+                | WireMessage::NestedEnd(_)
+                | WireMessage::UserPause(_)
+                | WireMessage::UserResume(_)
+        ) {
+            self.fg_gen += 1;
+        }
         match msg {
             WireMessage::NestedStart(info) => {
                 let claim = NestedClaim {
@@ -297,11 +310,24 @@ impl Control {
         }
     }
 
-    pub(crate) fn on_foreground(&mut self, fg: &Foreground) {
+    /// Generation to pass to [`Self::on_foreground`] with a reading taken after this call.
+    pub(crate) fn fg_generation(&self) -> u64 {
+        self.fg_gen
+    }
+
+    /// A foreground reading of the main thread, taken without the lock. It is dropped
+    /// (returns `false`) if a marker changed the pause state or re-read the foreground
+    /// since `generation`: applying it would undo a newer decision (a stale tmux reading
+    /// right after the resume before `done`).
+    pub(crate) fn on_foreground(&mut self, fg: &Foreground, generation: u64) -> bool {
+        if generation != self.fg_gen {
+            return false;
+        }
         let t = self.now();
         let alt = self.alt_open();
         let ms = self.pause.on_foreground(fg, alt);
         self.emit(t, ms);
+        true
     }
 
     /// Resizes are recorded even while paused.
@@ -577,11 +603,8 @@ pub(crate) mod tests {
         let (mut c, rx, _) = control(Arc::clone(&probe), NestedMode::Pause);
         // tmux's first frame leaks during the detection lag ...
         c.on_output(b"\x1b[?1049hTMUX", &[]);
-        c.on_foreground(&Foreground::Multiplexer {
-            pid: 9,
-            comm: "tmux: client".into(),
-            pgrp: 9,
-        });
+        let g = c.fg_generation();
+        assert!(c.on_foreground(&tmux_client(), g));
         // ... and leaves the alternate screen while paused.
         c.on_output(b"pane content\x1b[?1049l", &[]);
         // The shell's `done` arrives before the next poll: the probe sees the shell again.
@@ -599,6 +622,121 @@ pub(crate) mod tests {
                 "o:$ "
             ]
         );
+    }
+
+    fn tmux_client() -> Foreground {
+        Foreground::Multiplexer {
+            pid: 9,
+            comm: "tmux: client".into(),
+            pgrp: 9,
+        }
+    }
+
+    /// Regression: the main thread read "tmux in front" without the lock, the output
+    /// thread then resumed on `done` (tmux detached), and the stale reading re-paused.
+    #[test]
+    fn stale_foreground_reading_after_a_marker_driven_resume_is_dropped() {
+        let probe = Arc::new(FakeProbe::default());
+        let (mut c, rx, _) = control(Arc::clone(&probe), NestedMode::Pause);
+        assert!(c.on_foreground(&tmux_client(), c.fg_generation()));
+        assert!(c.is_paused());
+        // Main thread: generation taken, /proc scan in progress (tmux still attached) ...
+        let g = c.fg_generation();
+        // ... output thread: tmux detached, `done` arrives, the probe sees the shell.
+        *probe.fg.lock().unwrap() = Some(Foreground::Shell);
+        c.on_output(b"", &[marker(S, &done(1, 1), 0)]);
+        assert!(!c.is_paused());
+        // ... main thread applies its reading.
+        assert!(!c.on_foreground(&tmux_client(), g), "stale reading dropped");
+        assert!(!c.is_paused());
+        c.on_output(b"$ ", &[]);
+        assert_eq!(
+            drain(&rx),
+            ["m:multiplexer", "m:pause", "m:resume", "done#None", "o:$ "]
+        );
+        // A fresh reading still applies.
+        assert!(c.on_foreground(&Foreground::Shell, c.fg_generation()));
+    }
+
+    /// The same race the other way round: a "shell in front" reading taken before a
+    /// corroborated `nested-start` must not end the nested pause.
+    #[test]
+    fn stale_shell_reading_does_not_end_a_nested_pause() {
+        let probe = Arc::new(FakeProbe::default());
+        probe.nested_ok.store(true, Ordering::SeqCst);
+        let (mut c, rx, _) = control(Arc::clone(&probe), NestedMode::Pause);
+        let g = c.fg_generation();
+        c.on_output(b"", &[marker(NonceField::Recorder, &nested_info(false), 0)]);
+        assert!(!c.on_foreground(&Foreground::Shell, g));
+        assert!(c.is_paused());
+        assert_eq!(drain(&rx), ["m:nested", "m:pause"]);
+    }
+
+    #[test]
+    fn registry_reason_tracks_the_remaining_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = cinelog_core::registry::Registry::new(dir.path());
+        let key = cinelog_core::registry::TtyKey::Pts(3);
+        let entry = cinelog_core::registry::RegistryEntry {
+            format: cinelog_core::registry::REGISTRY_FORMAT,
+            pid: std::process::id(),
+            starttime: 1,
+            boot_id: "b".into(),
+            uuid: "u".into(),
+            nonce: NONCE,
+            scope: Scope::Personal,
+            cast: "/a.cast".into(),
+            pts: "/dev/pts/3".into(),
+            host_tty: String::new(),
+            shell_pid: 2,
+            parent_uuid: None,
+            state: cinelog_core::registry::RecState::Live,
+            state_reason: None,
+            part: 1,
+            version: String::new(),
+            opts: String::new(),
+        };
+        let handle = Arc::new(RegistryHandle::new(reg.clone(), key.clone(), entry, None));
+        handle.publish();
+        let (tx, _rx) = channel(crate::events::QUEUE_BUDGET);
+        let mut c = Control::new(
+            tx,
+            Arc::new(FakeClock::default()),
+            ControlConfig {
+                nested: NestedMode::Pause,
+                input: RULES,
+                mirror_cwd: false,
+            },
+            Arc::new(FakeProbe::default()),
+            Arc::new(WriterShared::default()),
+            Some(handle),
+            Arc::new(FastPoll::new(None)),
+        );
+        let state = || {
+            let e = reg.read(&key).unwrap().unwrap();
+            (e.state, e.state_reason)
+        };
+        let pause = WireMessage::UserPause(PauseRequest {
+            reason: Some("lunch".into()),
+            ..PauseRequest::default()
+        });
+        c.on_output(b"", &[marker(S, &pause, 0)]);
+        assert!(c.on_foreground(&tmux_client(), c.fg_generation()));
+        assert_eq!(
+            state(),
+            (cinelog_core::registry::RecState::Paused, Some("user: lunch".into()))
+        );
+        c.on_output(b"", &[marker(S, &WireMessage::UserResume(PauseRequest::default()), 0)]);
+        assert_eq!(
+            state(),
+            (
+                cinelog_core::registry::RecState::Paused,
+                Some("multiplexer: tmux: client".into())
+            ),
+            "`cinelog resume` sees why it is still paused"
+        );
+        assert!(c.on_foreground(&Foreground::Shell, c.fg_generation()));
+        assert_eq!(state(), (cinelog_core::registry::RecState::Live, None));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 # master of pts/6, root's zsh execs into the nested TEAM recorder 420, whose shell runs on
 # pts/8. The outer recorder must see the nested recorder in its foreground job.
 self 430
+selfexe /usr/local/bin/cinelog
 user 0 root
 user 1000 alice
 

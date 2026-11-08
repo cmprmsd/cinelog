@@ -249,8 +249,9 @@ impl TeamInstall {
         }
 
         let hooked = with_wrapper(&String::from_utf8_lossy(&team.rc_original), &prefix, &block);
+        write_as_root(&backup_path(&team.rc), &team.rc_original, &team.rc)?;
         team.rc_modified = true;
-        write_as_root(&team.rc, hooked.as_bytes())?;
+        write_as_root(&team.rc, hooked.as_bytes(), &team.rc)?;
         Ok(team)
     }
 
@@ -320,23 +321,68 @@ fn clear_stale_wrappers(rc: &Path, raw: Vec<u8>) -> Result<Vec<u8>> {
     if let Some(live) = prefixes.iter().find(|p| Path::new(p).exists()) {
         bail!("{} is hooked by another cinelog-it run (prefix {live})", rc.display());
     }
-    write_as_root(rc, clean.as_bytes())?;
+    write_as_root(rc, clean.as_bytes(), rc)?;
     Ok(clean.into_bytes())
 }
 
-/// Rewrites `path` in place as root (owner and mode stay).
-fn write_as_root(path: &Path, data: &[u8]) -> Result<()> {
-    let p = path.to_string_lossy();
-    sudo_input(&["sh", "-c", r#"cat > "$1""#, "sh", &p], Some(data)).map(|_| ())
+/// `sh -c REPLACE_SCRIPT sh <path> <like>` replaces `path` atomically with stdin: it writes
+/// a temp file in the same directory, gives it the owner and mode of `like`, and renames it
+/// over `path`. An interrupted run leaves either the old or the new file, never a truncated
+/// one (and at worst a `<path>.cinelog-it.*` temp file).
+const REPLACE_SCRIPT: &str = r#"set -eu
+tmp=$(mktemp "$1.cinelog-it.XXXXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+cat > "$tmp"
+chown --reference="$2" -- "$tmp"
+chmod --reference="$2" -- "$tmp"
+mv -f -- "$tmp" "$1"
+trap - EXIT
+"#;
+
+/// Where the byte-exact original of the system zshrc is kept while the harness has it
+/// hooked, for manual recovery after a run that was killed before it could restore it.
+pub fn backup_path(rc: &Path) -> PathBuf {
+    let mut p = rc.as_os_str().to_owned();
+    p.push(".cinelog-it.orig");
+    PathBuf::from(p)
+}
+
+/// The `sh` argv of [`REPLACE_SCRIPT`].
+fn replace_args(path: &Path, like: &Path) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        REPLACE_SCRIPT.into(),
+        "sh".into(),
+        path.to_string_lossy().into_owned(),
+        like.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Atomically replaces `path` with `data` as root; owner and mode are copied from `like`.
+fn write_as_root(path: &Path, data: &[u8], like: &Path) -> Result<()> {
+    let args = replace_args(path, like);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    sudo_input(&args, Some(data)).map(|_| ())
 }
 
 impl Drop for TeamInstall {
     fn drop(&mut self) {
         self.kill_prefix_processes();
-        if self.rc_modified
-            && let Err(e) = write_as_root(&self.rc, &self.rc_original)
-        {
-            eprintln!("cinelog-it: restoring {} failed: {e:#}", self.rc.display());
+        if self.rc_modified {
+            let backup = backup_path(&self.rc);
+            match write_as_root(&self.rc, &self.rc_original, &self.rc) {
+                Ok(()) => {
+                    if let Err(e) = sudo(&["rm", "-f", "--", &backup.to_string_lossy()]) {
+                        eprintln!("cinelog-it: removing {} failed: {e:#}", backup.display());
+                    }
+                }
+                Err(e) => eprintln!(
+                    "cinelog-it: restoring {} failed ({e:#}); the original is in {}",
+                    self.rc.display(),
+                    backup.display()
+                ),
+            }
         }
         match snapshot(&RECORDER_DIRS) {
             Ok(after) => {
@@ -413,6 +459,63 @@ mod tests {
 
     fn block(prefix: &str) -> String {
         format!("{BLOCK_BEGIN}\nif (( EUID == 0 )); then source '{prefix}/x.zsh'; fi\n{BLOCK_END}\n")
+    }
+
+    /// The replace script runs unprivileged here: on a file we own it behaves as as root.
+    fn run_replace(path: &Path, like: &Path, data: &[u8]) -> Output {
+        let args = replace_args(path, like);
+        let mut child = Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn replace_is_a_rename_that_keeps_the_mode_and_leaves_no_temp_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = crate::util::scratch_dir().unwrap();
+        let rc = d.path().join("zshrc");
+        std::fs::write(&rc, b"old\n").unwrap();
+        std::fs::set_permissions(&rc, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let ino = std::fs::metadata(&rc).unwrap().ino();
+
+        let out = run_replace(&rc, &rc, b"new\nbytes\n");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let meta = std::fs::metadata(&rc).unwrap();
+        assert_eq!(std::fs::read(&rc).unwrap(), b"new\nbytes\n");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+        assert_ne!(meta.ino(), ino, "replaced by rename, not rewritten in place");
+        assert_eq!(dir_entries(d.path()), ["zshrc"]);
+
+        let backup = backup_path(&rc);
+        assert!(run_replace(&backup, &rc, b"orig").status.success());
+        assert_eq!(std::fs::metadata(&backup).unwrap().permissions().mode() & 0o7777, 0o640);
+        assert_eq!(backup.file_name().unwrap(), "zshrc.cinelog-it.orig");
+    }
+
+    #[test]
+    fn a_failed_replace_leaves_the_original_untouched() {
+        let d = crate::util::scratch_dir().unwrap();
+        let rc = d.path().join("zshrc");
+        std::fs::write(&rc, b"keep me\n").unwrap();
+        let out = run_replace(&rc, &d.path().join("missing-reference"), b"clobber");
+        assert!(!out.status.success());
+        assert_eq!(std::fs::read(&rc).unwrap(), b"keep me\n");
+        assert_eq!(dir_entries(d.path()), ["zshrc"], "the temp file is removed");
     }
 
     #[test]

@@ -38,18 +38,28 @@ impl PauseMachine {
         self.interval.is_some()
     }
 
-    /// `(reason, detail)` of the open paused interval, for the registry.
+    /// Registry `state_reason` while paused: the strongest cause still active (user >
+    /// nested > multiplexer), which may differ from the one that opened the interval
+    /// (`cinelog pause`, then `tmux a`, then `cinelog resume` stays paused for tmux).
     pub(crate) fn pause_reason(&self) -> Option<String> {
-        self.interval.as_ref().map(|(r, d)| {
-            let r = match r {
+        let (reason, detail) = self.interval.as_ref()?;
+        let (r, d) = if let Some(user) = &self.user {
+            ("user", user.as_deref())
+        } else if let Some(n) = &self.nested {
+            ("nested", Some(n.uuid.as_str()))
+        } else if let Some(m) = &self.mux {
+            ("multiplexer", Some(m.comm.as_str()))
+        } else {
+            let r = match reason {
                 PauseReason::Multiplexer => "multiplexer",
                 PauseReason::Nested => "nested",
                 PauseReason::User => "user",
             };
-            match d {
-                Some(d) => format!("{r}: {d}"),
-                None => r.to_owned(),
-            }
+            (r, detail.as_deref())
+        };
+        Some(match d {
+            Some(d) => format!("{r}: {d}"),
+            None => r.to_owned(),
         })
     }
 
@@ -340,6 +350,29 @@ mod tests {
             (Ev::Fg(Foreground::Shell), &[]),
             (Ev::UserResume, &["resume:user"]),
         ]);
+    }
+
+    #[test]
+    fn pause_reason_follows_the_causes_still_active() {
+        let mut m = PauseMachine::default();
+        m.on_user_pause(Some("lunch".into()));
+        assert_eq!(m.pause_reason().as_deref(), Some("user: lunch"));
+        // tmux attached during the user pause: no marker (§4.3), but the cause is tracked.
+        assert!(m.on_foreground(&mux(80), false).is_empty());
+        assert_eq!(m.pause_reason().as_deref(), Some("user: lunch"), "user wins");
+        assert!(m.on_user_resume(false).is_empty(), "still paused for tmux");
+        assert_eq!(m.pause_reason().as_deref(), Some("multiplexer: tmux: client"));
+        m.on_nested_start(&nested("u-9", 81), NestedMode::Pause);
+        assert_eq!(m.pause_reason().as_deref(), Some("nested: u-9"));
+        m.on_nested_end(&nested("u-9", 81), false);
+        assert_eq!(m.pause_reason().as_deref(), Some("multiplexer: tmux: client"));
+        assert_eq!(
+            kinds(&m.on_foreground(&Foreground::Shell, false)),
+            ["resume:foreground"]
+        );
+        assert_eq!(m.pause_reason(), None);
+        m.on_user_pause(None);
+        assert_eq!(m.pause_reason().as_deref(), Some("user"));
     }
 
     #[test]

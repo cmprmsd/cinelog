@@ -59,6 +59,51 @@ proc pid=700 ppid=1 uid=0 comm="tmux: server"
 proc pid=710 ppid=700 uid=0 comm=cinelog
 expect principal euid=0 start=710 => user=root attribution=none login_via=unknown
 
+# root screen from `sudo -i`: the screen server stays a child of its first client, so the
+# walk goes on past it to sudo (regression: it used to stop at the server)
+proc pid=900 ppid=1 comm=zsh uid=1000
+proc pid=910 ppid=900 ruid=1000 euid=0 comm=sudo args=sudo|-i
+proc pid=920 ppid=910 uid=0 comm=zsh
+proc pid=930 ppid=920 uid=0 comm=screen args=screen
+proc pid=940 ppid=930 uid=0 comm=screen args=SCREEN
+proc pid=950 ppid=940 uid=0 comm=zsh
+proc pid=960 ppid=950 uid=0 comm=cinelog
+expect principal euid=0 start=960 => user=alice sudo_user=alice attribution=ancestor login_via=-
+# the same with alice's loginuid: still the ancestor, not inherited
+proc pid=1000 ppid=1 comm=zsh uid=1000 loginuid=1000
+proc pid=1010 ppid=1000 ruid=1000 euid=0 comm=sudo args=sudo|-i loginuid=1000
+proc pid=1020 ppid=1010 uid=0 comm=zsh loginuid=1000
+proc pid=1030 ppid=1020 uid=0 comm=screen loginuid=1000
+proc pid=1040 ppid=1030 uid=0 comm=screen loginuid=1000
+proc pid=1050 ppid=1040 uid=0 comm=zsh loginuid=1000
+proc pid=1060 ppid=1050 uid=0 comm=cinelog loginuid=1000
+expect principal euid=0 start=1060 => user=alice attribution=ancestor
+# a pane recorder started by a screen client itself (the walk's start is never the server)
+proc pid=1070 ppid=1040 uid=0 comm=screen loginuid=1000
+proc pid=1080 ppid=1070 uid=0 comm=cinelog loginuid=1000
+expect principal euid=0 start=1080 => user=alice attribution=ancestor
+
+# `tmux -D` in the foreground from `sudo -i` by alice: the server is not daemonized.
+# Without the creating client the starter above the server is the ancestor; with bob's
+# client the pane is bob's.
+proc pid=1100 ppid=1 comm=zsh uid=1000 loginuid=1000
+proc pid=1110 ppid=1100 ruid=1000 euid=0 comm=sudo loginuid=1000
+proc pid=1120 ppid=1110 uid=0 comm=zsh loginuid=1000
+proc pid=1130 ppid=1120 uid=0 comm="tmux: server" args=tmux|-D loginuid=1000
+proc pid=1140 ppid=1130 uid=0 comm=zsh loginuid=1000
+proc pid=1150 ppid=1140 uid=0 comm=cinelog loginuid=1000
+expect principal euid=0 start=1150 => user=alice attribution=ancestor login_via=-
+expect principal euid=0 start=1150 client=620 => user=bob attribution=ancestor
+# client given but unattributable: the starter above the server still wins over loginuid
+expect principal euid=0 start=1150 client=300 => user=alice attribution=ancestor
+
+# daemonized root zellij server (reparented to pid 1): nothing non-root above it, so the
+# loginuid it was started with, marked inherited
+proc pid=1200 ppid=1 uid=0 comm=zellij loginuid=1001
+proc pid=1210 ppid=1200 uid=0 comm=zsh loginuid=1001
+proc pid=1220 ppid=1210 uid=0 comm=cinelog loginuid=1001
+expect principal euid=0 start=1220 => user=bob attribution=inherited login_via=-
+
 # unknown uid: the number is the name
 proc pid=800 ppid=1 comm=zsh uid=1234
 proc pid=810 ppid=800 ruid=1234 euid=0 comm=sudo

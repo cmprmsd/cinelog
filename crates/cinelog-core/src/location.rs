@@ -23,10 +23,16 @@ pub fn existing_ancestor(path: &Path) -> Option<&Path> {
 }
 
 /// The first directory at or above `path` that contains a Syncthing `.stfolder` marker.
+///
+/// Both the literal path and the real path of its nearest existing ancestor are walked,
+/// so a symlinked state directory pointing into a synced tree is caught as well.
 pub fn synced_ancestor(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|dir| dir.join(".stfolder").exists())
-        .map(Path::to_path_buf)
+    let marked = |dir: &Path| dir.join(".stfolder").exists();
+    if let Some(dir) = path.ancestors().find(|d| marked(d)) {
+        return Some(dir.to_path_buf());
+    }
+    let real = std::fs::canonicalize(existing_ancestor(path)?).ok()?;
+    real.ancestors().find(|d| marked(d)).map(Path::to_path_buf)
 }
 
 /// Name of the network filesystem `path` (or its nearest existing ancestor) lives on.
@@ -110,6 +116,25 @@ mod tests {
         assert!(db_location_problem(&db).unwrap().contains("Syncthing"));
         assert_eq!(synced_ancestor(&dir.path().join("other/x")), None);
         assert_eq!(db_location_problem(&dir.path().join("other/x")), None);
+    }
+
+    #[test]
+    fn symlinks_into_syncthing_folders_are_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let synced = dir.path().join("Sync");
+        fs::create_dir_all(synced.join(".stfolder")).unwrap();
+        fs::create_dir_all(synced.join("state")).unwrap();
+        fs::create_dir_all(dir.path().join("home/.local")).unwrap();
+        let link = dir.path().join("home/.local/state");
+        std::os::unix::fs::symlink(synced.join("state"), &link).unwrap();
+        let real = fs::canonicalize(&synced).unwrap();
+
+        // The DB dir does not exist yet; its nearest existing ancestor is the link.
+        let db = link.join("cinelog/host");
+        assert_eq!(synced_ancestor(&db), Some(real.clone()));
+        assert!(db_location_problem(&db).unwrap().contains("Syncthing"));
+        fs::create_dir_all(&db).unwrap();
+        assert_eq!(synced_ancestor(&db), Some(real));
     }
 
     #[test]

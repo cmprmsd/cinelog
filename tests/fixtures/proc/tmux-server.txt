@@ -1,6 +1,7 @@
 # A recorded shell (pts/2, held by its cinelog recorder) runs a tmux client; the tmux
 # server holds the pane masters pts/5 and pts/6. Each pane gets its own cast.
 self 500
+selfexe /home/alice/.zim/modules/cinelog/bin/cinelog
 user 1000 alice
 boot 0f4b8c2e-1111-4222-8333-444455556666
 

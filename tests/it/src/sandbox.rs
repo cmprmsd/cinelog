@@ -15,7 +15,7 @@
 //!
 //! tmux and screen sockets live in a short directory (`$TMUX_TMPDIR`, `$SCREENDIR`) because
 //! of the 108-byte `sun_path` limit: `<root>/s` when that is short enough, otherwise a
-//! private `/tmp/clit-<id>` that is removed on drop.
+//! private `clit-<id>` below `$CINELOG_IT_SOCKDIR` (default `/tmp`) that is removed on drop.
 
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
@@ -156,17 +156,34 @@ fn shadow_dir(dir: &Path, shadow: &Path, exclude: &[&str]) -> Result<PathBuf> {
     Ok(shadow.to_path_buf())
 }
 
+/// The sandbox's socket directory and whether it lives outside the sandbox tree:
+/// `<root>/s` when socket paths below it fit into `sun_path`, else `clit-<id>` below
+/// `CINELOG_IT_SOCKDIR` (default `/tmp`).
+fn socket_dir(root: &Path, id: &str) -> Result<(PathBuf, bool)> {
+    let short = root.join("s");
+    if short.as_os_str().len() + SOCKET_SUFFIX_LEN < 100 {
+        return Ok((short, false));
+    }
+    let base = std::env::var_os("CINELOG_IT_SOCKDIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    let dir = base.join(format!("clit-{id}"));
+    if dir.as_os_str().len() + SOCKET_SUFFIX_LEN >= 100 {
+        bail!(
+            "socket dir {} is too long for sun_path; set CINELOG_IT_SOCKDIR to a shorter directory",
+            dir.display()
+        );
+    }
+    Ok((dir, true))
+}
+
 impl Sandbox {
     pub fn new() -> Result<Self> {
         Self::with(SandboxOptions::default())
     }
 
     pub fn with(opts: SandboxOptions) -> Result<Self> {
-        let base = std::env::var_os("CINELOG_IT_TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        fs::create_dir_all(&base)?;
-        let tempdir = tempfile::Builder::new().prefix("clit-").tempdir_in(&base)?;
+        let tempdir = crate::util::scratch_dir()?;
         let root = tempdir.path().to_path_buf();
         let id = unique_id();
         let home = root.join("home");
@@ -189,12 +206,7 @@ impl Sandbox {
         ] {
             mkdir(d, mode)?;
         }
-        let short = root.join("s");
-        let (sock_dir, own_sock_dir) = if short.as_os_str().len() + SOCKET_SUFFIX_LEN < 100 {
-            (short, false)
-        } else {
-            (PathBuf::from(format!("/tmp/clit-{id}")), true)
-        };
+        let (sock_dir, own_sock_dir) = socket_dir(&root, &id)?;
         mkdir(&sock_dir, 0o700)?;
         mkdir(&sock_dir.join("screen"), 0o700)?;
 
@@ -751,7 +763,7 @@ mod tests {
 
     #[test]
     fn a_path_dir_with_a_foreign_cinelog_is_shadowed() {
-        let d = tempfile::tempdir().unwrap();
+        let d = crate::util::scratch_dir().unwrap();
         let (sys, other) = (d.path().join("sys"), d.path().join("other"));
         for (dir, names) in [(&sys, &["cinelog", "zsh", "tmux"][..]), (&other, &["python3"][..])] {
             mkdir(dir, 0o755).unwrap();
@@ -818,5 +830,45 @@ mod tests {
         assert!(fs::read_to_string(sb.work.join("df")).unwrap().starts_with("tmpfs"));
         assert_eq!(fs::read_to_string(sb.work.join("ls")).unwrap().trim(), "filler");
         assert!(fs::read_dir(&mnt).unwrap().next().is_none(), "the mount is private");
+    }
+
+    /// Regression for I8: a cast on a namespace-private log tmpfs is invisible in the host
+    /// view of the tree, so "no cast" checks must go through the pane's view.
+    #[test]
+    fn casts_on_a_private_tmpfs_are_seen_only_through_the_view() {
+        if crate::gate::check(&[crate::Need::UserNs]).is_err() {
+            eprintln!("SKIP: user namespaces unavailable");
+            return;
+        }
+        let sb = Sandbox::with(SandboxOptions {
+            logs: Some("logs-tmpfs".into()),
+            ..quiet()
+        })
+        .unwrap();
+        let ready = sb.work.join("ready");
+        let inner = format!(
+            "echo '{{}}' > {logs}/hidden.cast && : > {ready} && exec sleep 30",
+            logs = sb.logs.display(),
+            ready = ready.display()
+        );
+        let argv = sb.tmpfs_argv(&sb.logs, "1m", 0, vec!["sh".into(), "-c".into(), inner]);
+        let mut child = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().unwrap();
+        let seen = crate::wait_until("the cast on the tmpfs", Duration::from_secs(10), || {
+            ready.exists().then_some(())
+        })
+        .map(|()| {
+            sb.view_through(child.id());
+            (find_casts(&sb.root), sb.cast_paths())
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        let (host, view) = seen.unwrap();
+        assert!(host.is_empty(), "host view: {host:?}");
+        assert_eq!(
+            view.iter()
+                .map(|p| p.file_name().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            ["hidden.cast"]
+        );
     }
 }

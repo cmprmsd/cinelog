@@ -125,7 +125,7 @@ pub fn probe() -> Result<(), String> {
     if sshd_path().is_none() || which("ssh").is_none() || which("ssh-keygen").is_none() {
         return Err("OpenSSH server/client not installed".into());
     }
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let dir = crate::util::scratch_dir().map_err(|e| format!("{e:#}"))?;
     let sshd = Sshd::start(dir.path(), &[("PATH".into(), "/usr/bin:/bin".into())]).map_err(|e| format!("{e:#}"))?;
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()

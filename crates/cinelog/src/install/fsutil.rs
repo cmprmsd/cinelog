@@ -80,6 +80,39 @@ pub fn ensure_dir_with(dir: &Path, mode: u32, symlinks: Symlinks) -> Result<Outc
     Ok(Outcome::Tightened(cur))
 }
 
+/// Removes the bits of the existing regular file `path` that `mode` does not grant. A
+/// symlink is followed only under [`Symlinks::FollowOwnedBy`] and only to a file of that
+/// uid.
+pub fn tighten_file(path: &Path, mode: u32, symlinks: Symlinks) -> Result<Outcome> {
+    let meta = fs::symlink_metadata(path).with_context(|| format!("inspecting {}", path.display()))?;
+    let meta = if meta.file_type().is_symlink() {
+        let Symlinks::FollowOwnedBy(uid) = symlinks else {
+            bail!("{} is a symlink; a regular file is required here", path.display());
+        };
+        let target = fs::metadata(path).with_context(|| format!("following the symlink {}", path.display()))?;
+        if target.uid() != uid {
+            bail!(
+                "{} links to a file owned by uid {}, not by you (uid {uid})",
+                path.display(),
+                target.uid()
+            );
+        }
+        target
+    } else {
+        meta
+    };
+    if !meta.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    let cur = meta.permissions().mode() & 0o7777;
+    if cur & !mode & 0o7777 == 0 {
+        return Ok(Outcome::Unchanged);
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(cur & mode))
+        .with_context(|| format!("chmod {:o} {}", cur & mode, path.display()))?;
+    Ok(Outcome::Tightened(cur))
+}
+
 /// Writes `bytes` to `path` through a temp file in the same directory and a rename, so a
 /// reader never sees a partial file. Unchanged content is left alone.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<Outcome> {

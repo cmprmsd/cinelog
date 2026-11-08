@@ -64,8 +64,12 @@ fn assert_comes_up_once(sb: &Sandbox, pane: &Pane, expect: &str) -> Outcome {
     outcome
 }
 
+/// No cast anywhere in the sandbox tree, nor in the log dir as the pane sees it (for the
+/// full-disk case that is a tmpfs mounted only in the pane's namespace, which the host view
+/// of the tree never shows).
 fn assert_no_cast(sb: &Sandbox) {
-    let casts = cinelog_it::cast::find_casts(&sb.root);
+    let mut casts = cinelog_it::cast::find_casts(&sb.root);
+    casts.extend(sb.cast_paths());
     assert!(casts.is_empty(), "nothing may be recorded: {casts:?}");
 }
 
@@ -138,6 +142,10 @@ fn i8_full_disk() {
     let sb = full_disk_sandbox();
     let (_t, pane) = full_disk_shell(&sb);
     assert_eq!(assert_comes_up_once(&sb, &pane, "not recording"), Outcome::Unrecorded);
+    assert!(
+        sb.visible(&sb.logs).join("filler").is_file(),
+        "the no-cast check must read the full tmpfs through the pane's namespace"
+    );
     assert_no_cast(&sb);
     let log = sb.rec_log().to_lowercase();
     assert!(

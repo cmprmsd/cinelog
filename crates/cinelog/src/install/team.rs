@@ -93,11 +93,20 @@ impl Trust {
     }
 }
 
+/// Where a team install or uninstall writes, and the ownership rules there.
 #[derive(Debug, Clone)]
-pub struct Options {
+pub struct System {
     pub root: SystemRoot,
     /// Ownership rules for existing paths (see [`Trust::for_root`]).
     pub trust: Option<Trust>,
+    /// Effective uid of the installer.
+    pub euid: u32,
+}
+
+/// What `install --team` installs, from where.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub sys: System,
     /// Module checkout to install the plugin from (and to verify the binary against).
     pub module: PathBuf,
     pub binary: SourceBinary,
@@ -105,8 +114,6 @@ pub struct Options {
     pub upgrade: bool,
     pub allow_unverified: bool,
     pub migrate: bool,
-    /// Effective uid of the installer.
-    pub euid: u32,
 }
 
 /// A real team install needs root; a `--prefix` one does not.
@@ -117,7 +124,15 @@ pub fn check_privileges(root: &SystemRoot, euid: u32) -> Result<()> {
     Ok(())
 }
 
-impl Options {
+impl System {
+    pub fn new(root: SystemRoot, euid: u32) -> Self {
+        Self {
+            trust: Trust::for_root(&root),
+            root,
+            euid,
+        }
+    }
+
     fn check_privileges(&self) -> Result<()> {
         check_privileges(&self.root, self.euid)
     }
@@ -235,8 +250,9 @@ pub fn verify(module: &Path, version: &str, bytes: &[u8]) -> Verification {
 }
 
 pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
-    opts.check_privileges()?;
-    let root = &opts.root;
+    let sys = &opts.sys;
+    sys.check_privileges()?;
+    let root = &sys.root;
     let home = no_home();
     let binary = check_binary(opts, steps)?;
 
@@ -249,7 +265,7 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
         (team::SHARE_DIR, 0o755, DirKind::Owned, "plugin copy"),
     ] {
         let path = root.join(dir);
-        let outcome = opts.prepare_dir(&path, mode, kind)?;
+        let outcome = sys.prepare_dir(&path, mode, kind)?;
         if !what.is_empty() {
             steps.dir(&outcome, &path, what, home);
         }
@@ -264,12 +280,19 @@ pub fn install(opts: &Options, steps: &mut Steps) -> Result<()> {
         fsutil::Symlinks::Refuse,
     )?;
     steps.notes(cfg.notes);
+    sys.require_secure(&config_file)?;
 
     let paths = team_paths(root);
     if let Some(problem) = location::db_location_problem(&paths.db_dir) {
         bail!("{problem}");
     }
-    let outcome = opts.prepare_dir(&paths.logs_root, 0o700, DirKind::Owned)?;
+    if let Some(port) = cfg.legacy_port {
+        let file = paths.migrated_port_file();
+        if fsutil::write_new(&file, format!("{port}\n").as_bytes(), 0o600)? == Outcome::Created {
+            steps.note(format!("kept root's old viewer port {port} for the future team server"));
+        }
+    }
+    let outcome = sys.prepare_dir(&paths.logs_root, 0o700, DirKind::Owned)?;
     steps.dir(&outcome, &paths.logs_root, "team casts", home);
 
     let tmpfiles = root.join(team::TMPFILES);
@@ -305,13 +328,13 @@ fn add_zshrc_block(opts: &Options, rc: &Path, steps: &mut Steps) -> Result<()> {
     let detail = "(root shells source the plugin copy first)";
     let Some(target) = fsutil::rewrite_target(rc)? else {
         if let Some(dir) = rc.parent() {
-            opts.prepare_dir(dir, 0o755, DirKind::System)?;
+            opts.sys.prepare_dir(dir, 0o755, DirKind::System)?;
         }
         let outcome = fsutil::write_atomic(rc, zshrc::upsert("", &block).as_bytes(), 0o644)?;
         steps.file(&outcome, rc, detail, no_home());
         return Ok(());
     };
-    opts.require_secure(&target)?;
+    opts.sys.require_secure(&target)?;
     let old = std::fs::read_to_string(&target).with_context(|| format!("reading {}", target.display()))?;
     let outcome = fsutil::rewrite_preserving(&target, zshrc::upsert(&old, &block).as_bytes())?;
     steps.file(&outcome, rc, detail, no_home());
@@ -327,7 +350,7 @@ fn add_zshrc_block(opts: &Options, rc: &Path, steps: &mut Steps) -> Result<()> {
 
 /// The plugin's own `shell/system-zshrc.zsh` block when it has one, else the built-in one.
 fn system_block(opts: &Options) -> String {
-    let plugin = opts.root.join(team::PLUGIN_COPY);
+    let plugin = opts.sys.root.join(team::PLUGIN_COPY);
     std::fs::read_to_string(opts.module.join("shell/system-zshrc.zsh"))
         .ok()
         .and_then(|s| zshrc::block_from_snippet(&s, &plugin))
@@ -337,7 +360,7 @@ fn system_block(opts: &Options) -> String {
 /// Reads and verifies the binary to install, before anything is written.
 fn check_binary(opts: &Options, steps: &mut Steps) -> Result<Vec<u8>> {
     let src = &opts.binary;
-    let target = opts.root.join(team::BINARY);
+    let target = opts.sys.root.join(team::BINARY);
     if opts.upgrade && same_file(&src.path, &target) {
         bail!(
             "{} is the installed team binary itself, so --upgrade would not change it; run the \
@@ -383,9 +406,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 fn write_binary(opts: &Options, bytes: &[u8], steps: &mut Steps) -> Result<()> {
-    let target = opts.root.join(team::BINARY);
+    let target = opts.sys.root.join(team::BINARY);
     let outcome = fsutil::write_atomic(&target, bytes, 0o755)?;
-    opts.require_secure(&target)?;
+    opts.sys.require_secure(&target)?;
     steps.file(
         &outcome,
         &target,
@@ -430,19 +453,19 @@ pub fn plugin_files(module: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn install_plugin(opts: &Options, steps: &mut Steps) -> Result<()> {
-    let share = opts.root.join(team::SHARE_DIR);
+    let share = opts.sys.root.join(team::SHARE_DIR);
     let files = plugin_files(&opts.module)?;
     let mut changed = 0;
     for rel in &files {
         let bytes = std::fs::read(opts.module.join(rel))?;
         let dest = share.join(rel);
         if let Some(dir) = dest.parent() {
-            opts.prepare_dir(dir, 0o755, DirKind::Owned)?;
+            opts.sys.prepare_dir(dir, 0o755, DirKind::Owned)?;
         }
         if fsutil::write_atomic(&dest, &bytes, 0o644)? != Outcome::Unchanged {
             changed += 1;
         }
-        opts.require_secure(&dest)?;
+        opts.sys.require_secure(&dest)?;
     }
     let what = if changed == 0 {
         "up to date".to_owned()
@@ -453,15 +476,17 @@ fn install_plugin(opts: &Options, steps: &mut Steps) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall(opts: &Options, steps: &mut Steps) -> Result<()> {
-    opts.check_privileges()?;
-    let root = &opts.root;
+/// `install --team --uninstall`: needs neither a module checkout nor a binary, so it also
+/// works from the installed team binary and after rolling the module back.
+pub fn uninstall(sys: &System, steps: &mut Steps) -> Result<()> {
+    sys.check_privileges()?;
+    let root = &sys.root;
     let rc = zshrc::system_zshrc(root);
     if let Some(target) = fsutil::rewrite_target(&rc)?
         && let Ok(text) = std::fs::read_to_string(&target)
         && zshrc::has_block(&text)
     {
-        opts.require_secure(&target)?;
+        sys.require_secure(&target)?;
         fsutil::rewrite_preserving(&target, zshrc::remove(&text).as_bytes())?;
         steps.done(format!("removed the cinelog block from {}", rc.display()));
     }
@@ -517,8 +542,11 @@ mod tests {
         let exe = dir.path().join("cinelog-bin");
         std::fs::write(&exe, b"\x7fELF fake binary").unwrap();
         let opts = Options {
-            root: SystemRoot::prefixed(dir.path().join("sys")),
-            trust: None,
+            sys: System {
+                root: SystemRoot::prefixed(dir.path().join("sys")),
+                trust: None,
+                euid: nix::unistd::geteuid().as_raw(),
+            },
             module,
             binary: SourceBinary {
                 read: exe.clone(),
@@ -529,7 +557,6 @@ mod tests {
             upgrade: false,
             allow_unverified: false,
             migrate: true,
-            euid: nix::unistd::geteuid().as_raw(),
         };
         Fixture { _dir: dir, opts }
     }
@@ -576,7 +603,7 @@ mod tests {
         let mut f = fixture();
         let err = install(&f.opts, &mut Steps::default()).unwrap_err();
         assert!(err.to_string().contains("--allow-unverified"), "{err}");
-        assert!(!f.opts.root.join(team::BINARY).exists());
+        assert!(!f.opts.sys.root.join(team::BINARY).exists());
         f.opts.allow_unverified = true;
         let mut steps = Steps::default();
         install(&f.opts, &mut steps).unwrap();
@@ -588,12 +615,12 @@ mod tests {
         let mut f = fixture();
         let bytes = std::fs::read(&f.opts.binary.read).unwrap();
         sums(&f.opts, &bytes);
-        let old = f.opts.root.join("/root/.config/cinelog/cinelog-settings.conf");
+        let old = f.opts.sys.root.join("/root/.config/cinelog/cinelog-settings.conf");
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "SHOW_START_END_TIME=0\n").unwrap();
+        std::fs::write(&old, "SHOW_START_END_TIME=0\nexport CINELOG_VIEWER_PORT=10500\n").unwrap();
         let mut steps = Steps::default();
         install(&f.opts, &mut steps).unwrap();
-        let r = &f.opts.root;
+        let r = &f.opts.sys.root;
 
         assert_eq!(std::fs::read(r.join(team::BINARY)).unwrap(), bytes);
         assert_eq!(mode(&r.join(team::BINARY)), 0o755);
@@ -601,6 +628,10 @@ mod tests {
         assert_eq!(mode(&r.join(team::CONFIG_DIR)), 0o700);
         assert!(!Config::load(&r.join(team::CONFIG)).unwrap().shell.banners, "migrated");
         assert_eq!(mode(&r.join(team::STATE_DIR)), 0o700);
+        let port = team_paths(r).migrated_port_file();
+        assert_eq!(std::fs::read_to_string(&port).unwrap(), "10500\n");
+        assert_eq!(mode(&port), 0o600);
+        assert!(steps.to_string().contains("old viewer port 10500"), "{steps}");
         assert_eq!(mode(&r.join(team::RUNTIME_DIR)), 0o700);
         assert_eq!(mode(&r.join(team::LOGS)), 0o700);
         assert_eq!(std::fs::read_to_string(r.join(team::TMPFILES)).unwrap(), TMPFILES_LINE);
@@ -633,7 +664,7 @@ mod tests {
         assert_eq!(std::fs::read(r.join(team::BINARY)).unwrap(), newer);
 
         let mut un = Steps::default();
-        uninstall(&f.opts, &mut un).unwrap();
+        uninstall(&f.opts.sys, &mut un).unwrap();
         assert!(!share.exists());
         assert!(!r.join(team::TMPFILES).exists());
         assert!(!zshrc::has_block(
@@ -642,17 +673,38 @@ mod tests {
         assert!(r.join(team::BINARY).exists() && r.join(team::CONFIG).exists());
     }
 
+    /// Uninstall works from the installed binary alone: the module may be gone or rolled
+    /// back to a release without `bin/cinelog`.
+    #[test]
+    fn uninstall_needs_no_module() {
+        let mut f = fixture();
+        f.opts.allow_unverified = true;
+        install(&f.opts, &mut Steps::default()).unwrap();
+        std::fs::remove_dir_all(&f.opts.module).unwrap();
+        let sys = System {
+            trust: None,
+            ..System::new(f.opts.sys.root.clone(), f.opts.sys.euid)
+        };
+        let mut steps = Steps::default();
+        uninstall(&sys, &mut steps).unwrap();
+        let r = &sys.root;
+        assert!(!r.join(team::SHARE_DIR).exists(), "{steps}");
+        assert!(!zshrc::has_block(
+            &std::fs::read_to_string(r.join(team::SYSTEM_ZSHRC)).unwrap()
+        ));
+    }
+
     #[test]
     fn existing_system_zshrc_content_is_preserved() {
         let mut f = fixture();
         f.opts.allow_unverified = true;
-        let rc = f.opts.root.join(team::SYSTEM_ZSHRC);
+        let rc = f.opts.sys.root.join(team::SYSTEM_ZSHRC);
         std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
         std::fs::write(&rc, "bindkey -e\n").unwrap();
         install(&f.opts, &mut Steps::default()).unwrap();
         let text = std::fs::read_to_string(&rc).unwrap();
         assert!(text.starts_with("bindkey -e\n\n# >>> cinelog >>>"));
-        uninstall(&f.opts, &mut Steps::default()).unwrap();
+        uninstall(&f.opts.sys, &mut Steps::default()).unwrap();
         assert_eq!(std::fs::read_to_string(&rc).unwrap(), "bindkey -e\n");
     }
 
@@ -667,12 +719,13 @@ mod tests {
         )
         .unwrap();
         install(&f.opts, &mut Steps::default()).unwrap();
-        let rc = std::fs::read_to_string(f.opts.root.join(team::SYSTEM_ZSHRC)).unwrap();
-        let copy = f.opts.root.join(team::PLUGIN_COPY);
+        let rc = std::fs::read_to_string(f.opts.sys.root.join(team::SYSTEM_ZSHRC)).unwrap();
+        let copy = f.opts.sys.root.join(team::PLUGIN_COPY);
         assert!(rc.starts_with("# >>> cinelog >>> snippet\n"), "{rc}");
         assert_eq!(rc.matches(&format!("'{}'", copy.display())).count(), 2, "{rc}");
         assert!(
             f.opts
+                .sys
                 .root
                 .join(team::SHARE_DIR)
                 .join("shell/system-zshrc.zsh")
@@ -684,7 +737,7 @@ mod tests {
     fn source_binary_prefers_the_module_over_the_running_binary() {
         let f = fixture();
         let m = &f.opts.module;
-        let installed = f.opts.root.join(team::BINARY);
+        let installed = f.opts.sys.root.join(team::BINARY);
         let err = source_binary(None, m, &installed).unwrap_err();
         assert!(err.to_string().contains("--binary"), "{err}");
 
@@ -712,7 +765,7 @@ mod tests {
         let old = std::fs::read(&f.opts.binary.read).unwrap();
         sums(&f.opts, &old);
         install(&f.opts, &mut Steps::default()).unwrap();
-        let installed = f.opts.root.join(team::BINARY);
+        let installed = f.opts.sys.root.join(team::BINARY);
 
         let m = f.opts.module.clone();
         std::fs::create_dir_all(m.join("bin")).unwrap();
@@ -726,7 +779,7 @@ mod tests {
         install(&f.opts, &mut steps).unwrap();
         assert_eq!(std::fs::read(&installed).unwrap(), b"\x7fELF release 9.9.9");
         assert_eq!(
-            std::fs::read_to_string(f.opts.root.join(team::PLUGIN_COPY)).unwrap(),
+            std::fs::read_to_string(f.opts.sys.root.join(team::PLUGIN_COPY)).unwrap(),
             "# plugin 9.9.9\n"
         );
         assert!(steps.to_string().contains("v9.9.9"), "{steps}");
@@ -741,10 +794,10 @@ mod tests {
     fn system_directories_are_checked_never_chmodded() {
         let mut f = fixture();
         f.opts.allow_unverified = true;
-        let bin_dir = f.opts.root.join("/usr/local/bin");
+        let bin_dir = f.opts.sys.root.join("/usr/local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o2775)).unwrap();
-        let etc = f.opts.root.join(team::CONFIG_DIR);
+        let etc = f.opts.sys.root.join(team::CONFIG_DIR);
         std::fs::create_dir_all(&etc).unwrap();
         std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -759,13 +812,13 @@ mod tests {
         // With ownership checks (as for a real install, here for this uid below the
         // temp dir), the group-writable system directory is refused before any write.
         let base = f._dir.path().to_path_buf();
-        std::fs::remove_dir_all(f.opts.root.join("/")).unwrap();
+        std::fs::remove_dir_all(f.opts.sys.root.join("/")).unwrap();
         std::fs::create_dir_all(&bin_dir).unwrap();
         for d in bin_dir.ancestors().skip(1).take_while(|d| *d != base) {
             std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o2775)).unwrap();
-        f.opts.trust = Some(Trust {
+        f.opts.sys.trust = Some(Trust {
             uid: nix::unistd::geteuid().as_raw(),
             stop: base,
         });
@@ -776,11 +829,11 @@ mod tests {
             std::fs::metadata(&bin_dir).unwrap().permissions().mode() & 0o7777,
             0o2775
         );
-        assert!(!f.opts.root.join(team::BINARY).exists());
+        assert!(!f.opts.sys.root.join(team::BINARY).exists());
 
         std::fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         install(&f.opts, &mut Steps::default()).unwrap();
-        assert!(f.opts.root.join(team::BINARY).is_file());
+        assert!(f.opts.sys.root.join(team::BINARY).is_file());
     }
 
     #[test]
@@ -791,7 +844,7 @@ mod tests {
         std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
         std::fs::write(&managed, "bindkey -e\n").unwrap();
         std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let rc = f.opts.root.join(team::SYSTEM_ZSHRC);
+        let rc = f.opts.sys.root.join(team::SYSTEM_ZSHRC);
         std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&managed, &rc).unwrap();
 
@@ -800,7 +853,7 @@ mod tests {
         assert!(zshrc::has_block(&std::fs::read_to_string(&managed).unwrap()));
         assert_eq!(mode(&managed), 0o640);
 
-        uninstall(&f.opts, &mut Steps::default()).unwrap();
+        uninstall(&f.opts.sys, &mut Steps::default()).unwrap();
         assert!(std::fs::symlink_metadata(&rc).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&managed).unwrap(), "bindkey -e\n");
         assert_eq!(mode(&managed), 0o640);
@@ -809,9 +862,7 @@ mod tests {
     #[test]
     fn real_root_requires_privileges() {
         let opts = Options {
-            root: SystemRoot::real(),
-            trust: Trust::for_root(&SystemRoot::real()),
-            euid: 1000,
+            sys: System::new(SystemRoot::real(), 1000),
             ..fixture().opts
         };
         assert!(
@@ -820,6 +871,6 @@ mod tests {
                 .to_string()
                 .contains("sudo")
         );
-        assert!(uninstall(&opts, &mut Steps::default()).is_err());
+        assert!(uninstall(&opts.sys, &mut Steps::default()).is_err());
     }
 }

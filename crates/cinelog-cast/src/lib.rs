@@ -23,7 +23,7 @@ mod zst;
 pub use clock::{ClockAnchor, ClockMap};
 pub use header::parse_header;
 pub use json::decode_json_string;
-pub use line::parse_event_line;
+pub use line::{MAX_TIME_US, parse_event_line};
 pub use parts::{
     PartName, PartsReader, RotateTrigger, RotationPolicy, existing_part, find_parts, part_file_name, part_path,
 };

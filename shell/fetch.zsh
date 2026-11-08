@@ -8,9 +8,14 @@
 #  3. Download to bin/cinelog.new, verify, run `--version`, then rename onto bin/cinelog.
 #     The old binary stays in place until the new one is verified.
 #  4. Fallback: `cargo build --release --locked` (then offline, then with the user's default
-#     rustup toolchain in place of rust-toolchain.toml).
+#     rustup toolchain in place of rust-toolchain.toml). Never as root.
 #  5. `bin/cinelog install --refresh` (non-root only) after a change, and on every later run
 #     until it has succeeded once.
+#
+# As root (§10.2) only root-owned, non-g/o-writable paths are trusted: the module dir and its
+# parents, bin/, VERSION, the checksum file, an existing bin/cinelog and the state dir (from
+# root's passwd entry, not $HOME/$XDG_STATE_HOME). PATH, TMPDIR and CINELOG_FETCH_BASE_URL from
+# the environment are ignored, and cargo is never run, so `sudo -E` cannot inject code.
 #
 # Exit status: 0 = bin/cinelog is a working binary of VERSION; 1 = it is not (any old binary
 # is kept); 2 = usage error. Sourcing this file only defines the _clf_* functions (tests).
@@ -28,7 +33,7 @@ _clf_usage() {
   --dir DIR           module directory (default: the parent of shell/)
   --base-url URL      release base (https://, file:// or an absolute path)
   --arch MACHINE      override uname -m
-environment: CINELOG_FETCH_BASE_URL, CARGO_TARGET_DIR, RUSTUP_TOOLCHAIN"
+environment: CINELOG_FETCH_BASE_URL, CARGO_TARGET_DIR, RUSTUP_TOOLCHAIN (all ignored as root)"
 }
 
 _clf_info() { (( ${_clf_quiet:-0} )) || print -ru2 -- "cinelog-fetch: $*" }
@@ -121,17 +126,22 @@ _clf_copy_local() {
   command cp -f -- $1 $2
 }
 
-# True if <path> and every parent directory are owned by <uid> and not group/other-writable.
+# True if <path> and every directory above it are owned by <uid> and not group/other-writable,
+# both as written and with symlinks resolved. A symlink on the way must be owned by <uid> (its
+# mode bits mean nothing); the resolved pass checks what it points to.
 _clf_tree_secure() {
   emulate -L zsh
   zmodload -F zsh/stat b:zstat || return 1
-  local p=${1:A} want=$2
+  local want=$2 p
   local -A st
-  while :; do
-    zstat -L -H st -- $p 2>/dev/null || return 1
-    (( st[uid] == want && (st[mode] & 8#022) == 0 )) || return 1
-    [[ $p == / ]] && return 0
-    p=${p:h}
+  for p in ${1:a} ${1:A}; do
+    while :; do
+      zstat -L -H st -- $p 2>/dev/null || return 1
+      (( st[uid] == want )) || return 1
+      [[ -h $p ]] || (( (st[mode] & 8#022) == 0 )) || return 1
+      [[ $p == / ]] && break
+      p=${p:h}
+    done
   done
 }
 
@@ -175,7 +185,17 @@ _clf_expected_sum() {
   fi
   _clf_sum_for cinelog-$target < $tmp || { _clf_err "release SHA256SUMS has no entry for cinelog-$target"; return 1 }
   _clf_warn "shell/checksums/v$ver.sha256 not in the repo yet; verified against the release's SHA256SUMS"
+  if _clf_detached $dir; then
+    _clf_warn "this module is pinned (detached HEAD, e.g. zmodule --tag): the checksum commit lands on main, so a pinned checkout never gets it and the release's SHA256SUMS stays the only check; track main to verify against the repo"
+  fi
   _clf_sum_src=release
+}
+
+# True if <dir> is a git checkout with a detached HEAD (a tag or commit pin). Reads .git/HEAD
+# instead of running git, which would honour hooks and config from the checkout.
+_clf_detached() {
+  local head
+  [[ -f $1/.git/HEAD ]] && IFS= read -r head < $1/.git/HEAD && [[ -n $head && $head != 'ref: '* ]]
 }
 
 # Moves a verified candidate onto bin/cinelog (same directory, so rename(2) is atomic).
@@ -205,16 +225,25 @@ _clf_from_release() {
   _clf_activate $new $dir/bin/cinelog $ver
 }
 
-# Runs one `cargo build` of the recorder in <dir>; args: <dir> <cargo> <target-dir> <toolchain|""> [cargo args].
+# Runs one `cargo build` of the recorder in <dir> and sets REPLY to the built binary.
+# Args: <dir> <cargo> <target-dir> <toolchain|""> [cargo args]. The explicit --target (the
+# toolchain's host) pins the artifact path even when build.target or CARGO_BUILD_TARGET is set.
 _clf_cargo_build() {
-  local dir=$1 cargo=$2 tdir=$3 tc=$4
+  emulate -L zsh -o extended_glob
+  local dir=$1 cargo=$2 tdir=$3 tc=$4 out host
   shift 4
   local -a q
   (( ${_clf_quiet:-0} )) && q=(--quiet)
+  out=$( builtin cd -q -- $dir || exit 1
+    [[ -n $tc ]] && export RUSTUP_TOOLCHAIN=$tc
+    $cargo -vV </dev/null 2>/dev/null ) || return 1
+  host=${${(M)${(f)out}:#host: *}#host: }
+  [[ $host == [[:alnum:]_.-]## ]] || { _clf_warn "cannot tell the host target from '$cargo -vV'"; return 1 }
   ( builtin cd -q -- $dir || exit 1
     export CARGO_TARGET_DIR=$tdir
     [[ -n $tc ]] && export RUSTUP_TOOLCHAIN=$tc
-    $cargo build $q --release --locked --bin cinelog "$@" >&2 )
+    $cargo build $q --release --locked --bin cinelog --target $host "$@" >&2 ) || return 1
+  REPLY=$tdir/$host/release/cinelog
 }
 
 # The user's default rustup toolchain. rust-toolchain.toml can name a channel or components
@@ -234,6 +263,11 @@ _clf_default_toolchain() {
 
 _clf_from_source() {
   local dir=$1 ver=$2 new=$1/bin/cinelog.new tdir=${CARGO_TARGET_DIR:-$1/target}
+  # cargo, its config, rustup and the target dir all come from the environment and $HOME.
+  if (( EUID == 0 )); then
+    _clf_warn "not building from source as root; install a release binary or build it by hand"
+    return 1
+  fi
   local cargo=${commands[cargo]:-}
   [[ -z $cargo && -x $HOME/.cargo/bin/cargo ]] && cargo=$HOME/.cargo/bin/cargo
   [[ -n $cargo ]] || { _clf_warn "cargo not found; cannot build from source"; return 1 }
@@ -252,11 +286,35 @@ _clf_from_source() {
         { _clf_err "cargo build failed"; return 1 }
     fi
   fi
-  command cp -f -- $tdir/release/cinelog $new || return 1
+  command cp -f -- $REPLY $new || return 1
   _clf_activate $new $dir/bin/cinelog $ver
 }
 
-_clf_state_dir() { REPLY=${XDG_STATE_HOME:-$HOME/.local/state}/cinelog }
+# Per-user state (lock, stamps). Root's comes from its passwd entry: $HOME and XDG_STATE_HOME
+# may still point at the invoking user's home under `sudo -E`.
+_clf_state_dir() {
+  if (( EUID != 0 )); then
+    REPLY=${XDG_STATE_HOME:-$HOME/.local/state}/cinelog
+    return
+  fi
+  local line home=
+  local -a f
+  if (( $+commands[getent] )) && line=$(getent passwd 0 2>/dev/null); then
+    f=("${(@s.:.)${line%%$'\n'*}}")
+    home=${f[6]-}
+  fi
+  [[ $home == /?* ]] || home=/root
+  REPLY=$home/.local/state/cinelog
+}
+
+# Creates <sd> for root, refusing any part of it (or of fetch.lock) that is not root-owned and
+# non-writable for others: a planted symlink would otherwise let root create files elsewhere.
+_clf_root_state_ok() {
+  local sd=$1 p=$1
+  while [[ ! -e $p && ! -h $p ]]; do p=${p:h}; done
+  _clf_tree_secure $p 0 && command mkdir -p -m 0700 -- $sd && _clf_tree_secure $sd 0 &&
+    { [[ ! -e $sd/fetch.lock && ! -h $sd/fetch.lock ]] || _clf_file_secure $sd/fetch.lock 0 }
+}
 
 # Starts a detached fetch at most once a day (the plugin calls this when the binary is missing).
 _clf_background() {
@@ -290,18 +348,32 @@ _clf_main() {
   (( $# == 0 )) || { _clf_usage >&2; return 2 }
   (( $#o_help )) && { _clf_usage; return 0 }
   local -i _clf_quiet=$#o_quiet
-  local dir=${${o_dir[-1]:-${_clf_self:h:h}}:A}
-  local base=${o_base[-1]:-${CINELOG_FETCH_BASE_URL:-https://github.com/cmprmsd/cinelog/releases/download}}
-  base=${base%/}
+  # zparseopts keeps the '=' of GNU-style `--opt=value` in the value.
+  local a
+  for a in o_dir o_base o_arch; do
+    (( ${(P)#a} == 0 )) || [[ -n ${${(P)a}[-1]#=} ]] || { _clf_usage >&2; return 2 }
+  done
+  local arg_dir=${o_dir[-1]#=} arg_base=${o_base[-1]#=} arg_arch=${o_arch[-1]#=}
+  local dir=${${arg_dir:-${_clf_self:h:h}}:A} tmpbase=${TMPDIR:-/tmp} base=$arg_base
+  if (( EUID == 0 )); then
+    # Commands and temp files come only from root's system locations; see the header.
+    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    tmpbase=/tmp
+    [[ -z $base && -n ${CINELOG_FETCH_BASE_URL:-} ]] &&
+      _clf_warn "ignoring CINELOG_FETCH_BASE_URL as root (pass --base-url)"
+  else
+    : ${base:=${CINELOG_FETCH_BASE_URL:-}}
+  fi
+  base=${${base:-https://github.com/cmprmsd/cinelog/releases/download}%/}
   _clf_check_base $base || return 2
 
   if (( $#o_bg )); then
-    _clf_background "$dir" "${o_base[-1]}" "${o_arch[-1]}"
+    _clf_background "$dir" "$arg_base" "$arg_arch"
     return
   fi
 
   if (( EUID == 0 )); then
-    if ! _clf_tree_secure $dir 0 || { [[ -e $dir/bin ]] && ! _clf_tree_secure $dir/bin 0 } ||
+    if ! _clf_tree_secure $dir 0 || { [[ -e $dir/bin || -h $dir/bin ]] && ! _clf_tree_secure $dir/bin 0 } ||
        ! _clf_file_secure $dir/VERSION 0; then
       _clf_err "refusing to run as root: $dir (or a parent, bin/ or VERSION) is not root-owned or is group/world-writable"
       return 1
@@ -316,7 +388,14 @@ _clf_main() {
   # One fetch at a time per user; the background child gives up instead of waiting.
   zmodload zsh/system || return 1
   _clf_state_dir; local sd=$REPLY lockfd
-  command mkdir -p -m 0700 -- $sd || return 1
+  if (( EUID == 0 )); then
+    if ! _clf_root_state_ok $sd; then
+      _clf_err "refusing to run as root: $sd (or a parent or fetch.lock) is not root-owned or is group/world-writable"
+      return 1
+    fi
+  else
+    command mkdir -p -m 0700 -- $sd || return 1
+  fi
   : >> $sd/fetch.lock || return 1
   if ! zsystem flock -t ${${o_nowait:+0}:-600} -f lockfd -- $sd/fetch.lock 2>/dev/null; then
     (( $#o_nowait )) && return 0
@@ -324,10 +403,10 @@ _clf_main() {
   fi
 
   local _clf_tmp _clf_sum_src
-  _clf_tmp=$(command mktemp -d "${TMPDIR:-/tmp}/cinelog-fetch.XXXXXX") || return 1
+  _clf_tmp=$(command mktemp -d "$tmpbase/cinelog-fetch.XXXXXX") || return 1
   local -i _clf_changed=0
   {
-    _clf_run "$dir" "$ver" "$bin" "$base" "${o_arch[-1]}" $#o_force $#o_source $#o_nocargo &&
+    _clf_run "$dir" "$ver" "$bin" "$base" "$arg_arch" $#o_force $#o_source $#o_nocargo &&
       _clf_refresh $bin $_clf_changed $#o_norefresh
   } always {
     command rm -rf -- $_clf_tmp $dir/bin/cinelog.new
@@ -339,7 +418,11 @@ _clf_main() {
 _clf_run() {
   local dir=$1 ver=$2 bin=$3 base=$4 arch=$5 force=$6 source=$7 nocargo=$8
   local target= expected= have=0 changed=0 rc
-  _clf_version_ok $bin $ver && have=1
+  if (( EUID == 0 )) && [[ -e $bin || -h $bin ]] && ! _clf_file_secure $bin 0; then
+    _clf_warn "$bin is not root-owned or is writable by others; not running it"
+  elif _clf_version_ok $bin $ver; then
+    have=1
+  fi
   _clf_target $arch && target=$REPLY
 
   if (( ! source )) && [[ -n $target ]]; then

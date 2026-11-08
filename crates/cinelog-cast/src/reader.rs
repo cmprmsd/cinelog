@@ -8,7 +8,7 @@ use std::path::Path;
 use memchr::{memchr, memchr_iter, memrchr};
 
 use crate::header::parse_header;
-use crate::line::parse_event_line;
+use crate::line::{MAX_TIME_US, parse_event_line};
 use crate::zst::{self, ZstFrame};
 use crate::{CastError, CastReader, Event, Format, Header, ReadStats};
 
@@ -225,10 +225,12 @@ impl<R: BufRead> Reader<R> {
         ev
     }
 
+    /// Parses an event line. A v3 interval that would push the summed offset past
+    /// [`MAX_TIME_US`] is corruption: the line is rejected and the clock stays put.
     fn event_from(&mut self, line: &[u8]) -> Option<Event> {
         let raw = parse_event_line(line)?;
         self.t_us = match self.format {
-            Format::V3 => self.t_us.saturating_add(raw.time_us),
+            Format::V3 => self.t_us.checked_add(raw.time_us).filter(|&t| t <= MAX_TIME_US)?,
             Format::V2 => self.t_us.max(raw.time_us),
         };
         self.stats.events += 1;
@@ -351,25 +353,122 @@ fn open_plain_at(file: File, at: ResumePoint) -> Result<Box<dyn CastReader + Sen
             at.offset
         )));
     }
-    let mut prev = [0u8; 1];
-    file.read_exact_at(&mut prev, at.offset - 1)?;
-    let mut next = [0u8; 1];
-    let next = (file.read_at(&mut next, at.offset)? == 1).then_some(next[0]);
-    check_boundary(at.offset, prev[0], next)?;
+    check_plain_boundary(file, at.offset)?;
     src.seek(SeekFrom::Start(at.offset))?;
     Ok(boxed(Reader::resume(src, header, format, at)))
 }
 
+fn not_a_boundary(offset: u64) -> CastError {
+    CastError::Format(format!("resume offset {offset} is not a line boundary"))
+}
+
+/// Whether `line`, the bytes from a line start up to a resume offset that follows a `]`,
+/// is an event the reader returns as an unterminated tail (see [`Reader::next_event`]).
+fn is_tail_event(line: &[u8]) -> bool {
+    let after_hole = memrchr(0, line).map_or(line, |i| &line[i + 1..]);
+    line.last() == Some(&b']') && parse_event_line(after_hole.trim_ascii()).is_some()
+}
+
+/// Whether the bytes after a tail-event offset are whitespace up to the next newline (all
+/// of `rest` when it has none): the writer's `\n` may still be missing, nothing else.
+fn rest_is_blank(rest: &[u8]) -> bool {
+    let line = memchr(b'\n', rest).map_or(rest, |i| &rest[..i]);
+    line.iter().all(u8::is_ascii_whitespace)
+}
+
 /// Accepts a line start, or the end of an event line whose newline is not read yet (the
 /// position a reader reports after an unterminated tail event).
-fn check_boundary(offset: u64, prev: u8, next: Option<u8>) -> Result<(), CastError> {
-    if prev == b'\n' || (prev == b']' && next.is_none_or(|b| b.is_ascii_whitespace())) {
-        Ok(())
-    } else {
-        Err(CastError::Format(format!(
-            "resume offset {offset} is not a line boundary"
-        )))
+fn check_plain_boundary(file: &File, offset: u64) -> Result<(), CastError> {
+    let mut prev = [0u8; 1];
+    file.read_exact_at(&mut prev, offset - 1)?;
+    match prev[0] {
+        b'\n' => return Ok(()),
+        b']' => {}
+        _ => return Err(not_a_boundary(offset)),
     }
+    // Find the line start with doubling windows, so short lines read little.
+    let max_window = MAX_LINE as u64 + 1;
+    let mut window = 4096u64;
+    let line = loop {
+        let w = window.min(offset).min(max_window);
+        let mut buf = vec![0u8; w as usize];
+        file.read_exact_at(&mut buf, offset - w)?;
+        if let Some(i) = memrchr(b'\n', &buf) {
+            buf.drain(..=i);
+            break buf;
+        }
+        if w == offset || w == max_window {
+            return Err(not_a_boundary(offset));
+        }
+        window *= 2;
+    };
+    if !is_tail_event(&line) {
+        return Err(not_a_boundary(offset));
+    }
+    let mut rest = [0u8; 4096];
+    let mut at = offset;
+    loop {
+        let n = file.read_at(&mut rest, at)?;
+        let chunk = &rest[..n];
+        if !rest_is_blank(chunk) {
+            return Err(not_a_boundary(offset));
+        }
+        if n == 0 || memchr(b'\n', chunk).is_some() {
+            return Ok(());
+        }
+        at += n as u64;
+    }
+}
+
+/// The bytes of the line that ends at the skip target, as seen while skipping.
+struct SkippedLine {
+    /// Bytes since the last newline (empty if the target is a line start).
+    tail: Vec<u8>,
+    /// A newline was skipped, so `tail` starts at a line start.
+    starts_line: bool,
+    /// The line exceeds `MAX_LINE`; `tail` is incomplete.
+    too_long: bool,
+    /// The last byte before the target.
+    prev: u8,
+}
+
+/// Skips `n > 0` bytes, keeping the current line's bytes (up to `MAX_LINE`, beyond which
+/// it cannot be an event anyway). `None` if the data ends first.
+fn skip_tracking_line<R: BufRead>(src: &mut R, n: u64) -> io::Result<Option<SkippedLine>> {
+    let mut left = n;
+    let mut line = SkippedLine {
+        tail: Vec::new(),
+        starts_line: false,
+        too_long: false,
+        prev: 0,
+    };
+    while left > 0 {
+        let buf = match src.fill_buf() {
+            Ok([]) => return Ok(None),
+            Ok(buf) => buf,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let take = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        let chunk = &buf[..take];
+        line.prev = chunk[take - 1];
+        match memrchr(b'\n', chunk) {
+            Some(i) => {
+                line.starts_line = true;
+                line.too_long = false;
+                line.tail.clear();
+                line.tail.extend_from_slice(&chunk[i + 1..]);
+            }
+            None if !line.too_long && line.tail.len() + take <= MAX_LINE => line.tail.extend_from_slice(chunk),
+            None => {
+                line.too_long = true;
+                line.tail.clear();
+            }
+        }
+        src.consume(take);
+        left -= take as u64;
+    }
+    Ok(Some(line))
 }
 
 fn open_zst_at(
@@ -390,25 +489,60 @@ fn open_zst_at(
             &scanned
         }
     };
-    let frame = frames
-        .iter()
-        .rev()
-        .find(|f| f.u_offset <= offset)
-        .copied()
-        .unwrap_or_default();
-    file.seek(SeekFrom::Start(frame.c_offset))?;
-    let mut src = BufReader::with_capacity(READ_BUFFER, zstd::stream::read::Decoder::new(file)?);
-    let skip = offset - frame.u_offset;
-    if skip > 0 {
-        let skipped = io::copy(&mut src.by_ref().take(skip - 1), &mut io::sink())?;
-        let mut prev = [0u8; 1];
-        if skipped != skip - 1 || src.read(&mut prev)? != 1 {
+    let resume = |src| {
+        Ok(boxed(Reader::resume(
+            src,
+            header.clone(),
+            format,
+            ResumePoint { offset, ..at },
+        )))
+    };
+    let decode_from = |file: &mut File, frame: ZstFrame| -> io::Result<_> {
+        file.seek(SeekFrom::Start(frame.c_offset))?;
+        Ok(BufReader::with_capacity(
+            READ_BUFFER,
+            zstd::stream::read::Decoder::new(file.try_clone()?)?,
+        ))
+    };
+    if offset == header_len {
+        let frame = frames
+            .iter()
+            .rev()
+            .find(|f| f.u_offset <= offset)
+            .copied()
+            .unwrap_or_default();
+        let mut src = decode_from(&mut file, frame)?;
+        let skip = offset - frame.u_offset;
+        if skip > 0 && io::copy(&mut src.by_ref().take(skip), &mut io::sink())? != skip {
             return Err(CastError::Format(format!("resume offset {offset} beyond end of cast")));
         }
-        let next = src.fill_buf()?.first().copied();
-        check_boundary(offset, prev[0], next)?;
+        return resume(src);
     }
-    Ok(boxed(Reader::resume(src, header, format, ResumePoint { offset, ..at })))
+    // Start in a frame that has at least one byte before the offset, so its preceding
+    // byte (and, after a `]`, its whole line) can be checked.
+    let mut idx = frames.iter().rposition(|f| f.u_offset < offset);
+    loop {
+        let frame = idx.map_or_else(ZstFrame::default, |i| frames[i]);
+        let mut src = decode_from(&mut file, frame)?;
+        let Some(line) = skip_tracking_line(&mut src, offset - frame.u_offset)? else {
+            return Err(CastError::Format(format!("resume offset {offset} beyond end of cast")));
+        };
+        match line.prev {
+            b'\n' => return resume(src),
+            b']' if !line.starts_line && frame.u_offset > 0 && offset - frame.u_offset <= MAX_LINE as u64 => {
+                // The line began in an earlier frame.
+                idx = idx.and_then(|i| i.checked_sub(1));
+            }
+            b']' if line.starts_line
+                && !line.too_long
+                && is_tail_event(&line.tail)
+                && rest_is_blank(src.fill_buf()?) =>
+            {
+                return resume(src);
+            }
+            _ => return Err(not_a_boundary(offset)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -635,6 +769,68 @@ mod tests {
             t_us: 0,
         };
         assert!(matches!(open_at(&path, mid, None), Err(CastError::Format(_))));
+    }
+
+    #[test]
+    fn bracket_inside_a_line_is_not_a_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.cast");
+        let cast = format!(
+            "{HEADER}\n[0.1, \"o\", \"a] b\"]\n[0.1, \"o\", \"x\"] y\"]\n[0.1, \"o\", \"c\"]\n# [0.1, \"o\", \"d\"]"
+        );
+        std::fs::write(&path, &cast).unwrap();
+        let small = dir.path().join("b.small.cast.zst");
+        let opts = crate::CompressOptions {
+            frame_bytes: 8,
+            ..Default::default()
+        };
+        crate::compress_file(&path, &small, opts).unwrap();
+        let offsets = [
+            cast.find("a]").unwrap() + 2,
+            cast.find("\"x\"]").unwrap() + 4,
+            cast.len(),
+        ];
+        for p in [path.clone(), zst_copy(&path), small] {
+            for offset in offsets {
+                let at = ResumePoint {
+                    offset: offset as u64,
+                    t_us: 0,
+                };
+                assert!(
+                    matches!(open_at(&p, at, None), Err(CastError::Format(_))),
+                    "{} accepted {offset}",
+                    p.display()
+                );
+            }
+            let ok = ResumePoint {
+                offset: cast.find("\"c\"]").unwrap() as u64 + 5,
+                t_us: 0,
+            };
+            assert!(open_at(&p, ok, None).is_ok());
+        }
+    }
+
+    #[test]
+    fn tail_event_spanning_zst_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.cast");
+        let cast = format!("{HEADER}\n[0.1, \"o\", \"a\"]\n[0.2, \"o\", \"{}\"]", "z".repeat(100));
+        std::fs::write(&path, &cast).unwrap();
+        let zst = dir.path().join("t.cast.zst");
+        let opts = crate::CompressOptions {
+            frame_bytes: 8,
+            ..Default::default()
+        };
+        assert!(crate::compress_file(&path, &zst, opts).unwrap().frames.len() > 3);
+        let ck = ResumePoint {
+            offset: cast.len() as u64,
+            t_us: 300_000,
+        };
+        for p in [&path, &zst] {
+            let mut r = open_at(p, ck, None).unwrap();
+            assert!(r.next_event().is_none());
+            assert_eq!(r.stats(), ReadStats::default());
+        }
     }
 
     #[test]

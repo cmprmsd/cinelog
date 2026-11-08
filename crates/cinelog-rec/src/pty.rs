@@ -99,6 +99,118 @@ pub(crate) fn write_all(fd: RawFd, mut buf: &[u8], stop: &AtomicBool) -> io::Res
     Ok(())
 }
 
+/// Waits until `fd` is writable; `false` once `stop` is set and it still is not.
+fn writable_or_stop(fd: RawFd, stop: &AtomicBool) -> bool {
+    loop {
+        let stopping = stop.load(Ordering::Relaxed);
+        let mut p = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let n = unsafe { libc::poll(&mut p, 1, if stopping { 0 } else { 100 }) };
+        // POLLERR/POLLHUP: the write that follows reports the error.
+        if n > 0 && p.revents != 0 {
+            return true;
+        }
+        if stopping {
+            return false;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostMode {
+    /// Private non-blocking open file description: EAGAIN, then POLLOUT or `stop`.
+    NonBlocking,
+    /// Shared blocking fd that may stall (a tty or pipe we could not reopen): POLLOUT
+    /// before every write of at most `PIPE_BUF` bytes, so a stalled reader blocks at worst
+    /// one short write.
+    Guarded,
+    /// Regular file or similar: writes never wait for a reader.
+    Plain,
+}
+
+/// Where the recorder writes terminal output on the host side (§5.1).
+///
+/// The host fd is shared with the parent (often blocking), and setting `O_NONBLOCK` on it
+/// would change it for everyone. A tty or pipe is therefore reopened through
+/// `/proc/self/fd`, which yields a new open file description that can be non-blocking on
+/// its own. A host reader that stops reading (a frozen terminal emulator, a stopped outer
+/// recorder) then never keeps the recorder from shutting down.
+#[derive(Debug)]
+pub(crate) struct HostOut {
+    fd: RawFd,
+    _own: Option<OwnedFd>,
+    mode: HostMode,
+}
+
+fn file_id(fd: RawFd) -> Option<(libc::mode_t, libc::dev_t, libc::ino_t, libc::dev_t)> {
+    // SAFETY: fstat writes into the zeroed struct.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_mode & libc::S_IFMT, st.st_dev, st.st_ino, st.st_rdev))
+}
+
+impl HostOut {
+    pub(crate) fn open(fd: RawFd) -> Self {
+        let Some(id @ (kind, ..)) = file_id(fd) else {
+            return Self::shared(fd, HostMode::Guarded);
+        };
+        if kind != libc::S_IFCHR && kind != libc::S_IFIFO {
+            return Self::shared(fd, HostMode::Plain);
+        }
+        match reopen_nonblocking(fd) {
+            Some(own) if file_id(own.as_raw_fd()) == Some(id) => Self {
+                fd: own.as_raw_fd(),
+                _own: Some(own),
+                mode: HostMode::NonBlocking,
+            },
+            _ => Self::shared(fd, HostMode::Guarded),
+        }
+    }
+
+    fn shared(fd: RawFd, mode: HostMode) -> Self {
+        Self { fd, _own: None, mode }
+    }
+
+    /// Writes all of `buf`; gives up with an error once `stop` is set and the host does
+    /// not accept more.
+    pub(crate) fn write_all(&self, mut buf: &[u8], stop: &AtomicBool) -> io::Result<()> {
+        match self.mode {
+            HostMode::NonBlocking | HostMode::Plain => write_all(self.fd, buf, stop),
+            HostMode::Guarded => {
+                while !buf.is_empty() {
+                    if !writable_or_stop(self.fd, stop) {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "host output stalled"));
+                    }
+                    let chunk = &buf[..buf.len().min(libc::PIPE_BUF)];
+                    // SAFETY: chunk is a valid readable slice.
+                    let n = unsafe { libc::write(self.fd, chunk.as_ptr().cast(), chunk.len()) };
+                    if n < 0 {
+                        let e = io::Error::last_os_error();
+                        if matches!(e.raw_os_error(), Some(libc::EINTR | libc::EAGAIN)) {
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                    buf = &buf[n as usize..];
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn reopen_nonblocking(fd: RawFd) -> Option<OwnedFd> {
+    let path = CString::new(format!("/proc/self/fd/{fd}")).ok()?;
+    let flags = libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: valid C string; the returned fd is owned below.
+    let new = unsafe { libc::open(path.as_ptr(), flags) };
+    // SAFETY: a fresh fd nobody else owns.
+    (new >= 0).then(|| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(new) })
+}
+
 /// `read(2)` into `buf`; `Ok(0)` is EOF.
 pub(crate) fn read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY: buf is a valid writable slice.
@@ -298,6 +410,68 @@ mod tests {
         assert_eq!(s.argv[0].to_str().unwrap(), "zsh");
         assert_eq!(s.argv[1].to_str().unwrap(), "-l");
         assert!(ChildSpec::new("/bin/z\0sh".as_ref(), &[], Vec::new()).is_err());
+    }
+
+    /// A host reader that never reads must not block a write once `stop` is set
+    /// (regression: shutdown joined an output thread stuck in a blocking write(2)).
+    fn assert_gives_up(out: HostOut) {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s = std::sync::Arc::clone(&stop);
+        let h = std::thread::spawn(move || {
+            let r = out.write_all(&vec![b'x'; 4 << 20], &s);
+            let _ = tx.send(r.is_err());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(rx.try_recv().is_err(), "still waiting for the reader");
+        stop.store(true, Ordering::SeqCst);
+        let gave_up = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("write_all returned after stop");
+        assert!(gave_up);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn stalled_tty_host_is_reopened_non_blocking() {
+        let p = nix::pty::openpty(None, None).unwrap();
+        set_cloexec(p.master.as_raw_fd()).unwrap();
+        set_cloexec(p.slave.as_raw_fd()).unwrap();
+        let out = HostOut::open(p.slave.as_raw_fd());
+        assert_eq!(out.mode, HostMode::NonBlocking);
+        // SAFETY: plain fcntl on a valid fd.
+        let shared_fl = unsafe { libc::fcntl(p.slave.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(shared_fl & libc::O_NONBLOCK, 0, "the shared fd stays blocking");
+        assert_gives_up(out);
+    }
+
+    #[test]
+    fn stalled_pipe_host_gives_up_in_both_modes() {
+        let (r, w) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).unwrap();
+        let out = HostOut::open(w.as_raw_fd());
+        assert_eq!(out.mode, HostMode::NonBlocking);
+        assert_gives_up(out);
+        // The fallback when no private open is possible.
+        assert_gives_up(HostOut::shared(w.as_raw_fd(), HostMode::Guarded));
+        drop(r);
+    }
+
+    #[test]
+    fn host_output_reaches_the_reader_and_files_are_not_reopened() {
+        let (r, w) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).unwrap();
+        let stop = AtomicBool::new(true);
+        HostOut::open(w.as_raw_fd()).write_all(b"hello", &stop).unwrap();
+        HostOut::shared(w.as_raw_fd(), HostMode::Guarded)
+            .write_all(b"!", &stop)
+            .unwrap();
+        let mut buf = [0u8; 16];
+        assert_eq!(read(r.as_raw_fd(), &mut buf).unwrap(), 6);
+        assert_eq!(&buf[..6], b"hello!");
+        let f = tempfile::tempfile().unwrap();
+        let out = HostOut::open(f.as_raw_fd());
+        assert_eq!(out.mode, HostMode::Plain, "a reopen would rewind a regular file");
+        out.write_all(b"abc", &stop).unwrap();
+        assert_eq!(f.metadata().unwrap().len(), 3);
     }
 
     #[test]

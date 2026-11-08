@@ -8,7 +8,8 @@
 //!   `RealProcFs::at(root)` reads a fixture directory laid out like `/proc`).
 //! - `pub struct ProcDetector<P: ProcFs, R: RegistryLookup>` implementing [`Detector`]
 //!   (`ProcDetector::new(proc: P, registry: R)`).
-//! - `pub fn tty_of_fd(fd: RawFd) -> TtyIdentity` (pts index from `st_rdev`, majors 136–143).
+//! - `pub fn tty_of_fd(fd: RawFd) -> TtyIdentity` (pts index from `st_rdev`, majors 136–143);
+//!   `tty_of(impl AsFd)` is the same for an owned or borrowed fd.
 
 mod classify;
 mod detector;
@@ -20,7 +21,7 @@ mod tty;
 pub use classify::{RECORDER_COMM, classify_holder};
 pub use detector::{NoRegistry, ProcDetector};
 pub use procfs::{RealProcFs, parse_fdinfo_tty_index, parse_hidepid, parse_loginuid, parse_stat, parse_status_uids};
-pub use tty::{foreground_pgrp, pts_index_of_rdev, tty_of_fd};
+pub use tty::{foreground_pgrp, pts_index_of_rdev, tty_of, tty_of_fd};
 
 use std::fmt;
 use std::io;

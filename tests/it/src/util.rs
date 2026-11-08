@@ -42,57 +42,107 @@ pub fn settle(d: Duration) {
     std::thread::sleep(d);
 }
 
-/// Runs `cmd` to completion with captured output; kills it (and fails) after `timeout`.
+/// How long [`output_with_timeout`] waits, after the child exited, for its stdout and stderr
+/// to reach EOF before it blames a descendant that inherited them.
+const PIPE_GRACE: f64 = 3.0;
+
+/// Runs `cmd` to completion with captured output, in its own process group. Fails (after
+/// killing the whole group) when the child is still running after `timeout`, or when it
+/// exited but a descendant keeps its stdout or stderr open: a background job left behind
+/// must make the scenario fail, not hang it.
 pub fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .context("spawning command")?;
-    let mut pipes = (child.stdout.take(), child.stderr.take());
-    let reader = |p: Option<ChildStdoutOrErr>| {
+    let pgid = child.id();
+    let kill_group = || {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    };
+
+    let (tx, rx) = mpsc::channel::<(bool, Vec<u8>)>();
+    let spawn_reader = |is_err: bool, pipe: Option<Box<dyn Read + Send>>| {
+        let tx = tx.clone();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            if let Some(mut p) = p {
+            if let Some(mut p) = pipe {
                 let _ = p.read_to_end(&mut buf);
             }
-            buf
-        })
+            let _ = tx.send((is_err, buf));
+        });
     };
-    let out_t = reader(pipes.0.take().map(ChildStdoutOrErr::Out));
-    let err_t = reader(pipes.1.take().map(ChildStdoutOrErr::Err));
+    spawn_reader(false, child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    spawn_reader(true, child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    drop(tx);
+
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break st;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_group();
             let _ = child.wait();
             bail!("command did not finish within {:.1}s", timeout.as_secs_f64());
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+
+    let pipe_deadline = Instant::now() + scaled(PIPE_GRACE);
+    let (mut stdout, mut stderr) = (None, None);
+    while stdout.is_none() || stderr.is_none() {
+        let left = pipe_deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((false, b)) => stdout = Some(b),
+            Ok((true, b)) => stderr = Some(b),
+            Err(_) => {
+                kill_group();
+                bail!(
+                    "command exited ({status}), but a descendant still held its {} open {:.1}s later",
+                    match (stdout.is_none(), stderr.is_none()) {
+                        (true, true) => "stdout and stderr",
+                        (true, false) => "stdout",
+                        _ => "stderr",
+                    },
+                    scaled(PIPE_GRACE).as_secs_f64()
+                );
+            }
+        }
+    }
+    // Members of the group that closed their pipes but linger are not the caller's business.
+    kill_group();
     Ok(Output {
         status,
-        stdout: out_t.join().unwrap_or_default(),
-        stderr: err_t.join().unwrap_or_default(),
+        stdout: stdout.unwrap_or_default(),
+        stderr: stderr.unwrap_or_default(),
     })
 }
 
-enum ChildStdoutOrErr {
-    Out(std::process::ChildStdout),
-    Err(std::process::ChildStderr),
+/// `CINELOG_IT_TMPDIR`, else the system temp dir: where sandboxes and probe dirs live.
+pub fn scratch_base() -> PathBuf {
+    std::env::var_os("CINELOG_IT_TMPDIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
-impl std::io::Read for ChildStdoutOrErr {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Out(p) => p.read(buf),
-            Self::Err(p) => p.read(buf),
-        }
-    }
+/// A fresh `clit-*` directory below [`scratch_base`], removed when dropped.
+pub fn scratch_dir() -> Result<tempfile::TempDir> {
+    let base = scratch_base();
+    std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
+    tempfile::Builder::new()
+        .prefix("clit-")
+        .tempdir_in(&base)
+        .with_context(|| format!("creating a temp dir in {}", base.display()))
 }
 
 /// 8 random lowercase hex chars.
@@ -213,6 +263,43 @@ mod tests {
                       Uptime: up 3 hours\n\
                       Running out of disk space \"/tmp/cinelog-x (100%)\"\n";
         assert_eq!(warning_lines(screen), vec!["cinelog: not recording: error".to_owned()]);
+    }
+
+    #[test]
+    fn output_with_timeout_captures_both_streams() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let out = output_with_timeout(cmd, Duration::from_secs(10)).unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+    }
+
+    #[test]
+    fn output_with_timeout_kills_a_hanging_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let err = output_with_timeout(cmd, Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err:#}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Regression: a background job that inherits the pipes used to block the reader joins
+    /// until it exited, hanging the test instead of failing it.
+    #[test]
+    fn output_with_timeout_fails_fast_on_a_descendant_holding_the_pipes() {
+        let marker = unique_id();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "CLIT_OWT=\"$1\" sleep 30 & echo started", "sh", &marker]);
+        let start = Instant::now();
+        let err = output_with_timeout(cmd, Duration::from_secs(60)).unwrap_err();
+        assert!(err.to_string().contains("held its stdout and stderr open"), "{err:#}");
+        assert!(start.elapsed() < scaled(PIPE_GRACE) + Duration::from_secs(5));
+        wait_until("the background job to be killed", Duration::from_secs(5), || {
+            crate::procs::with_env("CLIT_OWT", &marker).is_empty().then_some(())
+        })
+        .unwrap();
     }
 
     #[test]

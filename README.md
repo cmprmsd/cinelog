@@ -34,6 +34,16 @@ The marker protocol and the shell/binary interface are specified in [docs/PROTOC
 `zimfw update` keeps the module and the binary in sync. Asciinema, Python and the old viewer
 port are no longer needed; stop the old `http_server.py` if it still runs (`doctor` warns).
 
+Checksum trust: only a module that tracks `main` verifies against the checksum committed in
+this repository. The checksum commit lands on `main` after the release tag, so a module
+pinned with `--tag vX.Y.Z` (or to a commit) verifies against the release's `SHA256SUMS` only,
+and fetch.zsh warns about it. See [shell/checksums/README.md](shell/checksums/README.md).
+
+As root (root's own zim `--on-pull`), fetch.zsh never builds with cargo, ignores `PATH`,
+`TMPDIR` and `CINELOG_FETCH_BASE_URL` from the environment (only `--base-url` counts) and
+runs no `bin/cinelog` that is not root-owned. Root gets its binary from a release download or,
+for team setups, from `sudo <module>/bin/cinelog install --team`.
+
 ### Team (root) recording
 
 ```zsh

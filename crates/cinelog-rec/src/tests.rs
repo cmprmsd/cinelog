@@ -86,6 +86,8 @@ struct Running {
     reader: Option<std::thread::JoinHandle<()>>,
     stop_reader: Arc<AtomicBool>,
     _stdin: Option<OwnedFd>,
+    /// Read end of a host output pipe nobody reads ([`Opts::stalled_output`]).
+    _stalled: Option<OwnedFd>,
     output: Arc<Mutex<Vec<u8>>>,
     done: crossbeam_channel::Receiver<i32>,
     cast: PathBuf,
@@ -98,7 +100,16 @@ struct Opts {
     record: RecordConfig,
     detector: Arc<dyn Detector + Send + Sync>,
     tty: bool,
+    effects: ProcessEffects,
+    /// Host output goes to a pipe that is never read (a frozen terminal emulator).
+    stalled_output: bool,
 }
+
+const NO_EFFECTS: ProcessEffects = ProcessEffects {
+    mirror_cmdline: false,
+    mirror_cwd: false,
+    ignore_job_signals: false,
+};
 
 impl Default for Opts {
     fn default() -> Self {
@@ -106,6 +117,8 @@ impl Default for Opts {
             record: RecordConfig::default(),
             detector: Arc::new(FakeDetector::default()),
             tty: true,
+            effects: NO_EFFECTS,
+            stalled_output: false,
         }
     }
 }
@@ -169,7 +182,12 @@ fn start(script: &str, opts: Opts) -> Running {
     };
     let stdin: Option<OwnedFd> = (!opts.tty).then(|| std::fs::File::open("/dev/null").unwrap().into());
     let input = stdin.as_ref().map_or(host.slave.as_raw_fd(), |f| f.as_raw_fd());
-    let (output, is_tty) = (host.slave.as_raw_fd(), opts.tty);
+    let stalled = opts
+        .stalled_output
+        .then(|| nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).unwrap());
+    let output = stalled.as_ref().map_or(host.slave.as_raw_fd(), |(_, w)| w.as_raw_fd());
+    let (stalled_r, stalled_w) = stalled.unzip();
+    let is_tty = opts.tty;
     let mut session = template();
     session.uuid = "test-session".into();
     let launch = Launch {
@@ -186,11 +204,7 @@ fn start(script: &str, opts: Opts) -> Running {
             is_tty,
             announce: true,
         },
-        effects: ProcessEffects {
-            mirror_cmdline: false,
-            mirror_cwd: false,
-            ignore_job_signals: false,
-        },
+        effects: opts.effects,
         clock: Arc::new(SystemClock) as Arc<dyn Clock>,
         detector: opts.detector,
         record: opts.record,
@@ -210,6 +224,7 @@ fn start(script: &str, opts: Opts) -> Running {
     std::thread::spawn(move || {
         let status = recorder::record(launch).expect("record");
         drop(host_slave);
+        drop(stalled_w);
         let _ = done_tx.send(status);
     });
     let output = Arc::new(Mutex::new(Vec::new()));
@@ -241,6 +256,7 @@ fn start(script: &str, opts: Opts) -> Running {
         reader: Some(reader),
         stop_reader,
         _stdin: stdin,
+        _stalled: stalled_r,
         output,
         done,
         cast,
@@ -725,4 +741,123 @@ fn input_disabled_records_no_keystrokes() {
     r.wait_output("got-abc");
     assert_eq!(r.finish(), 0);
     assert!(input_text(&events(&r.cast)).is_empty());
+}
+
+/// Regression: the output thread blocked in write(2) on a host that stopped reading, and
+/// shutdown joined it forever (the recorder then ignored hangups and SIGTERM).
+#[test]
+fn hangup_with_a_stalled_host_output_still_ends() {
+    let mut r = start(
+        r#"
+echo started
+head -c 3000000 /dev/zero | tr '\0' x
+echo after
+sleep 30
+"#,
+        Opts {
+            stalled_output: true,
+            ..Opts::default()
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(&r.cast).unwrap_or_default().contains("started") {
+        assert!(Instant::now() < deadline, "no output recorded");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Let the pipe fill up so the recorder is stuck on the host side.
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    r.hangup();
+    let status = r.finish();
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert_eq!(status, 128 + libc::SIGHUP);
+    let ev = events(&r.cast);
+    assert_eq!(ev.last().unwrap().0, "x");
+    assert!(!output_text(&ev).contains("after"));
+}
+
+const EFFECTS_CHILD: &str = "CINELOG_REC_TEST_EFFECTS_CHILD";
+
+fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ok() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Child side of [`cwd_and_cmdline_follow_the_shell`]: a no-op in a normal test run.
+#[test]
+fn process_effects_child() {
+    let Some(dirs) = std::env::var_os(EFFECTS_CHILD) else {
+        return;
+    };
+    let dirs = dirs.into_string().unwrap();
+    let (a, b) = dirs.split_once(':').unwrap();
+    let comm = std::fs::read("/proc/self/comm").unwrap();
+    let mut r = start(
+        &format!(
+            r#"
+mark '{{"v":1,"k":"cmd","sh":1,"n":1,"typed":"cd a","cwd":"{a}"}}'
+echo READY1
+read go
+mark '{{"v":1,"k":"done","sh":1,"n":1,"exit":0,"cwd":"{b}"}}'
+echo READY2
+read go
+exec sleep 30
+"#
+        ),
+        Opts {
+            effects: ProcessEffects {
+                mirror_cmdline: true,
+                mirror_cwd: true,
+                ignore_job_signals: false,
+            },
+            ..Opts::default()
+        },
+    );
+    let cwd = || std::fs::read_link("/proc/self/cwd").unwrap();
+    r.wait_output("READY1");
+    wait_for("cwd of the cmd marker", || cwd() == Path::new(a));
+    r.send("go\n");
+    r.wait_output("READY2");
+    wait_for("cwd of the done marker", || cwd() == Path::new(b));
+    r.send("go\n");
+    // The shell's pgrp now runs `sleep`: the recorder's own cmdline shows it (tmux
+    // automatic-rename reads it), while comm stays the same for detection.
+    wait_for("cmdline mirroring", || {
+        std::fs::read("/proc/self/cmdline").unwrap().starts_with(b"sleep\0")
+    });
+    assert_eq!(std::fs::read("/proc/self/comm").unwrap(), comm);
+    r.hangup();
+    assert_eq!(r.finish(), 128 + libc::SIGHUP);
+    println!("EFFECTS-OK");
+}
+
+/// §5.7 cwd and name mirroring are process-wide, so they run in a re-executed copy of
+/// this test binary.
+#[test]
+fn cwd_and_cmdline_follow_the_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let (a, b) = (base.join("a"), base.join("b"));
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::process_effects_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(EFFECTS_CHILD, format!("{}:{}", a.display(), b.display()))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("EFFECTS-OK"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

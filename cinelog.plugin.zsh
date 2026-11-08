@@ -115,11 +115,31 @@ _cl_parse_opts() {   # CINELOG_OPTS: k=v pairs joined by ',', see PROTOCOL.md §
   done
 }
 
+# Disabled, yet maybe started by a recorder (the switch appeared after its check): the nonce
+# fd and the hand-over variables must still not reach children (PROTOCOL.md §6.2).
+# CINELOG_DISABLE itself stays exported for them.
+_cl_drop_handover() {
+  emulate -L zsh
+  if [[ $CINELOG_NONCE_FD == <-> && $CINELOG_REC_PID == $PPID ]] && (( CINELOG_NONCE_FD > 2 )) &&
+     [[ -e /proc/$$/fd/$CINELOG_NONCE_FD ]]; then
+    local fd=$CINELOG_NONCE_FD
+    exec {fd}<&-
+  fi
+  local -a v=(${(k)parameters[(I)CINELOG_*]:#CINELOG_DISABLE})
+  (( $#v )) && unset $v
+  return 0
+}
+
 _cl_start() {
   emulate -L zsh
+  local off=0
   if (( EUID == 0 )); then
-    [[ -e /etc/cinelog/disable ]] && { _cl_state=disabled; return 0; }
+    [[ -e /etc/cinelog/disable ]] && off=1
   elif [[ -n $CINELOG_DISABLE || -e ${XDG_CONFIG_HOME:-$HOME/.config}/cinelog/disable ]]; then
+    off=1
+  fi
+  if (( off )); then
+    _cl_drop_handover
     _cl_state=disabled; return 0
   fi
 
@@ -232,42 +252,49 @@ typeset -g _cl_loaded=1
 
 # ------------------------------------------------------------------------------ markers
 
-typeset -g _cl_b64a=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/
-() {   # _cl_b12[v+1]: the two base64 characters of the 12-bit value v (a 64x64 product)
+() {
   emulate -L zsh
-  local -a s=(${(s::)_cl_b64a})
+  # _cl_b12[v+1]: the two base64 characters of the 12-bit value v (a 64x64 product).
+  local -a s=(${(s::):-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/})
   typeset -ga _cl_b12=(${^s}${^s})
+  # JSON escapes of the C0 bytes and DEL; _cl_ctl lists them, the common ones first.
+  typeset -gA _cl_esc=()
+  typeset -ga _cl_ctl=($'\n' $'\t' $'\r' $'\e')
+  local -i i
+  for (( i = 0; i < 32; i++ )); do
+    _cl_esc[${(#)i}]=\\u00${(l:2::0:)$(( [##16] i ))}
+    (( i == 9 || i == 10 || i == 13 || i == 27 )) || _cl_ctl+=(${(#)i})
+  done
+  local del=$'\x7f'
+  _cl_esc[$del]='\u007F'; _cl_ctl+=($del)
 }
 
 # JSON string body of $1 in REPLY: \ and " escaped, every byte 0x00-0x1f and 0x7f as \u00XX.
+# Split and join instead of ${s//x/y}, whose cost grows with the square of the matches.
 _cl_jstr() {
-  emulate -L zsh; setopt extendedglob
-  local s=${1//\\/\\\\}
-  s=${s//\"/\\\"}
-  [[ $s == *[$'\0'-$'\x1f'$'\x7f']* ]] &&
-    s=${s//(#m)[$'\0'-$'\x1f'$'\x7f']/\\u00${(l:2::0:)$(( [##16] #MATCH ))}}
+  emulate -L zsh; setopt nomultibyte
+  local s=$1 c e
+  if [[ $s == *[\\\"]* ]]; then
+    c='\' e='\\'; s=${(pj:$e:)"${(@ps:$c:)s}"}
+    c='"' e='\"'; s=${(pj:$e:)"${(@ps:$c:)s}"}
+  fi
+  for c in "${_cl_ctl[@]}"; do
+    [[ $s == *[[:cntrl:]]* ]] || break
+    [[ $s == *$c* ]] || continue
+    e=$_cl_esc[$c]; s=${(pj:$e:)"${(@ps:$c:)s}"}
+  done
   REPLY=$s
 }
 
-# Base64 (standard alphabet, no padding) of the bytes of $1 in REPLY.
+# Base64 (standard alphabet, no padding) of the bytes of $1 in REPLY. One command per three
+# bytes: missing bytes at the end read as 0 and the surplus characters are cut off.
 _cl_b64() {
   emulate -L zsh; setopt nomultibyte
-  local -a ch=(${(s::)1})
   local o= x y z
-  local -i i n=${#ch} v
-  for (( i = 1; i + 2 <= n; i += 3 )); do
-    x=$ch[i] y=$ch[i+1] z=$ch[i+2]
-    v=$(( ( #x << 16 ) | ( #y << 8 ) | #z ))
-    o+=${_cl_b12[1+(v>>12)]}${_cl_b12[1+(v&4095)]}
+  for x y z in "${(@s::)1}"; do
+    o+=${_cl_b12[1+(#x<<4|#y>>4)]}${_cl_b12[1+((#y&15)<<8|#z)]}
   done
-  if (( n - i == 1 )); then
-    x=$ch[i] y=$ch[i+1]; v=$(( ( #x << 16 ) | ( #y << 8 ) ))
-    o+=${_cl_b12[1+(v>>12)]}${_cl_b64a[1+((v>>6)&63)]}
-  elif (( n - i == 0 )); then
-    x=$ch[i]; v=$(( #x << 16 ))
-    o+=${_cl_b12[1+(v>>12)]}
-  fi
-  REPLY=$o
+  REPLY=${o[1,(4*${#1}+2)/3]}
 }
 
 # Cuts $1 to at most $2 bytes on a UTF-8 character boundary; REPLY = result. Returns 1 if
@@ -348,8 +375,19 @@ _cl_title() {   # OSC 0: user@host: cwd [command] [session link]
   print -rn -- $'\e]0;'${t//[[:cntrl:]]##/ }$'\a'
 }
 
-_cl_preexec() {
+# The members of every cmd marker that are fixed for the life of the shell, escaped once.
+_cl_ident() {
   emulate -L zsh
+  local u
+  _cl_jstr "$USERNAME"; u=$REPLY
+  _cl_jstr "$HOST"
+  typeset -g _cl_jid=",\"user\":\"$u\",\"euid\":$EUID,\"host\":\"$REPLY\""
+  [[ -n $TMUX_PANE ]] && { _cl_jstr "$TMUX_PANE"; _cl_jid+=",\"pane\":\"$REPLY\""; }
+  return 0
+}
+
+_cl_preexec() {
+  emulate -L zsh; setopt nomultibyte   # ${#...} counts bytes
   [[ -n $_cl_nonce ]] || return 0
   _cl_now; local t=$REPLY
   if [[ $1 == ' '* ]]; then   # leading space: no command text, only a visible skip marker
@@ -359,22 +397,19 @@ _cl_preexec() {
     return 0
   fi
   local rest typed=${1:-$3} expanded=$3 trunc= et ee
-  _cl_jstr "$PWD"; rest=",\"cwd\":\"$REPLY\""
-  _cl_jstr "$USERNAME"; rest+=",\"user\":\"$REPLY\",\"euid\":$EUID"
-  _cl_jstr "$HOST"; rest+=",\"host\":\"$REPLY\""
-  [[ -n $TMUX_PANE ]] && { _cl_jstr "$TMUX_PANE"; rest+=",\"pane\":\"$REPLY\""; }
-  rest+=",\"t\":$t"
+  _cl_jstr "$PWD"; rest=",\"cwd\":\"$REPLY\"$_cl_jid,\"t\":$t"
   # typed and expanded are each capped at 16 KiB; cut further if escaping would push the
   # payload past the recorder's 64 KiB limit (an oversized marker would reach the screen).
-  setopt nomultibyte   # ${#...} below must count bytes, not characters
-  local -i lim=16384 budget=$(( 65000 - ${#rest} ))
+  # The second round scales the cap by the overflow; escaping grows a byte to at most 6, so
+  # the third round's cap always fits.
+  local -i lim=16384 budget=$(( 65000 - ${#rest} )) size round=0
   while :; do
     _cl_cut "$typed" $lim && { typed=$REPLY; trunc=1; }
     _cl_cut "$expanded" $lim && { expanded=$REPLY; trunc=1; }
     _cl_jstr "$typed"; et=$REPLY
-    _cl_jstr "$expanded"; ee=$REPLY
-    (( ${#et} + ${#ee} < budget || lim < 64 )) && break
-    (( lim /= 2 ))
+    if [[ $expanded == "$typed" ]]; then ee=$et; else _cl_jstr "$expanded"; ee=$REPLY; fi
+    (( size = ${#et} + ${#ee}, size < budget )) && break
+    (( lim = ++round == 1 ? lim * (budget - 1) / size : (budget - 1) / 12 ))
   done
   [[ -n $trunc ]] && rest+=",\"trunc\":true"
   (( _cl_n++ ))
@@ -390,6 +425,13 @@ _cl_precmd() {
   local ex=$? ps=${(j:,:)pipestatus}   # one statement: both still describe the command
   emulate -L zsh
   [[ -n $_cl_nonce ]] || return 0
+  # Loaded before a powerlevel10k instant prompt began: wait once for its cleanup (see
+  # _cl_after_instant_prompt).
+  if (( ${+__p9k_instant_prompt_active} && ! ${+_cl_waited} )) && zmodload zsh/sched 2>/dev/null; then
+    typeset -g _cl_waited=1
+    sched +0 _cl_precmd
+    return 0
+  fi
   (( ${+_cl_said_hello} )) || { typeset -g _cl_said_hello=1; _cl_hello; }
   if (( _cl_open == 1 )); then
     print -rn -- $'\e]133;D;'$ex$'\a'
@@ -448,10 +490,12 @@ _cl_check_protocol() {
   [[ ${v%%.*} == 1 ]] || print -ru2 -- "cinelog: $REPLY does not speak marker protocol 1 - run: cinelog-fetch"
 }
 
+autoload -Uz add-zsh-hook
 if [[ $_cl_state == recorded ]]; then
-  autoload -Uz add-zsh-hook
+  _cl_ident
   add-zsh-hook preexec _cl_preexec
-  add-zsh-hook precmd _cl_precmd
+  # Under a powerlevel10k instant prompt the first precmd waits (see _cl_after_instant_prompt).
+  (( ${+__p9k_instant_prompt_active} )) || add-zsh-hook precmd _cl_precmd
   add-zsh-hook zshexit _cl_zshexit
   _cl_check_protocol
 fi
@@ -506,15 +550,25 @@ function load_motd {
   else
     print
   fi
-  if [[ $_cl_opt[check_free_space] == 1 ]] && (( $+commands[df] )); then
-    local l pct mnt
-    for l in ${${(f)"$(timeout -k 2 2 df -H -l --output=pcent,target 2>/dev/null)"}[2,-1]}; do
-      l=${l##[[:space:]]#}; pct=${l%%\%*}; mnt=${l#*%[[:space:]]#}
-      [[ $pct == <-> && $mnt != /tmp/com.freerdp* ]] || continue
-      (( pct >= 90 )) &&
-        print -r -- "$c[pyellow]Running out of disk space $c[bold]$c[pyellow]\"$mnt ($c[pred]$pct%$c[pyellow])\"$c[reset]"
-    done
-  fi
+  [[ $_cl_opt[check_free_space] == 1 ]] && _cl_free_space
+  return 0
+}
+
+# Local mounts at 90 % or more. df right-aligns the percentage (" 95% /"); a hung mount
+# cannot block the prompt for more than 2 s.
+_cl_free_space() {
+  emulate -L zsh; setopt extendedglob
+  (( $+commands[df] )) || return 0
+  local -a tmo
+  (( $+commands[timeout] )) && tmo=(timeout -k 2 2)
+  local l pct mnt
+  for l in ${${(f)"$($tmo df -H -l --output=pcent,target 2>/dev/null)"}[2,-1]}; do
+    l=${l##[[:space:]]#}; pct=${l%%\%*}; mnt=${${l#*%}##[[:space:]]#}
+    [[ $pct == <-> && $mnt != /tmp/com.freerdp* ]] || continue
+    (( pct >= 90 )) &&
+      print -r -- "$_cl_c[pyellow]Running out of disk space $_cl_c[bold]$_cl_c[pyellow]\"$mnt ($_cl_c[pred]$pct%$_cl_c[pyellow])\"$_cl_c[reset]"
+  done
+  return 0
 }
 
 _cl_run() {
@@ -533,4 +587,30 @@ if (( $+functions[compdef] )); then   # compinit already ran
   autoload -Uz _cinelog && compdef _cinelog cinelog
 fi
 
-[[ -t 1 ]] && load_motd
+# powerlevel10k's instant prompt sends stdout to a capture file until its cleanup, which its
+# own first precmd (ahead of ours) queues with `sched +0`. The MOTD and the first precmd of a
+# recorded shell are queued behind it, so they reach the terminal instead of that file.
+_cl_after_instant_prompt() {
+  emulate -L zsh
+  add-zsh-hook -d precmd _cl_after_instant_prompt
+  if (( ${+__p9k_instant_prompt_active} )) && zmodload zsh/sched 2>/dev/null; then
+    sched +0 _cl_first_prompt
+  else
+    _cl_first_prompt
+  fi
+}
+_cl_first_prompt() {
+  emulate -L zsh
+  [[ -t 1 ]] && load_motd
+  if [[ $_cl_state == recorded ]]; then
+    add-zsh-hook precmd _cl_precmd
+    _cl_precmd
+  fi
+  return 0
+}
+
+if (( ${+__p9k_instant_prompt_active} )); then
+  add-zsh-hook precmd _cl_after_instant_prompt
+elif [[ -t 1 ]]; then
+  load_motd
+fi
