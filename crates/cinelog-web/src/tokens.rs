@@ -13,11 +13,11 @@
 //! created_at = 1731070000.5
 //! ```
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
+use std::io;
 use std::path::Path;
 
+use cinelog_core::registry::write_private;
 use data_encoding::{BASE32_NOPAD, HEXLOWER};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -73,28 +73,14 @@ impl TokenFile {
         }
     }
 
-    /// Atomic write (temp file + rename), mode 0600. The parent directory must exist.
+    /// Atomic write (temp file + rename, [`write_private`]), mode 0600. The parent
+    /// directory must exist.
     pub fn save(&self, path: &Path) -> Result<(), TokenError> {
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         let body = format!(
             "# cinelog tokens: sha256 of each token; the tokens themselves are never stored.\n{}",
             toml::to_string(self).map_err(|e| io::Error::other(e.to_string()))?
         );
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, path)?;
+        write_private(path, body.as_bytes())?;
         Ok(())
     }
 
@@ -207,6 +193,26 @@ mod tests {
         assert!(f.remove("alice"));
         assert!(!f.remove("alice"));
         assert_eq!(f.verify(&a.secret), None);
+    }
+
+    #[test]
+    fn save_does_not_follow_planted_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let path = dir.path().join("tokens.toml");
+        let tmp = dir.path().join(format!(".tokens.toml.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        let mut f = TokenFile::default();
+        f.add("alice", 1.0).unwrap();
+        f.save(&path).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        assert_eq!(TokenFile::load(&path).unwrap(), f);
     }
 
     #[test]

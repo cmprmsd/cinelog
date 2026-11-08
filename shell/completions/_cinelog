@@ -39,7 +39,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (link)
 _arguments "${_arguments_options[@]}" : \
-'--json[Print JSON (\`{"uuid","cast","url"}\`) instead of text]' \
+'--json[Print JSON (\`{"uuid","cast","url","state"}\`) instead of text]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -97,7 +97,7 @@ _arguments "${_arguments_options[@]}" : \
 '--since=[Not before\: a date/time (\`2026-11-01\`, \`2026-11-01T14\:00\`) or an age (\`2d\`, \`3h\`)]:WHEN:_default' \
 '--until=[Not after\: same forms as --since]:WHEN:_default' \
 '--exit=[Exit status\: a number, \`ok\` or \`fail\`]:STATUS:_default' \
-'--cwd=[Commands run in this directory (\`.\` is the current one)]:DIR:_default' \
+'--cwd=[Commands run in this directory or below it (\`.\` is the current one)]:DIR:_default' \
 '--pane=[tmux pane id (e.g. \`%3\`)]:PANE:_default' \
 '--limit=[Maximum number of results]:LIMIT:_default' \
 '(--out)-a[Also search command output]' \
@@ -554,12 +554,12 @@ esac
 _cinelog_commands() {
     local commands; commands=(
 'rec:Record a shell in a new PTY (normally exec'\''d by the zsh plugin)' \
-'link:Print the session id and cast path of the current recording' \
+'link:Print the session id, cast path and web URL of the current recording' \
 'pause:Pause recording of the current session (leaves a visible pause marker)' \
 'resume:Resume a paused or degraded recording' \
 'doctor:Diagnose the installation and the current shell' \
 'install:Install or refresh cinelog for this user, or system-wide with --team' \
-'serve:Index (and later serve) this scope'\''s casts; one instance per scope (serve.lock)' \
+'serve:Index this scope'\''s casts and serve the web UI (HTTPS); one instance per scope' \
 'search:Search commands, and with -a their output; interactive with fzf' \
 'show:Print a command (or session) with its output; the fzf preview of \`search\`' \
 'forget:Remove a command, time range or session from the index (casts are never rewritten)' \
@@ -605,12 +605,12 @@ _cinelog__subcmd__forget_commands() {
 _cinelog__subcmd__help_commands() {
     local commands; commands=(
 'rec:Record a shell in a new PTY (normally exec'\''d by the zsh plugin)' \
-'link:Print the session id and cast path of the current recording' \
+'link:Print the session id, cast path and web URL of the current recording' \
 'pause:Pause recording of the current session (leaves a visible pause marker)' \
 'resume:Resume a paused or degraded recording' \
 'doctor:Diagnose the installation and the current shell' \
 'install:Install or refresh cinelog for this user, or system-wide with --team' \
-'serve:Index (and later serve) this scope'\''s casts; one instance per scope (serve.lock)' \
+'serve:Index this scope'\''s casts and serve the web UI (HTTPS); one instance per scope' \
 'search:Search commands, and with -a their output; interactive with fzf' \
 'show:Print a command (or session) with its output; the fzf preview of \`search\`' \
 'forget:Remove a command, time range or session from the index (casts are never rewritten)' \

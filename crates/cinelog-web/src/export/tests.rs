@@ -5,7 +5,7 @@ use axum::http::{StatusCode, header};
 use cinelog_cast::{CastReader, EventCode};
 use serde_json::{Value, json};
 
-use crate::api::testkit::{Cast, Kit, Meta, uuid};
+use crate::api::testkit::{Cast, Kit, Meta, START_US, uuid};
 
 fn fixture(kit: &Kit) -> Cast {
     let mut c = Cast::new(kit.dir.path(), 1, 30, 6, &Meta::default());
@@ -101,6 +101,12 @@ async fn exports_work(kit: &Kit) {
     assert_eq!(status, StatusCode::OK);
     let (h, events) = parse_cast(kit, &cast);
     assert_eq!((h.version, h.term.cols, h.term.rows), (3, 30, 6));
+    // The slice's own start, not the session's: session 1 starts 1 s after START_US.
+    let from_us = (from * 1e6).round() as i64;
+    assert_eq!(
+        h.timestamp,
+        Some((START_US + 1_000_000 + from_us).div_euclid(1_000_000))
+    );
     assert_eq!(events[0].t_us, 0);
     assert_eq!(events[0].code, EventCode::Output);
     let full_screen = screen_after(&h, &events[..1]);

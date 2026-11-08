@@ -198,6 +198,9 @@ _cl_start() {
       # still exists and answered just now. Updates replace it by rename, never in place.
       if [[ -f $bin && -x $bin ]]; then
         (( ifd )) && _cl_p10k_release
+        # VS Code's injection points ZDOTDIR at the user's directory before it sources this
+        # .zshrc; point it back so the recorded shell runs the injection (OSC 633) again.
+        [[ $VSCODE_INJECTION == 1 && -f $VSCODE_ZDOTDIR/.zshrc ]] && export ZDOTDIR=$VSCODE_ZDOTDIR
         exec $bin rec -- $sh
       fi
       _cl_warn "not recording: $bin vanished before it could start" ;;

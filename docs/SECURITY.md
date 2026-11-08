@@ -51,6 +51,11 @@ To keep something out:
 | Registry (`$XDG_RUNTIME_DIR/cinelog/pts-N.json`, `/run/cinelog/`) | 0600 in 0700 directories | the recorder's user. It holds the session nonce (§4) |
 | TLS key | 0600 | the server's user |
 
+- State files (registry entries, token files, the TLS pair) are replaced atomically. A
+  fresh temp file in the same directory is created exclusively with mode 0600, never
+  through a symlink, then synced and renamed over the target, so a symlink planted at either
+  path is replaced, not followed. Registry entries are opened without following a symlink,
+  and their owner and mode are checked on the open file.
 - Databases are refused on a network or synced file system (Syncthing, NFS, …), so the index
   does not travel to other machines.
 - Old casts are imported read-only, and their files keep whatever modes they had.

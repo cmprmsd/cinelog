@@ -872,6 +872,8 @@ fn legacy_rows_and_status() {
     let mut b = IndexBatch::new(s);
     b.legacy = Some(legacy_row(&env, "old.cast", LegacyStatus::Hidden));
     w.apply(&b).unwrap();
+    // It grew after its import: a re-import's work, not backlog.
+    std::fs::write(env.cast("old.cast"), vec![b'x'; 300]).unwrap();
     // A non-UTF-8 file name keeps its bytes.
     let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"bad\xff.cast"));
     let mut failed = legacy_row(&env, "x", LegacyStatus::Failed);

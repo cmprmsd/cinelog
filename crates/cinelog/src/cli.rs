@@ -17,7 +17,7 @@ pub struct Cli {
 pub enum Command {
     /// Record a shell in a new PTY (normally exec'd by the zsh plugin)
     Rec(RecArgs),
-    /// Print the session id and cast path of the current recording
+    /// Print the session id, cast path and web URL of the current recording
     Link(LinkArgs),
     /// Pause recording of the current session (leaves a visible pause marker)
     Pause(PauseArgs),
@@ -27,7 +27,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Install or refresh cinelog for this user, or system-wide with --team
     Install(InstallArgs),
-    /// Index (and later serve) this scope's casts; one instance per scope (serve.lock)
+    /// Index this scope's casts and serve the web UI (HTTPS); one instance per scope
     Serve(ServeArgs),
     /// Search commands, and with -a their output; interactive with fzf
     Search(SearchArgs),
@@ -74,7 +74,7 @@ pub struct RecArgs {
 
 #[derive(Debug, Args)]
 pub struct LinkArgs {
-    /// Print JSON (`{"uuid","cast","url"}`) instead of text
+    /// Print JSON (`{"uuid","cast","url","state"}`) instead of text
     #[arg(long)]
     pub json: bool,
 }
@@ -176,7 +176,7 @@ pub struct SearchArgs {
     /// Exit status: a number, `ok` or `fail`
     #[arg(long, value_name = "STATUS")]
     pub exit: Option<String>,
-    /// Commands run in this directory (`.` is the current one)
+    /// Commands run in this directory or below it (`.` is the current one)
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<String>,
     /// tmux pane id (e.g. `%3`)

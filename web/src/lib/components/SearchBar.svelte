@@ -174,7 +174,8 @@
           /></label
         >
       {/if}
-      <label>cwd <input type="text" value={cur.cwd} placeholder="/exact/dir" onchange={(e) => update({ cwd: e.currentTarget.value.trim() })} /></label>
+      <label title="Commands run in this directory or below it"
+        >cwd <input type="text" value={cur.cwd} placeholder="/dir (and below)" onchange={(e) => update({ cwd: e.currentTarget.value.trim() })} /></label>
       <label>pane <input type="text" class="narrow" value={cur.pane} placeholder="%3" onchange={(e) => update({ pane: e.currentTarget.value.trim() })} /></label>
       <label class="check"
         ><input type="checkbox" checked={cur.hidden} onchange={(e) => update({ hidden: e.currentTarget.checked })} /> include hidden</label
@@ -192,12 +193,13 @@
   }
   .row {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.4rem;
     align-items: center;
     min-width: 0;
   }
   input[type='search'] {
-    flex: 1;
+    flex: 1 1 10rem;
     min-width: 6rem;
     font-family: var(--mono);
     padding: 0.4em 0.6em;
@@ -275,5 +277,26 @@
   }
   .filters .narrow {
     width: 5rem;
+  }
+  @media (max-width: 760px) {
+    input[type='search'] {
+      flex-basis: 100%;
+    }
+  }
+  /* Touch-sized controls. */
+  @media (pointer: coarse), (max-width: 760px) {
+    button,
+    input,
+    select {
+      min-height: 40px;
+    }
+    .row button {
+      min-width: 40px;
+      justify-content: center;
+    }
+    .chips .x {
+      min-width: 40px;
+      justify-content: center;
+    }
   }
 </style>

@@ -621,7 +621,10 @@ impl Searcher for MemIndex {
             let cp = st.checkpoints.get(&s.uuid);
             let indexed = cp.map_or(0, |(c, _)| c.byte_offset);
             let size = std::fs::metadata(&s.cast_path).ok().map(|m| m.len());
-            backlog += size.unwrap_or(0).saturating_sub(indexed);
+            let imported = st.legacy.values().any(|l| l.session_uuid.as_ref() == Some(&s.uuid));
+            if !imported {
+                backlog += size.unwrap_or(0).saturating_sub(indexed);
+            }
             if s.state == SessionState::Live {
                 live.push(LiveLag {
                     uuid: s.uuid.clone(),

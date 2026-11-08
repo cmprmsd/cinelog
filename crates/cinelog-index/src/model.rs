@@ -939,7 +939,7 @@ pub struct SearchFilters {
     pub since: Option<f64>,
     pub until: Option<f64>,
     pub exit: Option<ExitFilter>,
-    /// Exact command cwd (`--cwd .` is resolved by the CLI).
+    /// Command cwd: this directory and below (`--cwd .` is resolved by the CLI).
     pub cwd: Option<String>,
     /// tmux pane id (`%3`).
     pub pane: Option<String>,
@@ -1199,7 +1199,8 @@ pub struct IndexStatus {
     pub commands: u64,
     pub outputs: u64,
     pub live: Vec<LiveLag>,
-    /// Unindexed bytes over all known casts (file sizes minus checkpoint offsets).
+    /// Unindexed bytes over all known casts (file sizes minus checkpoint offsets); a
+    /// finished legacy import counts none, as its cast's growth is a new import.
     pub backlog_bytes: u64,
     pub legacy: LegacyProgress,
     pub last_error: Option<String>,

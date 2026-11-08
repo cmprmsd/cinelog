@@ -366,7 +366,7 @@ to?: number,
  */
 exit?: string, 
 /**
- * Exact command cwd.
+ * Command cwd: this directory and below (a trailing `/` is ignored).
  */
 cwd?: string, 
 /**

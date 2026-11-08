@@ -3,7 +3,7 @@
   import { api, errorText, isAbort } from '../api/client';
   import { bus } from '../api/events.svelte';
   import type { BusEvent, LiveSession, Session, Status, Tree, TreeParams } from '../api/types';
-  import { fmtTs } from '../format';
+  import { fmtBytes, fmtTs } from '../format';
   import { prefs } from '../prefs.svelte';
   import { liveHref } from '../route';
   import { router } from '../router.svelte';
@@ -210,7 +210,7 @@
     <footer class="muted status" data-testid="status">
       <span>{status.scope} · v{status.version}</span>
       <span>{status.commands.toLocaleString()} commands</span>
-      {#if status.backlog_bytes > 0}<span>indexing…</span>{/if}
+      {#if status.backlog_bytes > 0}<span title={`${fmtBytes(status.backlog_bytes)} not indexed yet`}>indexing…</span>{/if}
       {#if status.last_error}<span class="err" title={status.last_error}>indexer error</span>{/if}
       <span>started {fmtTs(status.server_started_at, prefs.utc).slice(5, 16)}</span>
     </footer>
@@ -224,6 +224,7 @@
     gap: 0.8rem;
     padding: 0.6rem;
     overflow: auto;
+    overscroll-behavior: contain;
     min-height: 0;
     height: 100%;
   }

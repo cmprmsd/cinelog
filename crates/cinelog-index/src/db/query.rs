@@ -103,6 +103,22 @@ pub(crate) fn scan_sql(kind: HitKind, op: &str, filters: &str) -> String {
     }
 }
 
+/// `s` as a literal GLOB pattern: the metacharacters `*`, `?`, `[` and `]` in brackets.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '*' | '?' | '[' | ']' => {
+                out.push('[');
+                out.push(ch);
+                out.push(']');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// SQL conditions with their numbered parameters.
 #[derive(Debug, Default)]
 struct Cond {
@@ -141,6 +157,23 @@ impl Cond {
         }
     }
 
+    /// `cwd` as a prefix (plan §8.2): the directory itself and everything below it. A
+    /// trailing `/` is ignored and `/` matches every absolute cwd.
+    fn cwd(&mut self, dir: &str) {
+        let base = dir.trim_end_matches('/');
+        if dir.is_empty() {
+            // Stored cwds are never empty (NULL instead): matches nothing, as before.
+            let p = self.bind(String::new());
+            self.push(format!("c.cwd = {p}"));
+        } else if base.is_empty() {
+            self.push("c.cwd GLOB '/*'".into());
+        } else {
+            let p = self.bind(base.to_owned());
+            let q = self.bind(format!("{}/*", glob_escape(base)));
+            self.push(format!("(c.cwd = {p} OR c.cwd GLOB {q})"));
+        }
+    }
+
     /// The §6.5 filters and the page cursor for a stream of `kind`.
     fn filters(&mut self, f: &SearchFilters, kind: HitKind, cursor: Option<Cursor>) {
         let (ts, id) = match kind {
@@ -154,16 +187,14 @@ impl Cond {
             let p = self.bind(v.clone());
             self.push(format!("ifnull(c.user, s.user) = {p}"));
         }
-        for (col, v) in [
-            ("s.host", &f.host),
-            ("s.uuid", &f.session),
-            ("s.tmux_pane", &f.pane),
-            ("c.cwd", &f.cwd),
-        ] {
+        for (col, v) in [("s.host", &f.host), ("s.uuid", &f.session), ("s.tmux_pane", &f.pane)] {
             if let Some(v) = v {
                 let p = self.bind(v.clone());
                 self.push(format!("{col} = {p}"));
             }
+        }
+        if let Some(v) = &f.cwd {
+            self.cwd(v);
         }
         if let Some(v) = f.since {
             let p = self.bind(v);
@@ -915,9 +946,12 @@ impl Searcher for SqliteSearcher {
                     .push((r.get(1)?, path_at(r, 2)?, r.get(3)?, opt_u64_at(r, 4)?));
             }
         }
+        // A finished legacy import (it has its `legacy_import` row) is a snapshot of its
+        // cast: later growth is a new import, never a resume, so it is no backlog.
         let mut q = self.conn.prepare(
             "SELECT s.id, s.uuid, s.cast_path, s.state, s.compressed, s.cast_bytes, i.part, i.byte_offset, i.updated_at
              FROM sessions s LEFT JOIN index_state i ON i.session_id = s.id WHERE s.attribution IS NOT ?1
+               AND s.id NOT IN (SELECT session_id FROM legacy_import WHERE session_id IS NOT NULL)
              ORDER BY s.started_at",
         )?;
         let mut rows = q.query([TOMBSTONE])?;
@@ -1070,6 +1104,61 @@ mod tests {
         assert!(s.partial && s.capped);
         r.deadline.set(None);
         assert_eq!(r.conn.query_row("SELECT 7", [], |row| row.get::<_, i64>(0)).unwrap(), 7);
+    }
+
+    #[test]
+    fn glob_escapes_metacharacters() {
+        assert_eq!(glob_escape("/home/a"), "/home/a");
+        assert_eq!(glob_escape("/x*y?[z]"), "/x[*]y[?][[]z[]]");
+    }
+
+    /// The cwd filter: the directory and its subdirectories, never a sibling sharing the
+    /// prefix, GLOB metacharacters literal, a trailing `/` ignored, `/` matches everything.
+    #[test]
+    fn cwd_filter_matches_subdirectories() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE commands (cwd TEXT)").unwrap();
+        let dirs = [
+            "/",
+            "/home",
+            "/home/a",
+            "/home/a/src",
+            "/home/a/src/x",
+            "/home/ab",
+            "/home/a*",
+            "/home/a*/b",
+            "/home/[a]",
+            "/home/[a]/x",
+            "/home/a?",
+            "/home/a]",
+        ];
+        for d in dirs {
+            conn.execute("INSERT INTO commands VALUES (?1)", [d]).unwrap();
+        }
+        conn.execute("INSERT INTO commands VALUES (NULL)", []).unwrap();
+        let matching = |dir: &str| -> Vec<String> {
+            let mut c = Cond::default();
+            c.cwd(dir);
+            let sql = format!("SELECT c.cwd FROM commands c{} ORDER BY c.cwd", c.where_());
+            let mut st = conn.prepare(&sql).unwrap();
+            st.query_map(params_from_iter(c.params), |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(matching("/home/a"), ["/home/a", "/home/a/src", "/home/a/src/x"]);
+        assert_eq!(matching("/home/a/"), matching("/home/a"));
+        assert_eq!(matching("/home/a/src/x"), ["/home/a/src/x"]);
+        assert_eq!(matching("/home/a*"), ["/home/a*", "/home/a*/b"]);
+        assert_eq!(matching("/home/[a]"), ["/home/[a]", "/home/[a]/x"]);
+        assert_eq!(matching("/home/a?"), ["/home/a?"]);
+        assert_eq!(matching("/home/a]"), ["/home/a]"]);
+        let mut all: Vec<String> = dirs.iter().map(|d| (*d).to_owned()).collect();
+        all.sort();
+        assert_eq!(matching("/"), all);
+        assert_eq!(matching("//"), all);
+        assert!(matching("/nowhere").is_empty());
+        assert!(matching("").is_empty());
     }
 
     /// Dropping the watchdog before its deadline never interrupts later statements.

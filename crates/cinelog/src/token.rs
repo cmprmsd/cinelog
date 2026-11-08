@@ -342,24 +342,9 @@ impl TeamCredentials {
     }
 }
 
-/// Atomic write with mode 0600.
+/// Atomic write with mode 0600 ([`cinelog_core::registry::write_private`]).
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    cinelog_core::registry::write_private(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 /// What `team-login` asks the member at the terminal.

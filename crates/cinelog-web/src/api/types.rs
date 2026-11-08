@@ -1145,7 +1145,7 @@ pub struct SearchParams {
     pub to: Option<Seconds>,
     /// A number, `ok` (0) or `fail` (non-zero).
     pub exit: Option<String>,
-    /// Exact command cwd.
+    /// Command cwd: this directory and below (a trailing `/` is ignored).
     pub cwd: Option<String>,
     /// tmux pane id (`%3`).
     pub pane: Option<String>,

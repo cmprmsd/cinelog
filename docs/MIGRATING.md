@@ -19,7 +19,7 @@ Neither path changes or deletes a recording. Old casts are only ever read.
 | `~/logs/terminal_<date>.cast` plus `.commands.log` | `~/logs/<YYYY-MM>/<host>_<time>_<id>.cast`, with the commands inside the cast as markers |
 | `/root/logs/<SUDO_USER>/…` from root's own zim setup | The same directory, now written by the root-owned team install (`install --team`) |
 | `hist [-a] TERM` (Python, docopt) | `cinelog search [-a] TERM` (native, with fzf) |
-| `here` and `~/.zsh_history.d/` | `cinelog search --cwd .`. The old directory is left alone |
+| `here` and `~/.zsh_history.d/` | `cinelog search --cwd .` (this directory and below). The old directory is left alone |
 | `http_server.py` on `http://<host>:<10000+uid>/?token=…` | `cinelog serve` on **https**://`<host>:<10000+uid>`/. The token is typed once, then an HttpOnly cookie is used. No token ever appears in a URL |
 | `~/.config/cinelog/cinelog-settings.conf` | `~/.config/cinelog/config.toml`. `install` migrates the old file once and leaves it in place |
 | `CINELOG_AUTH_UUID` | Not reused (it leaked into recordings). `install` prints a new token |

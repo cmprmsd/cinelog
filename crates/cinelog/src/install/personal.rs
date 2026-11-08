@@ -10,6 +10,8 @@ use cinelog_core::config::legacy;
 use cinelog_core::location;
 use cinelog_core::paths::EnvSnapshot;
 use cinelog_proto::NestedMode;
+use cinelog_web::hosts::HostAllowlist;
+use cinelog_web::tls::{self, RegenReason, TlsOptions};
 
 use super::fsutil::{self, Outcome, Symlinks, pretty};
 use super::{Steps, UserManager, old_server, restart, user_unit_file};
@@ -98,13 +100,53 @@ pub fn install(env: EnvSnapshot, opts: &Options, steps: &mut Steps) -> Result<Ct
     let (exe, linked) = link_binary(&ctx.env, opts.exe.as_deref(), steps)?;
     let port = old_server::persisted_port(cfg.legacy_port, &p.migrated_port_file());
     stop_old_server(&ctx.env, &opts.proc_root, port, steps);
-    install_unit(&ctx.env, (!linked).then_some(exe.as_path()), &opts.manager, steps)?;
+    let replaced = certificate(&ctx, steps);
+    install_unit(
+        &ctx.env,
+        (!linked).then_some(exe.as_path()),
+        &opts.manager,
+        replaced,
+        steps,
+    )?;
     match crate::token::ensure_personal(&ctx) {
         Ok(Some(t)) => steps.done(format!("web login token for {} (shown once): {}", t.name, t.secret)),
         Ok(None) => {}
         Err(e) => steps.warn(format!("web login token: {e:#}")),
     }
     Ok(ctx)
+}
+
+/// Creates the web server's certificate now (or checks the existing one, as the server
+/// does on start, regenerating it under the same rules) and prints its fingerprint, the
+/// one the browser shows on its warning page. A failure only warns: the server creates the
+/// certificate itself on its first start. Returns whether an existing certificate was
+/// replaced, so a running server is restarted onto it.
+fn certificate(ctx: &Ctx, steps: &mut Steps) -> bool {
+    let web = ctx.web_context();
+    let opts = TlsOptions::from_context(&web, HostAllowlist::new(&web).cert_names());
+    tls::install_provider();
+    match tls::load_or_create(&opts) {
+        Ok(m) => {
+            let origin = match (m.info.self_signed, m.regenerated) {
+                (false, _) => "configured",
+                (true, Some(_)) => "new self-signed",
+                (true, None) => "self-signed",
+            };
+            steps.done(format!(
+                "certificate fingerprint: {} ({origin}, {})",
+                m.info.fingerprint,
+                pretty(&m.info.cert_path, &ctx.env.home)
+            ));
+            m.regenerated.is_some_and(|r| r != RegenReason::Missing)
+        }
+        Err(e) => {
+            steps.warn(format!(
+                "could not prepare the web server certificate ({e}); the server creates one on start, \
+                 see `cinelog tls show`"
+            ));
+            false
+        }
+    }
 }
 
 /// Stops the old plugin's python viewer and checks that nothing else holds the port it
@@ -146,8 +188,15 @@ fn render_unit(exec: Option<&Path>) -> String {
     UNIT.replacen(UNIT_EXEC, &format!("ExecStart=\"{path}\" "), 1)
 }
 
-/// Writes the user unit and, when the user manager reads it, enables and starts it.
-fn install_unit(env: &EnvSnapshot, exec: Option<&Path>, manager: &UserManager, steps: &mut Steps) -> Result<()> {
+/// Writes the user unit and, when the user manager reads it, enables and starts it; a
+/// running server is restarted when the unit changed or `new_cert` replaced its certificate.
+fn install_unit(
+    env: &EnvSnapshot,
+    exec: Option<&Path>,
+    manager: &UserManager,
+    new_cert: bool,
+    steps: &mut Steps,
+) -> Result<()> {
     let unit = user_unit_file(env);
     let dir = unit.parent().expect("the unit file has a directory");
     fsutil::ensure_dir_with(dir, 0o755, Symlinks::FollowOwnedBy(env.euid))?;
@@ -164,10 +213,15 @@ fn install_unit(env: &EnvSnapshot, exec: Option<&Path>, manager: &UserManager, s
             "the systemd user manager does not read {}: not enabled (recorded shells start `cinelog serve` themselves)",
             pretty(dir, &env.home)
         ));
+        if new_cert {
+            steps.note("a running `cinelog serve` keeps the old certificate until it restarts");
+        }
         return Ok(());
     }
     if changed {
         manager.systemctl(&["--user", "daemon-reload"], steps);
+    }
+    if changed || new_cert {
         manager.systemctl(&["--user", "try-restart", "cinelog.service"], steps);
     }
     manager.systemctl(&["--user", "enable", "--now", "cinelog.service"], steps);
@@ -457,6 +511,44 @@ mod tests {
         let err = refresh_with(env, &no_manager(), Some(&new), &mut steps).unwrap_err();
         assert!(err.to_string().contains("not restarted"), "{err}");
         assert_eq!(crate::serve::lock::holder_pid(&runtime), Some(holder));
+    }
+
+    #[test]
+    fn the_certificate_is_created_once_and_its_fingerprint_printed() {
+        let d = tempfile::tempdir().unwrap();
+        let env = test_env(d.path());
+        let opts = Options {
+            migrate: false,
+            exe: Some(d.path().join("module/bin/cinelog")),
+            ..test_options(d.path())
+        };
+        let fingerprint = |steps: &Steps| {
+            let text = steps.to_string();
+            text.lines()
+                .find_map(|l| l.split("certificate fingerprint: ").nth(1))
+                .and_then(|r| r.split(' ').next())
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{text}"))
+        };
+        let mut steps = Steps::default();
+        let ctx = install(env.clone(), &opts, &mut steps).unwrap();
+        assert!(steps.to_string().contains("new self-signed"), "{steps}");
+        let first = fingerprint(&steps);
+        let web = ctx.web_context();
+        let tls_opts = TlsOptions::from_context(&web, Vec::new());
+        let info = tls::inspect(&tls_opts).unwrap().expect("a certificate in the TLS dir");
+        assert_eq!(info.fingerprint, first);
+        assert!(info.cert_path.starts_with(d.path()), "{}", info.cert_path.display());
+
+        // A second install keeps it, and restarts nothing for it.
+        let mut again = Steps::default();
+        install(env, &opts, &mut again).unwrap();
+        assert_eq!(fingerprint(&again), first);
+        let text = again.to_string();
+        assert!(
+            !text.contains("new self-signed") && !text.contains("old certificate"),
+            "{text}"
+        );
     }
 
     #[test]

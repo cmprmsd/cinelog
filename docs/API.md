@@ -213,7 +213,8 @@ parent's `children`. Filters: `from`/`to` (sessions active in the window: starte
   commands (with the filters).
 - `in`: `cmd` (typed, expanded, cwd; default), `out` (output chunks) or `both`.
 - Filters: `user`, `host`, `from`/`to` (`ts`, inclusive), `exit` (`<n>`, `ok`, `fail`;
-  `null` exits never match `fail`), `cwd` (exact), `pane`, `session`, `hidden`.
+  `null` exits never match `fail`), `cwd` (prefix: that directory and its subdirectories;
+  a trailing `/` is ignored, `/` matches every cwd), `pane`, `session`, `hidden`.
 - `limit` 1–500, default 50; `cursor`.
 - Order: newest `ts` first. `partial`: a term under 3 characters ran the 500 ms
   newest-first scan and stopped early. `capped`: more than 5000 candidates, refine.
@@ -319,7 +320,8 @@ avt dump), so a request reads one segment's bytes from the cast (zstd parts via
 `Content-Disposition: attachment; filename="cinelog-<uuid8>-<from>-<to>.<ext>"`:
 - `cast` (`application/x-asciicast`): a standalone v3 slice: header, a `t=0` `o` event with
   the avt dump at `from`, then the events up to `to` (intervals; label rewrite and masking
-  as in §6.1). It plays in asciinema-player on its own.
+  as in §6.1). It plays in asciinema-player on its own. The header `timestamp` is the
+  slice's start (session start + `from`) floored to whole seconds, like the recorder's.
 - `txt` (`text/plain; charset=utf-8`): the rendered terminal rows of the range.
 - `html` (`text/html; charset=utf-8`): one self-contained document. Every character from
   the cast is escaped; SGR colours and attributes become inline-styled spans (whitelist);

@@ -12,13 +12,14 @@
 //! - [`inspect`] (`cinelog tls show`, `doctor`): the current cert's facts, `None` if there
 //!   is none; never creates anything.
 
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{self, Write as _};
+use std::fs::{self, DirBuilder};
+use std::io;
 use std::net::IpAddr;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use cinelog_core::registry;
 use jiff::ToSpan as _;
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
@@ -402,28 +403,10 @@ fn san_of(name: &str) -> Option<SanType> {
     }
 }
 
-/// Atomic write (temp file + rename) with mode 0600.
+/// Atomic write (temp file + rename) with mode 0600; never follows a symlink at `path` or
+/// at the temp path ([`registry::write_private`]).
 fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let write = || -> io::Result<()> {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    };
-    write().map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        io_at(path, e)
-    })
+    registry::write_private(path, data).map_err(|e| io_at(path, e))
 }
 
 fn io_at(path: &Path, e: io::Error) -> WebError {
@@ -506,6 +489,28 @@ mod tests {
         // A name that went away is still covered; only a new one triggers a regeneration.
         let fewer = opts(dir.path(), &["box", "127.0.0.1"]);
         assert_eq!(load_or_create(&fewer).unwrap().regenerated, None);
+    }
+
+    #[test]
+    fn writes_do_not_follow_planted_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = opts(dir.path(), &["box"]);
+        fs::create_dir(&o.dir).unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let (c, k) = o.self_signed_paths();
+        let tmp = o.dir.join(format!(".key.pem.{}.tmp", std::process::id()));
+        for link in [&c, &k, &tmp] {
+            std::os::unix::fs::symlink(&victim, link).unwrap();
+        }
+        load_or_create(&o).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        for p in [&c, &k] {
+            let meta = fs::symlink_metadata(p).unwrap();
+            assert!(meta.is_file(), "{}", p.display());
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
     }
 
     /// Regression: the validity was 826 days (yesterday until today + 825), which Apple

@@ -12,7 +12,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -141,7 +141,7 @@ pub enum RegistryError {
     Io { path: PathBuf, source: std::io::Error },
     #[error("registry entry {path} is malformed: {source}")]
     Malformed { path: PathBuf, source: serde_json::Error },
-    #[error("registry entry {0} is not owned by us or is accessible to others")]
+    #[error("registry entry {0} is not a regular file owned by us, or is accessible to others")]
     Insecure(PathBuf),
 }
 
@@ -216,47 +216,44 @@ impl Registry {
             })
     }
 
-    /// Atomically writes the entry for `key` with mode 0600.
+    /// Atomically writes the entry for `key` with mode 0600 ([`write_private`]).
     pub fn write(&self, key: &TtyKey, entry: &RegistryEntry) -> Result<PathBuf, RegistryError> {
         let path = self.path_for(key);
-        let tmp = self
-            .dir
-            .join(format!(".{}.{}.tmp", key.file_name(), std::process::id()));
+        let json = serde_json::to_vec(entry).expect("registry entries serialize");
+        write_private(&path, &json).map_err(|source| RegistryError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
+    /// Reads the entry for `key`. `Ok(None)` if there is none. The file must be a regular
+    /// file (a symlink is not followed) owned by the euid and not accessible to group or
+    /// others; the checks are made on the open file, so it cannot be swapped in between.
+    pub fn read(&self, key: &TtyKey) -> Result<Option<RegistryEntry>, RegistryError> {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let path = self.path_for(key);
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+            .open(&path);
+        let mut f = match opened {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(RegistryError::Insecure(path)),
+            Err(source) => return Err(RegistryError::Io { path, source }),
+        };
         let io = |source| RegistryError::Io {
             path: path.clone(),
             source,
         };
-        let json = serde_json::to_vec(entry).expect("registry entries serialize");
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(io)?;
-        f.write_all(&json).map_err(io)?;
-        drop(f);
-        fs::rename(&tmp, &path).map_err(io)?;
-        Ok(path)
-    }
-
-    /// Reads the entry for `key`. `Ok(None)` if there is none. The file must be owned by
-    /// the euid and not accessible to group or others.
-    pub fn read(&self, key: &TtyKey) -> Result<Option<RegistryEntry>, RegistryError> {
-        let path = self.path_for(key);
-        let meta = match fs::metadata(&path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(RegistryError::Io { path, source }),
-        };
-        use std::os::unix::fs::MetadataExt;
-        if meta.uid() != nix::unistd::geteuid().as_raw() || meta.permissions().mode() & 0o077 != 0 {
+        let meta = f.metadata().map_err(io)?;
+        if !meta.is_file() || meta.uid() != nix::unistd::geteuid().as_raw() || meta.mode() & 0o077 != 0 {
             return Err(RegistryError::Insecure(path));
         }
-        let bytes = fs::read(&path).map_err(|source| RegistryError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let mut bytes = Vec::new();
+        f.read_to_end(&mut bytes).map_err(io)?;
         serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|source| RegistryError::Malformed { path, source })
@@ -305,8 +302,46 @@ impl Registry {
     }
 }
 
+/// Replaces `path` atomically with a 0600 file holding `bytes`, for cinelog's private state
+/// files (registry entries, token files, the TLS pair). The temp file in the same directory
+/// is created exclusively and never through a symlink: `.<name>.<pid>.tmp`, or a random
+/// name when that exists (another thread's write, a crash leftover, a planted link). It is
+/// synced before the rename, which replaces a symlink at `path` instead of following it.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let pid = std::process::id();
+    let mut tmp = path.with_file_name(format!(".{name}.{pid}.tmp"));
+    let mut tries = 0;
+    let mut f = loop {
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&tmp);
+        match opened {
+            Ok(f) => break f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => {
+                tries += 1;
+                let r = getrandom::u64().map_err(|e| std::io::Error::other(e.to_string()))?;
+                tmp = path.with_file_name(format!(".{name}.{pid}.{r:016x}.tmp"));
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
+    drop(f);
+    let res = written.and_then(|()| fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
     use super::*;
 
     struct Probe(u64);
@@ -393,6 +428,43 @@ mod tests {
         let path = reg.write(&TtyKey::Pts(1), &entry()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(reg.read(&TtyKey::Pts(1)), Err(RegistryError::Insecure(_))));
+    }
+
+    #[test]
+    fn symlinks_are_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path().join("reg"));
+        reg.ensure_dir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+        let key = TtyKey::Pts(3);
+        let path = reg.path_for(&key);
+        let tmp = reg
+            .dir()
+            .join(format!(".{}.{}.tmp", key.file_name(), std::process::id()));
+        symlink(&victim, &tmp).unwrap();
+        symlink(&victim, &path).unwrap();
+        assert!(matches!(reg.read(&key), Err(RegistryError::Insecure(_))));
+
+        reg.write(&key, &entry()).unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file());
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        assert_eq!(reg.read(&key).unwrap(), Some(entry()));
+        // The fallback temp name was renamed away: only the entry and the planted link.
+        assert_eq!(fs::read_dir(reg.dir()).unwrap().count(), 2);
+
+        symlink(&path, reg.path_for(&TtyKey::Pts(4))).unwrap();
+        assert!(matches!(reg.read(&TtyKey::Pts(4)), Err(RegistryError::Insecure(_))));
+    }
+
+    #[test]
+    fn fifo_entry_is_rejected_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        nix::unistd::mkfifo(&reg.path_for(&TtyKey::Pts(6)), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert!(matches!(reg.read(&TtyKey::Pts(6)), Err(RegistryError::Insecure(_))));
     }
 
     #[test]

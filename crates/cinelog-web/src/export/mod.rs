@@ -181,6 +181,15 @@ fn for_each_event(s: &Loaded, o: &Origin, r: Range, mut each: impl FnMut(OutEven
     Ok(())
 }
 
+/// The v3 header timestamp of a slice starting `from_us` into a session started at
+/// `started_at` (epoch seconds, µs precision): the start of the slice floored to whole
+/// seconds, as the recorder floors `start_epoch_us` for its own header, so event `t` of the
+/// slice happened at most 1 s after `timestamp + t`, never before it.
+fn slice_timestamp(started_at: f64, from_us: u64) -> i64 {
+    let start_us = (started_at * 1e6).round() as i64;
+    start_us.saturating_add(from_us as i64).div_euclid(1_000_000)
+}
+
 /// A standalone v3 cast of the range: the terminal at `from` as one output event at t=0.
 fn write_cast(s: &Loaded, o: Origin, r: Range, sink: &mut Sink) -> Result<()> {
     let header = s.files.header()?;
@@ -192,7 +201,9 @@ fn write_cast(s: &Loaded, o: Origin, r: Range, sink: &mut Sink) -> Result<()> {
         let mut h = header.clone();
         h.term.cols = size.0;
         h.term.rows = size.1;
-        h.timestamp = h.timestamp.map(|ts| ts + (r.from_us / 1_000_000) as i64);
+        h.timestamp = h
+            .timestamp
+            .map(|_| slice_timestamp(s.row.session.started_at, r.from_us));
         sink.write(&header_line(&h))?;
         v3_line(sink.buf(), 0, &OutEvent::new(0, 'o', vt.dump()));
         sink.maybe_flush()
@@ -341,5 +352,16 @@ mod unit {
         };
         assert!(r.contains(5) && r.contains(10) && !r.contains(11) && !r.contains(4));
         assert!(r.after(11) && !r.after(10));
+    }
+
+    #[test]
+    fn slice_timestamps() {
+        // 0.7 s + 1.6 s past a whole second is 2.3 s past it: floor(start) + floor(from)
+        // would say 1 s.
+        assert_eq!(slice_timestamp(1_731_070_000.7, 1_600_000), 1_731_070_002);
+        assert_eq!(slice_timestamp(1_731_070_000.7, 0), 1_731_070_000);
+        assert_eq!(slice_timestamp(1_731_070_000.7, 300_000), 1_731_070_001);
+        assert_eq!(slice_timestamp(1_731_070_000.0, 999_999), 1_731_070_000);
+        assert_eq!(slice_timestamp(1_731_070_000.123_456, 876_544), 1_731_070_001);
     }
 }

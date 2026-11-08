@@ -95,6 +95,12 @@ const MIME: Record<string, string> = {
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
+/** The `cwd` filter: the directory itself or anything below it (whole path components). */
+function underDir(cwd: string, dir: string): boolean {
+  const base = dir.replace(/\/+$/, '');
+  return cwd === dir || cwd === base || cwd.startsWith(`${base}/`);
+}
+
 function selfSigned(): { key: Buffer; cert: Buffer; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'cinelog-e2e-'));
   const key = join(dir, 'key.pem');
@@ -201,7 +207,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       if (sp.get('session') && s.uuid !== sp.get('session')!.toLowerCase()) continue;
       for (const c of f.commands) {
         if (isForgottenCmd(s.uuid, c.seq)) continue;
-        if (sp.get('cwd') && c.cwd !== sp.get('cwd')) continue;
+        if (sp.get('cwd') && !underDir(c.cwd, sp.get('cwd')!)) continue;
         if (exit === 'ok' && c.exit !== 0) continue;
         if (exit === 'fail' && (c.exit === null || c.exit === 0)) continue;
         if (exit && exit !== 'ok' && exit !== 'fail' && c.exit !== Number(exit)) continue;

@@ -156,7 +156,7 @@ stay allowed. Every pause or skip leaves a visible mark in the timeline.
 | Command | What it does |
 |---|---|
 | `cinelog search [-a] [TERM]` | Searches commands (and with `-a` also their output) in fzf. The preview shows the command and its output. Enter prints the web link, and opens it on a local desktop. `--print` and `--json` skip fzf |
-| `cinelog search --cwd . TERM` | Only commands run in this directory. Also takes `--user`, `--host`, `--since 2d`, `--until`, `--exit fail`, `--pane %3` |
+| `cinelog search --cwd . TERM` | Only commands run in this directory and below. Also takes `--user`, `--host`, `--since 2d`, `--until`, `--exit fail`, `--pane %3` |
 | `cinelog search --team TERM` | Searches the team server's history over HTTPS (after `cinelog token team-login`) |
 | `cinelog show <id>` | Prints one command with its output (`<uuid>:<seq>`), or a whole session |
 | `cinelog link [--json]` | Prints the session uuid, cast path and web URL of the current shell |
@@ -320,8 +320,8 @@ cargo build --release --locked                                # target/release/c
 - **Forgetting is not erasing.** `forget` removes rows from the index and masks playback and
   export. It never rewrites a cast: root and the cast's owner can still read the file.
   There is no automatic secret redaction ([SECURITY.md](docs/SECURITY.md#3-forget)).
-- **`hist` and `here` are gone.** Use `cinelog search` and `cinelog search --cwd .`. The old
-  per-folder history in `~/.zsh_history.d/` is left alone.
+- **`hist` and `here` are gone.** Use `cinelog search` and `cinelog search --cwd .` (this directory
+  and below). The old per-folder history in `~/.zsh_history.d/` is left alone.
 
 ## Documentation
 
