@@ -296,9 +296,12 @@ jobs:
       - if: steps.probe.outputs.present == 'true'
         working-directory: crates/cinelog-proto
         run: |
+          # The prebuilt cargo-fuzz defaults to the target it was built for (musl), and the
+          # sanitizers need a dynamically linked libc: fuzz for the runner's own target.
+          host=$(rustc +nightly -vV | sed -n 's/^host: //p')
           for t in $(cargo +nightly fuzz list); do
             echo "::group::fuzz $t"
-            cargo +nightly fuzz run "$t" -- -max_total_time=300
+            cargo +nightly fuzz run --target "$host" "$t" -- -max_total_time=300
             echo "::endgroup::"
           done
       - if: failure() && steps.probe.outputs.present == 'true'
@@ -328,3 +331,6 @@ jobs:
         env:
           CINELOG_IT_BIN: ${{ github.workspace }}/target/release/cinelog
           CINELOG_IT_BIN_TESTHOOKS: ${{ github.workspace }}/target/testhooks/release/cinelog
+          # The median budget (35 ms) still applies; a shared runner's p95 has a long tail of
+          # slow process starts (72 ms added p95 next to 20 ms added median on 2026-11-09).
+          CINELOG_IT_B2_P95_BUDGET_MS: 120

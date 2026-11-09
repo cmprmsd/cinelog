@@ -2,10 +2,14 @@
 //! `cargo test --release -p cinelog-it -- --ignored --test-threads=1 bench_`, with
 //! `CINELOG_IT_BIN` pointing at a release build (otherwise a debug recorder is measured).
 //!
-//! - B1: `cat` of 141 MB through a headless `cinelog rec`, median of 3, within 10% of the
-//!   baseline `CINELOG_IT_B1_BASELINE_MS` (default 990, the [rec] spike).
+//! - B1: `cat` of 141 MB through a headless `cinelog rec`, median of 5, within 25% of the same
+//!   `cat` through util-linux `script` (a pty plus a log file, timed in the same run, so the
+//!   budget holds on any machine: the dev machine measured +6%). `CINELOG_IT_B1_BASELINE_MS`
+//!   replaces the reference with a fixed baseline (then within 10%).
 //! - B2: time to the first prompt of an interactive zsh on a pty, with and without cinelog
-//!   (the kill switch), 20 runs each; the p95 difference must be ≤ 35 ms.
+//!   (the kill switch), 20 runs each; the median difference must be ≤ 35 ms, and so must the
+//!   p95 difference unless `CINELOG_IT_B2_P95_BUDGET_MS` allows more (shared CI runners have
+//!   a long tail of slow process starts).
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -16,6 +20,9 @@ use cinelog_it::{Cast, Need, Sandbox, need, procs};
 
 const B1_BYTES: u64 = 141_000_000;
 const B2_RUNS: usize = 20;
+const B1_RUNS: usize = 5;
+/// cinelog's median may exceed `script`'s by this factor (it also parses and escapes output).
+const B1_REFERENCE_FACTOR: f64 = 1.25;
 const B2_BUDGET_MS: f64 = 35.0;
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -32,7 +39,7 @@ fn p95(mut v: Vec<f64>) -> f64 {
 #[test]
 #[ignore = "nightly benchmark (B1)"]
 fn bench_b1_throughput() {
-    need!(Need::Recorder);
+    need!(Need::Script, Need::Recorder);
     let sb = Sandbox::new().unwrap();
     let data = sb.work.join("data.b64");
     let generate = format!(
@@ -42,31 +49,27 @@ fn bench_b1_throughput() {
     );
     assert!(Command::new("sh").args(["-c", &generate]).status().unwrap().success());
     let bin = sb.bin.clone().unwrap();
-    let mut runs = Vec::new();
-    for _ in 0..3 {
-        let start = Instant::now();
-        let mut child = Command::new(&bin)
-            .env_clear()
+    let cat = format!("cat {}", data.display());
+    let typescript = sb.work.join("typescript");
+    let fixed: Option<f64> = std::env::var("CINELOG_IT_B1_BASELINE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let (mut runs, mut reference) = (Vec::new(), Vec::new());
+    // Interleaved, so a slow phase of a shared runner hits both sides alike.
+    for _ in 0..B1_RUNS {
+        let mut rec = Command::new(&bin);
+        rec.env_clear()
             .envs(sb.env())
             .args(["rec", "--", "/bin/sh", "-c"])
-            .arg(format!("cat {}", data.display()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let status = loop {
-            if let Some(st) = child.try_wait().unwrap() {
-                break st;
-            }
-            if start.elapsed() > Duration::from_secs(120) {
-                let _ = child.kill();
-                panic!("B1 run did not finish within 120 s");
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        runs.push(start.elapsed().as_secs_f64() * 1000.0);
-        assert!(status.success(), "{status:?}");
+            .arg(&cat);
+        runs.push(timed_run(rec));
+        if fixed.is_none() {
+            let mut script = Command::new("script");
+            script.env_clear().envs(sb.env()).arg("-qec").arg(&cat).arg(&typescript);
+            reference.push(timed_run(script));
+        }
     }
+    let _ = std::fs::remove_file(&typescript);
     for p in find_casts(&sb.logs) {
         let last = std::fs::read(&p).unwrap();
         let tail = String::from_utf8_lossy(&last[last.len().saturating_sub(200)..]).into_owned();
@@ -77,16 +80,37 @@ fn bench_b1_throughput() {
         );
         std::fs::remove_file(p).unwrap();
     }
-    let baseline: f64 = std::env::var("CINELOG_IT_B1_BASELINE_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(990.0);
     let m = median(runs.clone());
-    eprintln!("B1: runs {runs:.0?} ms, median {m:.0} ms, baseline {baseline:.0} ms");
-    assert!(
-        m <= baseline * 1.10,
-        "B1 median {m:.0} ms exceeds baseline {baseline:.0} ms + 10%"
-    );
+    let (limit, what) = match fixed {
+        Some(b) => (b * 1.10, format!("baseline {b:.0} ms + 10%")),
+        None => {
+            let r = median(reference.clone());
+            (
+                r * B1_REFERENCE_FACTOR,
+                format!("script's median {r:.0} ms (runs {reference:.0?}) x {B1_REFERENCE_FACTOR}"),
+            )
+        }
+    };
+    eprintln!("B1: runs {runs:.0?} ms, median {m:.0} ms, limit {limit:.0} ms ({what})");
+    assert!(m <= limit, "B1 median {m:.0} ms exceeds {what}");
+}
+
+/// Wall time of one B1 run in ms; output goes to /dev/null, as with `cat > /dev/null`.
+fn timed_run(mut cmd: Command) -> f64 {
+    let start = Instant::now();
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            let _ = child.kill();
+            panic!("B1 run did not finish within 120 s");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(status.success(), "{status:?}");
+    start.elapsed().as_secs_f64() * 1000.0
 }
 
 /// Time from spawning `zsh -i` on a fresh pty (`script`) to the first prompt on it.
@@ -153,14 +177,22 @@ fn bench_b2_startup() {
         "the measured shells were recorded ({recorded} casts)"
     );
     let (a, b) = (p95(without.clone()), p95(with.clone()));
+    let added = median(with) - median(without);
+    let p95_budget: f64 = std::env::var("CINELOG_IT_B2_P95_BUDGET_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(B2_BUDGET_MS);
     eprintln!(
-        "B2: p95 without {a:.1} ms, with {b:.1} ms, added {:.1} ms (median added {:.1} ms)",
-        b - a,
-        median(with) - median(without)
+        "B2: p95 without {a:.1} ms, with {b:.1} ms, added {:.1} ms (median added {added:.1} ms)",
+        b - a
     );
     assert!(
-        b - a <= B2_BUDGET_MS,
-        "cinelog adds {:.1} ms p95 (budget {B2_BUDGET_MS} ms)",
+        added <= B2_BUDGET_MS,
+        "cinelog adds {added:.1} ms median (budget {B2_BUDGET_MS} ms)"
+    );
+    assert!(
+        b - a <= p95_budget,
+        "cinelog adds {:.1} ms p95 (budget {p95_budget} ms)",
         b - a
     );
 }
