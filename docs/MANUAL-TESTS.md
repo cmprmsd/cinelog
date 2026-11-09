@@ -148,8 +148,8 @@ machine: <distro, kernel, zsh, tmux>   arm: <machine>
 | 6 web   | W1–W9     |                |       |
 ```
 
-Milestone records: [VERIFY-M1.md](VERIFY-M1.md) (recorder and plugin),
-[VERIFY-M2.md](VERIFY-M2.md) (index, real-corpus import and search),
-[VERIFY-M3.md](VERIFY-M3.md) (web and team server), [VERIFY-M4.md](VERIFY-M4.md) (live view,
-timeline, annotations, export) and [VERIFY-M5.md](VERIFY-M5.md) (1.0 release and the final
+Milestone records: [VERIFY-M1.md](dev/VERIFY-M1.md) (recorder and plugin),
+[VERIFY-M2.md](dev/VERIFY-M2.md) (index, real-corpus import and search),
+[VERIFY-M3.md](dev/VERIFY-M3.md) (web and team server), [VERIFY-M4.md](dev/VERIFY-M4.md) (live view,
+timeline, annotations, export) and [VERIFY-M5.md](dev/VERIFY-M5.md) (1.0 release and the final
 security pass).
