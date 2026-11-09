@@ -175,19 +175,20 @@ pub fn run(work: &Path, layout: &Layout, inner: &[String]) -> Result<Outcome> {
     fs::write(work.join("holder.py"), HOLDER_PY)?;
     fs::write(work.join("decoy.py"), DECOY_PY)?;
     let _ = fs::remove_file(work.join("decoy-tty"));
-    let mut cmd = Command::new("unshare");
-    cmd.args([
-        format!("--map-users=0:{uid}:1"),
-        format!("--map-users=1:{subuid}:1"),
-        format!("--map-groups=0:{gid}:1"),
-        format!("--map-groups=1:{subgid}:1"),
-        "-mpf".into(),
-        "--kill-child".into(),
-        "sh".into(),
-        "-c".into(),
-        script(layout, work, inner),
-    ])
-    .stdin(Stdio::null());
+    // The two-range maps are written with newuidmap/newgidmap directly: util-linux 2.39
+    // (Ubuntu 24.04) keeps only the last of several --map-users options, which leaves uid 0
+    // unmapped. Once `unshare` is in its new user namespace, map it; the script waits for that.
+    let outer = format!(
+        "unshare -U -mpf --kill-child sh -c \"$1\" & p=$!\n\
+         n=0; while [ \"$(readlink /proc/$p/ns/user)\" = \"$(readlink /proc/self/ns/user)\" ]; do\n\
+         n=$((n+1)); [ $n -gt 500 ] && exit 89; sleep 0.01; done\n\
+         newuidmap $p 0 {uid} 1 1 {subuid} 1 || exit 88\n\
+         newgidmap $p 0 {gid} 1 1 {subgid} 1 || exit 88\n\
+         wait $p\n"
+    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c".into(), outer, "sh".into(), script(layout, work, inner)])
+        .stdin(Stdio::null());
     let out = output_with_timeout(cmd, scaled(60.0))?;
     let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     if !out.status.success() && !text.contains(TTY_TAG) {
@@ -264,7 +265,7 @@ mod tests {
         l.hidepid = false;
         l.holder = Holder::Readable;
         let s = script(&l, w, &inner);
-        assert!(s.starts_with("mount -t proc -o rw "));
+        assert!(s.contains("\nmount -t proc -o rw "), "{s}");
         assert_eq!(s.matches("newinstance").count(), 2);
         assert!(s.contains("$IN python3 /w/decoy.py script /w/decoy-tty"));
         assert!(s.contains("$IN python3 /w/holder.py 'tmux: server' keep sh"));
