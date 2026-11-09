@@ -457,7 +457,7 @@ fn replay(path: &Path, seg: Option<&Segment>) -> Vec<String> {
         )
         .unwrap(),
     };
-    let size = |t: &cinelog_cast::TermInfo| (usize::from(t.cols), usize::from(t.rows));
+    let size = |t: &cinelog_cast::TermInfo| (usize::from(t.size().0), usize::from(t.size().1));
     let (mut cols, mut rows) = size(&r.header().term);
     let mut sizes = Vec::new();
     // The dump restores a terminal of the size at the cut: find it by replaying sizes.
@@ -467,7 +467,7 @@ fn replay(path: &Path, seg: Option<&Segment>) -> Vec<String> {
             if ev.t_us as f64 / 1e6 > s.t_start {
                 break;
             }
-            if let (EventCode::Resize, Some((c, rr))) = (ev.code, parse_resize(&ev.data)) {
+            if let (EventCode::Resize, Some((c, rr))) = (ev.code, parse_sane_resize(&ev.data)) {
                 sizes.push((usize::from(c), usize::from(rr)));
             }
         }
@@ -483,7 +483,7 @@ fn replay(path: &Path, seg: Option<&Segment>) -> Vec<String> {
         match ev.code {
             EventCode::Output => term.feed(ev.data.as_str()),
             EventCode::Resize => {
-                if let Some((c, rr)) = parse_resize(&ev.data) {
+                if let Some((c, rr)) = parse_sane_resize(&ev.data) {
                     term.resize(usize::from(c), usize::from(rr));
                 }
             }

@@ -41,6 +41,10 @@ Neither path changes or deletes a recording. Old casts are only ever read.
    zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'
    ```
 
+   If your line used the full URL (`zmodule https://github.com/cmprmsd/cinelog.git`),
+   `zimfw update` stops with "The git URL does not match". Run `zimfw reinstall` once and
+   answer `y`; local edits in the module are lost, so save them first (step 1).
+
 3. **Update and recompile.** `zimfw compile` rebuilds the `.zwc` files, so a stale compiled
    copy of the old plugin cannot shadow the new one:
 
@@ -78,7 +82,8 @@ Neither path changes or deletes a recording. Old casts are only ever read.
      listens on that port;
    - links `~/.local/bin/cinelog` and starts the user unit `cinelog.service`. Without
      systemd, the recorder starts the server itself;
-   - prints the **login token once** (the certificate comes with the server's first start;
+   - prints the web UI address and the **login token once**, with the terminal's recording
+     paused around the token (the certificate comes with the server's first start;
      `cinelog tls show` prints its fingerprint);
    - ends with `cinelog doctor`.
 

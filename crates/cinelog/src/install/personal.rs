@@ -108,9 +108,31 @@ pub fn install(env: EnvSnapshot, opts: &Options, steps: &mut Steps) -> Result<Ct
         replaced,
         steps,
     )?;
+    let url = super::web_url(
+        &ctx.config,
+        &ctx.paths,
+        cinelog_core::Scope::Personal,
+        ctx.env.uid,
+        cfg.legacy_port,
+    );
     match crate::token::ensure_personal(&ctx) {
-        Ok(Some(t)) => steps.done(format!("web login token for {} (shown once): {}", t.name, t.secret)),
-        Ok(None) => {}
+        Ok(Some(t)) => {
+            steps.done(format!(
+                "created the web login token for {} (shown below, once)",
+                t.name
+            ));
+            steps.set_finale(
+                format!(
+                    "Open {url} and sign in with this token:\n  web login token for {} (shown once): {}",
+                    t.name, t.secret
+                ),
+                true,
+            );
+        }
+        Ok(None) => steps.set_finale(
+            format!("Open {url} and sign in with your login token (`cinelog token new` replaces a lost one)."),
+            false,
+        ),
         Err(e) => steps.warn(format!("web login token: {e:#}")),
     }
     Ok(ctx)

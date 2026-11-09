@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use cinelog_cast::{
     CastReader, ClockAnchor, ClockMap, Event, EventCode, Header, PartName, PartsReader, ResumePoint, existing_part,
-    find_parts, parse_resize, scan_frames,
+    find_parts, parse_sane_resize, scan_frames,
 };
 use cinelog_proto::{CastMarker, CmdRecord, DoneRecord, SessionInfo};
 use serde::{Deserialize, Serialize};
@@ -328,7 +328,7 @@ impl CastPipeline {
         match ev.code {
             EventCode::Output => self.transcript.output(at, &ev.data),
             EventCode::Resize => {
-                if let Some((cols, rows)) = parse_resize(&ev.data) {
+                if let Some((cols, rows)) = parse_sane_resize(&ev.data) {
                     self.transcript.resize(at, cols, rows);
                 }
             }

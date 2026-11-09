@@ -338,6 +338,7 @@ fn hit(h: wire::SearchHit) -> SearchHit {
         }),
         approx: h.approx,
         confidence: h.confidence,
+        tags: h.tags,
     }
 }
 

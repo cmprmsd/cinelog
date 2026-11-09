@@ -52,6 +52,16 @@ async function open(page: Page, query = ''): Promise<void> {
 }
 
 test.describe('annotations overview', () => {
+  test('A opens the overview from a session', async ({ page }) => {
+    await page.goto(`/s/${FIX.needle}`);
+    await waitForPlayer(page);
+    await page.locator('body').click({ position: { x: 1, y: 1 } });
+    await page.keyboard.press('Shift+A');
+    await expect(page).toHaveURL(/\/annotations$/);
+    await expect(page.getByTestId('nav-annotations')).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByTestId('annotations-page')).toBeVisible();
+  });
+
   test('lists annotations newest first with author, tags and context; a row opens the session there', async ({ page }) => {
     await page.goto('/');
     const tag = unique('ov');

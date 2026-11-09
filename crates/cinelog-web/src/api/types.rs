@@ -773,6 +773,13 @@ pub struct LiveSession {
     pub detail: Option<String>,
     /// ts the current status began, when known.
     pub since: Option<Seconds>,
+    /// Paused by a nested recording: the child's scope, from the cast's `nested` marker for
+    /// `detail` (`null` otherwise, or while that marker is not found). A child of the other
+    /// scope (a TEAM `sudo -i` in a PERSONAL shell) is served by the other scope's server.
+    pub child_scope: Option<Scope>,
+    /// With `child_scope`: the child's session URL as its recorder reported it (`url` of the
+    /// marker; only when that server ran).
+    pub child_url: Option<String>,
 }
 
 /// Bus `hello`: sent first on every (re)connection; a full resync of the live sessions.
@@ -1016,6 +1023,12 @@ pub struct TimelineMark {
     pub detail: Option<String>,
     /// `nested`: the child session.
     pub child: Option<String>,
+    /// `nested`: the child's scope. A child of the other scope (a TEAM `sudo -i` in a
+    /// PERSONAL shell) is served by the other scope's server, not this one.
+    pub child_scope: Option<Scope>,
+    /// `nested`: the child's session URL as its recorder reported it (`url` of the marker;
+    /// only when that server ran).
+    pub child_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]

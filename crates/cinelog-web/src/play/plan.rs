@@ -20,7 +20,9 @@ use cinelog_index::model::{PLAYBACK_SEGMENT_BYTES, PLAYBACK_SEGMENT_SECS};
 use cinelog_proto::CastMarker;
 
 use super::session::Loaded;
-use super::source::{CastFiles, Events, Shift, StartPoint, clamp_size, parse_size, secs_to_us, sizes_at, us_to_secs};
+use super::source::{
+    CastFiles, Events, Shift, StartPoint, parse_size, plausible_size, secs_to_us, sizes_at, us_to_secs,
+};
 use super::stream::{LabelMerge, Mask, OutEvent, Rewriter, label};
 use crate::api::types::{PlayIndex, PlaySegment, PlaySegmentRef, PlaySnapshot, PlayTerm, PlayTheme};
 use crate::error::{Result, WebError};
@@ -84,9 +86,9 @@ pub(crate) fn theme(header: &cinelog_cast::Header) -> Option<PlayTheme> {
     })
 }
 
-/// A terminal of `size` (clamped, [`clamp_size`]) in the state `init` describes.
+/// A terminal of `size` ([`plausible_size`]) in the state `init` describes.
 pub(crate) fn terminal(size: (u16, u16), init: &str) -> avt::Terminal {
-    let (cols, rows) = clamp_size(size);
+    let (cols, rows) = plausible_size(size);
     let mut vt = avt::Terminal::new(usize::from(cols), usize::from(rows))
         .unwrap_or_else(|_| unreachable!("sizes are at least 1x1"));
     if !init.is_empty() {
@@ -95,7 +97,7 @@ pub(crate) fn terminal(size: (u16, u16), init: &str) -> avt::Terminal {
     vt
 }
 
-/// Feeds one served event to `vt` (output and resizes, clamped; everything else has no
+/// Feeds one served event to `vt` (output and plausible resizes; everything else has no
 /// effect).
 pub(crate) fn apply(vt: &mut avt::Terminal, size: &mut (u16, u16), ev: &OutEvent) {
     match ev.code {
@@ -134,7 +136,7 @@ fn db_start(files: &CastFiles, legacy: bool, seg: &cinelog_index::model::Segment
 impl Plan {
     pub fn build(s: &Loaded, progress: &Progress) -> Result<Self> {
         let header = s.files.header()?;
-        let size0 = clamp_size((header.term.cols, header.term.rows));
+        let size0 = header.term.size();
         let legacy = s.legacy();
 
         // Indexed segments whose dump cannot contain masked output.

@@ -162,7 +162,9 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        let (cols, rows) = crate::play::source::clamp_size((cols, rows));
+        let Some((cols, rows)) = cinelog_cast::sane_size(cols, rows) else {
+            return;
+        };
         self.vt.resize_with(usize::from(cols), usize::from(rows), &mut self.obs);
     }
 

@@ -16,6 +16,8 @@ export type Action =
   | 'forward-5'
   | 'export'
   | 'timeline'
+  | 'annotations'
+  | 'toggle-fit'
   | 'toggle-live'
   | 'annotate'
   | 'help';
@@ -42,6 +44,8 @@ const PLAIN: Record<string, Action> = {
   '.': 'forward-5',
   e: 'export',
   t: 'timeline',
+  A: 'annotations',
+  w: 'toggle-fit',
   l: 'toggle-live',
   a: 'annotate',
   '?': 'help',
@@ -83,8 +87,10 @@ export const SHORTCUTS: readonly { keys: string[]; what: string }[] = [
   { keys: ['[', ']'], what: 'Previous / next command' },
   { keys: ['Space'], what: 'Play / pause' },
   { keys: [',', '.'], what: 'Back / forward 5 s' },
+  { keys: ['w'], what: 'Fit the terminal to the screen or to the width' },
   { keys: ['e'], what: 'Export the current command' },
   { keys: ['t'], what: 'Team timeline' },
+  { keys: ['A'], what: 'Annotations overview' },
   { keys: ['+', '-'], what: 'Zoom the timeline' },
   { keys: ['l'], what: 'Switch between the recording and the live view' },
   { keys: ['a'], what: 'Annotate the current command or selection' },

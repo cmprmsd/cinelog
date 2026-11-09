@@ -64,6 +64,22 @@ _cl_pick_bin() {
   return 1
 }
 
+# REPLY = what to do without a usable binary. Root never runs a binary from a module it
+# does not trust (a member's ~/.zim checkout sourced by root's zsh), and cinelog-fetch
+# refuses to work there as root: root shells are recorded by the team install, which that
+# member runs once from their module.
+_cl_no_bin() {
+  emulate -L zsh
+  REPLY="cinelog binary missing - run: cinelog-fetch"
+  (( EUID == 0 )) && [[ -n $_cl_dir ]] && ! _cl_trusted $_cl_dir || return 0
+  local -A st
+  local b=${_cl_dir//[[:cntrl:]]/}/bin/cinelog pre=
+  if [[ ! -x $b ]] && zstat -s -H st -- $_cl_dir 2>/dev/null; then
+    pre="as ${st[uid]//[[:cntrl:]]/} run cinelog-fetch, then: "
+  fi
+  REPLY="root shells are recorded by the team install - ${pre:-run: }sudo ${(q-)b} install --team --system-zshrc"
+}
+
 # Registry entry of the recorder of this tty (PROTOCOL.md §6.5).
 _cl_regfile() {
   emulate -L zsh
@@ -184,7 +200,7 @@ _cl_start() {
   fi
   _cl_state=unrecorded
   if ! _cl_pick_bin; then
-    _cl_warn "cinelog binary missing - run: cinelog-fetch"
+    _cl_no_bin; _cl_warn $REPLY
     _cl_autofetch
     return 0
   fi
@@ -239,7 +255,7 @@ if (( ! ${+_cl_state} )); then
   typeset -g _cl_state= _cl_dir=${${(%):-%x}:A:h} _cl_nonce= _cl_session= _cl_reg=
   typeset -g _cl_regsig= _cl_regread_sig= _cl_degraded=0
   typeset -gi _cl_n=0 _cl_open=0
-  typeset -gA _cl_opt=(motd 1 banners 1 check_free_space 1 external_ip 0 title 1 title_link 0 url '')
+  typeset -gA _cl_opt=(motd 1 banners 1 check_free_space 1 external_ip 0 title 1 title_link 0 url '' web '')
   _cl_start
 fi
 if [[ $_cl_state == (disabled|guarded) ]]; then
@@ -534,6 +550,13 @@ function load_motd {
     [[ -n $_cl_reg ]] && _cl_regread $_cl_reg && [[ $REPLY =~ '"cast":"(([^"\\]|\\.)*)"' ]] &&
       cast=${${match[1]//\\\"/\"}//\\\\/\\}
     print -r -- "$c[pgreen]cinelog: session ${${_cl_session//-/}[-8,-1]}${cast:+ → $cast}${_cl_opt[url]:+ · $_cl_opt[url]}$c[reset]"
+    # The recorder's view of the personal web UI (PROTOCOL.md §6.6 `web`).
+    case $_cl_opt[web] in
+      (install)
+        print -r -- "$c[pyellow]cinelog: web UI not set up yet - run: cinelog install (prints your login token)$c[reset]" ;;
+      (starting)
+        print -r -- "$c[pyellow]cinelog: web UI is starting - cinelog link prints this session's address$c[reset]" ;;
+    esac
   fi
   [[ $_cl_opt[motd] == 1 ]] || return 0
   _cl_skew
@@ -606,7 +629,7 @@ _cl_free_space() {
 }
 
 _cl_run() {
-  _cl_pick_bin || { print -ru2 -- "cinelog: binary missing - run: cinelog-fetch"; return 127; }
+  _cl_pick_bin || { _cl_no_bin; print -ru2 -- "cinelog: $REPLY"; return 127; }
   $REPLY "$@"
 }
 # `function` syntax: a user alias of the same name must not break these.

@@ -593,6 +593,45 @@ fn banner_split_by_a_resize_is_kept() {
     assert_eq!(last.session.cols, 80);
 }
 
+/// The old plugin's tmux bugs recorded resizes to 3350 columns: such a resize is dropped
+/// (it neither retimes a banner nor reaches the transcript), and a header that size is
+/// stored as the fallback size.
+#[test]
+fn implausible_sizes_are_ignored() {
+    let d = tempfile::tempdir().unwrap();
+    let begin = pad(BEGIN);
+    let (head, tail) = begin.split_at(begin.len() - 10);
+    let end = pad(END) + "$ ";
+    let header = HEADER.replace(r#""cols":80"#, r#""cols":3350"#);
+    let cast = write_cast(
+        d.path(),
+        "wide.cast",
+        &header,
+        &[
+            (0.5, "o", "alice@box:~$ ls"),
+            (0.2, "o", &format!("\r\n{head}")),
+            (0.1, "r", "3350x50"),
+            (0.1, "o", &format!("{tail}file-a\r\n")),
+            (0.5, "o", &end),
+            (0.5, "o", "\r\n"),
+            (0.1, "x", "0"),
+        ],
+        None,
+    );
+    let (last, mem) = import_one(d.path(), &cast);
+    assert_eq!((last.session.cols, last.session.rows), cinelog_cast::FALLBACK_SIZE);
+    let cmds = mem.commands(&last.session.uuid);
+    assert_eq!(cmds.len(), 1, "{cmds:?}");
+    // Timed where the banner starts: the dropped resize did not split it.
+    assert!((cmds[0].t_start - 0.7).abs() < 1e-9, "{}", cmds[0].t_start);
+    if let Some(tsrc) = avt() {
+        let f = factory_with(d.path(), Scope::Personal, tsrc);
+        let mem = apply(&import(f.as_ref(), &cast, u64::MAX, false));
+        let chunks = mem.chunks(&last.session.uuid);
+        assert!(output_of(&chunks, 1).contains("file-a"), "{chunks:?}");
+    }
+}
+
 /// Without banners a commands.log yields no commands, only gap chunks (§11 step 7); the
 /// log lines are counted in the import row. A small `TERM=dumb` cast stays hidden.
 #[test]

@@ -35,12 +35,30 @@ describe('markerBands', () => {
     ]);
     expect(bands[1]!.label).toBe('gap (4096 bytes dropped)');
     expect(bands[2]!.label).toBe('forgotten by alice');
-    expect(nested).toEqual([{ t: 6, child: 'abc', label: 'nested: root (sudo by alice), outer paused' }]);
+    expect(nested).toEqual([{ t: 6, child: 'abc', label: 'nested: root (sudo by alice), outer paused', external: null }]);
   });
 
   it('ignores malformed marker data', () => {
     const { bands, nested } = markerBands([m(1, 'gap', { from_t: 'x' }), m(2, 'nested', { child_uuid: 5 })], [], 10);
     expect(bands[0]).toMatchObject({ from: 1, to: 1 });
     expect(nested[0]).toMatchObject({ child: null, label: 'nested session' });
+  });
+
+  it('links a child of the other scope to the server that recorded it', () => {
+    const team = { child_uuid: 'abc', scope: 'team', user: 'root', mode: 'pause' };
+    const at = (data: Record<string, unknown>, scope: 'team' | 'personal' | null = 'personal') =>
+      markerBands([m(6, 'nested', data)], [], 10, scope, 'box.lan').nested[0]!;
+    // The URL the child's recorder reported, when its server ran.
+    expect(at({ ...team, url: 'https://ops.lan:10000/s/abc' })).toMatchObject({ child: 'abc', external: 'https://ops.lan:10000/s/abc' });
+    // Without one (or a bogus one): the TEAM default port on this host.
+    expect(at(team).external).toBe('https://box.lan:10000/s/abc');
+    expect(at({ ...team, url: 'javascript:alert(1)' }).external).toBe('https://box.lan:10000/s/abc');
+    expect(at({ ...team, url: 'https://ops.lan:10000/s/other' }).external).toBe('https://box.lan:10000/s/abc');
+    // Same scope: an in-app link.
+    expect(at(team, 'team')).toMatchObject({ child: 'abc', external: null });
+    // A PERSONAL child seen from the TEAM server without a URL: its port is unknown, no link.
+    expect(at({ child_uuid: 'abc', scope: 'personal', user: 'bob' }, 'team')).toMatchObject({ child: null, external: null });
+    // Unknown session scope (still loading): as before.
+    expect(at(team, null)).toMatchObject({ child: 'abc', external: null });
   });
 });

@@ -64,6 +64,9 @@ server unit. Without systemd, recorded shells start the server themselves.
    zmodule cmprmsd/cinelog --on-pull 'zsh shell/fetch.zsh'
    ```
 
+   If the line named the module by its full URL before, `zimfw update` now stops with
+   "The git URL does not match". Run `zimfw reinstall` once and answer `y`.
+
 2. Run `zimfw install`. `shell/fetch.zsh` downloads the release binary for your
    architecture to `<module>/bin/cinelog` and checks it against the checksum committed in
    this repository (`shell/checksums/v<VERSION>.sha256`). Only then does it replace the
@@ -80,20 +83,24 @@ server unit. Without systemd, recorded shells start the server themselves.
    Without this line the module still works, but the start costs one extra partial
    `.zshrc` run.
 
-4. Run `~/.zim/modules/cinelog/bin/cinelog install` once. It:
+4. Open a new terminal and run `cinelog install` once. Until you do, the MOTD says
+   `cinelog: web UI not set up yet - run: cinelog install`. Before the install, `cinelog`
+   in a shell with the module loaded runs `<module>/bin/cinelog`. The install:
    - creates the directories with private modes;
    - writes a commented `~/.config/cinelog/config.toml`;
    - links `~/.local/bin/cinelog`;
    - installs and starts the user unit `cinelog.service`;
-   - prints the web login token **once**.
+   - ends with the web UI address, `https://<host>:<10000 + your uid>`, and the web login
+     token, shown **once**. The recording of the terminal pauses around the token, so it
+     never lands in a cast.
 
    The server creates its certificate on its first start. Then `cinelog tls show` (or
    `cinelog doctor`) prints the fingerprint to compare on the login page.
 
    If you used the old plugin, see [docs/MIGRATING.md](docs/MIGRATING.md) first.
 
-5. Open a new terminal. The first line of the MOTD shows the session and its cast file.
-   `cinelog doctor` checks the whole setup.
+5. The first line of the MOTD shows the session, its cast file and, once the server runs,
+   the session's web address. `cinelog doctor` checks the whole setup.
 
 `zimfw update` keeps the module and the binary in step. After a new binary has been
 verified, `install --refresh` points the symlink at it and restarts your server.
@@ -136,6 +143,14 @@ From then on, root shells (`sudo -s`, `sudo -i`, `su`, root logins on the consol
 ssh) are recorded below `/root/logs/<member>/`, without a zim setup for root. Bash root
 shells are not covered.
 
+Before that, a root zsh that loads your module (through your `.zimrc`) starts no team
+recording. Root never runs a binary that a user owns, and `cinelog-fetch` refuses to work in your
+module as root. Instead the root shell prints the install command above with the module's
+real path.
+
+The install prints your member token once, as its last lines, with the recording paused
+around it. That covers the recording of a root shell and your own recording around `sudo`.
+
 - Always call the module's binary by its full path under sudo. sudo's `secure_path` makes a
   bare `cinelog` the installed team binary, which may be older.
 - Add members with `sudo cinelog token new <name>` and remove them with
@@ -158,7 +173,7 @@ stay allowed. Every pause or skip leaves a visible mark in the timeline.
 |---|---|
 | `cinelog search [-a] [TERM]` | Searches commands (and with `-a` also their output) in fzf. The preview shows the command and its output. Enter prints the web link, and opens it on a local desktop. `--print` and `--json` skip fzf |
 | `cinelog search --cwd . TERM` | Only commands run in this directory and below. Also takes `--user`, `--host`, `--since 2d`, `--until`, `--exit fail`, `--pane %3` |
-| `cinelog search --tag ops TERM` | Only commands and output an annotation tagged `ops` is attached to (a note on the command, or a marked time span). Repeat `--tag` or separate with commas: one annotation must carry all of them |
+| `cinelog search --tag ops TERM` | Only commands and output an annotation tagged `ops` is attached to (a note on the command, or a marked time span). Repeat `--tag` or separate with commas: one annotation must carry all of them. Result lines show a command's tags as `[db,ops]` (`tags` in `--json`) |
 | `cinelog search --team TERM` | Searches the team server's history over HTTPS (after `cinelog token team-login`) |
 | `cinelog show <id>` | Prints one command with its output (`<uuid>:<seq>`), or a whole session |
 | `cinelog link [--json]` | Prints the session uuid, cast path and web URL of the current shell |
@@ -220,7 +235,9 @@ The screenshots show a synthetic demo data set. `pnpm -C web docs:shots` regener
 | `n` / `N` | Next or previous hit in the open session |
 | `[` / `]` | Previous or next command |
 | `Space`, `,` / `.` | Play or pause; step back or forward 5 s |
+| `w` | Fit the whole terminal into the window, or fill the width and scroll |
 | `t` | Timeline |
+| `A` | Annotations overview |
 | `l` | Switch between the recording and the live view |
 | `a` | Annotate |
 | `e` | Export |

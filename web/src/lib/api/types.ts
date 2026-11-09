@@ -464,7 +464,18 @@ detail: string | null,
 /**
  * ts the current status began, when known.
  */
-since: number | null, };
+since: number | null, 
+/**
+ * Paused by a nested recording: the child's scope, from the cast's `nested` marker for
+ * `detail` (`null` otherwise, or while that marker is not found). A child of the other
+ * scope (a TEAM `sudo -i` in a PERSONAL shell) is served by the other scope's server.
+ */
+child_scope: Scope | null, 
+/**
+ * With `child_scope`: the child's session URL as its recorder reported it (`url` of the
+ * marker; only when that server ran).
+ */
+child_url: string | null, };
 
 export type BusHello = { version: string, server_started_at: number, 
 /**
@@ -591,7 +602,17 @@ ts_end: number | null, reason: string | null, detail: string | null,
 /**
  * `nested`: the child session.
  */
-child: string | null, };
+child: string | null, 
+/**
+ * `nested`: the child's scope. A child of the other scope (a TEAM `sudo -i` in a
+ * PERSONAL shell) is served by the other scope's server, not this one.
+ */
+child_scope: Scope | null, 
+/**
+ * `nested`: the child's session URL as its recorder reported it (`url` of the marker;
+ * only when that server ran).
+ */
+child_url: string | null, };
 
 export type DensityBin = { 
 /**

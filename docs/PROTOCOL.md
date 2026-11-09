@@ -263,6 +263,14 @@ CLI prints that state instead of claiming a confirmation; `resume` of a multiple
 nested pause says that it ends by itself. An overlong `--reason` (one that would exceed the
 §1 payload bound) is an error and nothing is sent.
 
+`cinelog install` and `cinelog token new` print a new login token with the same markers
+around it (`state_reason` `user: secret output`), when stdout is a terminal and its
+recording is live: pause, wait for the confirmation, the token line, resume. The markers
+take effect where they occur in the byte stream, so exactly that line is left out. Root
+also finds a recording of another uid through the controlling ttys of its ancestors (a
+member's recording around `sudo`, which relays the markers). Without a confirmation the
+token is still printed, with a warning naming the cast.
+
 ---
 
 ## 5. The cast
@@ -345,7 +353,7 @@ When serving casts, the server rewrites `cmd` labels to `$ <typed>` and drops al
 | `cinelog install [--team [--system-zshrc] [--upgrade] [--binary PATH] [--module DIR] [--allow-unverified]] [--prefix DIR] [--refresh] [--uninstall] [--no-migrate]` | install; `--prefix` (alias `--root`) writes every system path below DIR. TEAM: the binary is `--binary`, else `<module>/bin/cinelog`, else the running binary if it lies inside the module; it is verified against `shell/checksums/v<module VERSION>.sha256` unless `--allow-unverified`; `--upgrade` from the installed team binary itself is refused. `--module` defaults to the checkout found up to 4 levels above the running binary. `--refresh` is idempotent: it points `~/.local/bin/cinelog` at the module binary and restarts this user's running server (unit or detached) so it runs that binary | 0 ok |
 | `cinelog completions zsh` | completion script (committed as `shell/completions/_cinelog`) | 0 |
 | `cinelog serve [--scope personal\|team] [--no-http] [--ensure]` | indexer and (without `--no-http`) web server of one scope; holds `serve.lock` in the runtime dir for its lifetime; `--ensure` returns at once if the lock is held, else starts the user unit or a detached `serve` | 0 |
-| `cinelog search [-a\|--out] [-s] [--user U] [--host H] [--since W] [--until W] [--exit N\|ok\|fail] [--cwd DIR] [--pane P] [--tag T[,T…]] [--json\|--print] [--limit N] [TERM…]` | fzf over `<uuid>:<seq>\t<ts>\t<user>@<host>\t[exit]\t<typed>\t┊ <snippet>` lines (hidden first field), preview `cinelog show {1}`; Enter prints the URL (when no server is known: the cast path and `cinelog show <id>`); without fzf a plain list | 0; 1 no match |
+| `cinelog search [-a\|--out] [-s] [--user U] [--host H] [--since W] [--until W] [--exit N\|ok\|fail] [--cwd DIR] [--pane P] [--tag T[,T…]] [--json\|--print] [--limit N] [TERM…]` | fzf over `<uuid>:<seq>\t<ts>\t<user>@<host>\t[exit]\t<typed>[ [<tag>,…]]\t┊ <snippet>` lines (hidden first field; the command's annotation tags only when it has any), preview `cinelog show {1}`; Enter prints the URL (when no server is known: the cast path and `cinelog show <id>`); without fzf a plain list. `--json`: one object per hit with the hit's fields, `entry`, `tags` (sorted names from the non-deleted annotations on its command; `[]` without) and, once a server is known, `url` | 0; 1 no match |
 | `cinelog show <uuid>[:<seq>\|@<t>] [--json] [--max-bytes N]` | the command (or session) header and its output text | 0; 1 not found |
 | `cinelog forget <uuid>[:<seq>] [--from S --to S]` | records the target in `meta.forgotten`; the writer deletes it from index.db; casts are never rewritten | 0 |
 | `cinelog index --once\|--rebuild [CAST…]` | one-shot discovery and backfill (only while the writer lock is free); `--rebuild` drops index.db first, meta.db is kept | 0; 1 some casts failed |
@@ -457,8 +465,15 @@ never contain `,` or `=` (`%`, `,` and `=` in the URL are written as `%25`, `%2C
 so the plugin parses it with `_cl_opt=(${(s:,:)${CINELOG_OPTS//=/,}})`.
 
 ```
-motd=1,banners=1,check_free_space=1,external_ip=0,title=1,title_link=0,url=
+motd=1,banners=1,check_free_space=1,external_ip=0,title=1,title_link=0,url=,web=
 ```
+
+`web` (1.0.0 recorders omit it, 1.0.0 plugins ignore it) is what the MOTD says about the
+PERSONAL web UI below the session line: `install` when the token file (`auth.toml`) does
+not exist, so `cinelog install` never ran (MOTD: `web UI not set up yet - run: cinelog
+install`); `starting` when no server ran as the shell started and `server.autostart` is not
+`off`, so this recorder is starting one; empty otherwise (the URL is in `url`, autostart is
+off, or TEAM scope).
 
 A user shell reads no config files itself.
 

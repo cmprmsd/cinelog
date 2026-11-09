@@ -5,6 +5,7 @@
   import { bus } from '../api/events.svelte';
   import { chapterAt, nextChapter, prevChapter, stepHit } from '../chapters';
   import ExportMenu from '../export/ExportMenu.svelte';
+  import type { FitMode } from '../fit';
   import { toSearchParams, type SearchState } from '../filters';
   import { fmtDuration, fmtTs, keyLabel, oneLine, tzLabel } from '../format';
   import { useKeys } from '../keymap';
@@ -15,6 +16,7 @@
   import { router } from '../router.svelte';
   import type { AnnotationSpan, TimeRange } from '../spans';
   import CommandStrip from './CommandStrip.svelte';
+  import FitToggle from './FitToggle.svelte';
   import Player from './Player.svelte';
   import Rail from './Rail.svelte';
 
@@ -50,6 +52,7 @@
   let annotationSpans = $state<AnnotationSpan[]>([]);
   let selection = $state<TimeRange | null>(null);
   let player: Player | undefined = $state();
+  let fitEffective = $state<FitMode>('screen');
   let reload = $state(0);
 
   const s = $derived(detail?.session ?? null);
@@ -57,7 +60,7 @@
   const current = $derived(chapterAt(commands, currentTime));
   const currentCmd = $derived(current >= 0 ? commands[current] : undefined);
   const focusSeq = $derived(target.cmd ?? null);
-  const marks = $derived(markerBands(detail?.markers ?? [], detail?.masked ?? [], total));
+  const marks = $derived(markerBands(detail?.markers ?? [], detail?.masked ?? [], total, s?.scope ?? null));
 
   $effect(() => {
     const id = uuid;
@@ -191,6 +194,7 @@
       'forward-5': () => player?.step(5),
       export: () => exportMenu?.open() ?? false,
       annotate: () => annotations?.annotate() ?? false,
+      'toggle-fit': () => prefs.toggleFit(),
       escape: () => {
         if (exportMenu?.close()) return;
         if (selection) {
@@ -255,103 +259,110 @@
   {:else if !detail || !s}
     <p class="muted" role="status">Loading session…</p>
   {:else}
-    <header class="head">
-      <div class="title">
-        <h2>
-          {#if s.state === 'live'}<span class="live-dot" aria-label="live"></span>{/if}
-          <span>{s.user}@{s.host}</span>
-          {#if s.sudo_user}<span class="muted">(sudo by {s.sudo_user})</span>{/if}
-        </h2>
-        <div class="meta muted">
-          <span>{fmtTs(s.started_at, prefs.utc)} {tzLabel(prefs.utc)}</span>
-          <span>{fmtDuration(s.duration)}</span>
-          <span>{location_(detail)}</span>
-          <span>{s.scope}</span>
-          {#if s.state !== 'ended'}<span class="badge">{s.state}</span>{/if}
-          {#if s.legacy}<span class="badge legacy">legacy</span>{/if}
-          {#if detail.play_mode === 'segmented'}<span class="badge" title="large cast, loaded in segments">segmented</span>{/if}
+    <!-- Header, player, rail, strip and the current command fill the visible height; the
+         player takes what the others leave. Annotations follow below. -->
+    <div class="stage">
+      <header class="head">
+        <div class="title">
+          <h2>
+            {#if s.state === 'live'}<span class="live-dot" aria-label="live"></span>{/if}
+            <span>{s.user}@{s.host}</span>
+            {#if s.sudo_user}<span class="muted">(sudo by {s.sudo_user})</span>{/if}
+          </h2>
+          <div class="meta muted">
+            <span>{fmtTs(s.started_at, prefs.utc)} {tzLabel(prefs.utc)}</span>
+            <span>{fmtDuration(s.duration)}</span>
+            <span>{location_(detail)}</span>
+            <span>{s.scope}</span>
+            {#if s.state !== 'ended'}<span class="badge">{s.state}</span>{/if}
+            {#if s.legacy}<span class="badge legacy">legacy</span>{/if}
+            {#if detail.play_mode === 'segmented'}<span class="badge" title="large cast, loaded in segments">segmented</span>{/if}
+          </div>
+          {#if detail.parent || detail.children.length}
+            <div class="links">
+              {#if detail.parent}
+                <a href={`/s/${detail.parent.uuid}`} onclick={router.link} data-testid="parent-link"
+                  >↖ back to parent ({detail.parent.user})</a
+                >
+              {/if}
+              {#each detail.children as c (c.uuid)}
+                <a href={`/s/${c.uuid}`} onclick={router.link}>↘ nested: {c.user} {fmtTs(c.started_at, prefs.utc).slice(11, 19)}</a>
+              {/each}
+            </div>
+          {/if}
         </div>
-        {#if detail.parent || detail.children.length}
-          <div class="links">
-            {#if detail.parent}
-              <a href={`/s/${detail.parent.uuid}`} onclick={router.link} data-testid="parent-link"
-                >↖ back to parent ({detail.parent.user})</a
-              >
-            {/if}
-            {#each detail.children as c (c.uuid)}
-              <a href={`/s/${c.uuid}`} onclick={router.link}>↘ nested: {c.user} {fmtTs(c.started_at, prefs.utc).slice(11, 19)}</a>
-            {/each}
+        <div class="actions">
+          {#if s.state === 'live' && router.path !== liveHref(uuid)}
+            <a class="btn" href={liveHref(uuid)} onclick={router.link} data-testid="watch-live">Watch live</a>
+          {/if}
+          <button type="button" onclick={copyLink} title="Copy a link to the current command">Copy link</button>
+          <ExportMenu bind:this={exportMenu} {uuid} command={currentCmd ?? null} {selection} onnotice={flash} />
+          <button type="button" onclick={forgetCurrent} disabled={!currentCmd} title="Remove the current command from search and playback"
+            >Forget…</button
+          >
+          <button
+            type="button"
+            aria-pressed={prefs.keystrokeOverlay}
+            onclick={() => prefs.setKeystrokeOverlay(!prefs.keystrokeOverlay)}
+            title="Show keystrokes over the terminal">Keys overlay</button
+          >
+          <FitToggle effective={fitEffective} />
+          {#if onclose}<button type="button" onclick={onclose} aria-label="Close player">✕</button>{/if}
+        </div>
+      </header>
+
+      {#key `${uuid}:${reload}`}
+        <Player
+          bind:this={player}
+          {uuid}
+          {seek}
+          theme={playerTheme(prefs.resolved)}
+          keystrokeOverlay={prefs.keystrokeOverlay}
+          fit={prefs.fit}
+          bind:effectiveFit={fitEffective}
+          bind:currentTime
+          bind:duration
+          bind:playing
+          oninput={onKey}
+        />
+      {/key}
+
+      <Rail
+        duration={total}
+        {commands}
+        bands={marks.bands}
+        nested={marks.nested}
+        hits={hitTimes}
+        {currentTime}
+        onseek={seekTo}
+        bind:selection
+        annotations={annotationSpans}
+      />
+      <CommandStrip {commands} {current} {focusSeq} onseek={seekTo} />
+
+      <div class="foot" data-testid="session-foot">
+        {#if currentCmd}
+          <div class="cmdinfo" data-testid="current-command">
+            <code>$ {oneLine(currentCmd.typed)}</code>
+            <span class={`exit ${currentCmd.exit === null ? 'unknown' : currentCmd.exit === 0 ? 'ok' : 'fail'}`}>{currentCmd.exit ?? '?'}</span>
+            {#if currentCmd.cwd}<span class="muted mono">{currentCmd.cwd}</span>{/if}
+            {#if currentCmd.approx}<span class="badge approx">approx</span>{/if}
           </div>
         {/if}
-      </div>
-      <div class="actions">
-        {#if s.state === 'live' && router.path !== liveHref(uuid)}
-          <a class="btn" href={liveHref(uuid)} onclick={router.link} data-testid="watch-live">Watch live</a>
+        {#if hitTimes.length}
+          <span class="muted" data-testid="hit-count"
+            >{hitTimes.length} hit{hitTimes.length === 1 ? '' : 's'} here{hitsTruncated ? ' (more hits than shown)' : ''} ·
+            <kbd>n</kbd>/<kbd>N</kbd></span
+          >
         {/if}
-        <button type="button" onclick={copyLink} title="Copy a link to the current command">Copy link</button>
-        <ExportMenu bind:this={exportMenu} {uuid} command={currentCmd ?? null} {selection} onnotice={flash} />
-        <button type="button" onclick={forgetCurrent} disabled={!currentCmd} title="Remove the current command from search and playback"
-          >Forget…</button
-        >
-        <button
-          type="button"
-          aria-pressed={prefs.keystrokeOverlay}
-          onclick={() => prefs.setKeystrokeOverlay(!prefs.keystrokeOverlay)}
-          title="Show keystrokes over the terminal">Keys overlay</button
-        >
-        {#if onclose}<button type="button" onclick={onclose} aria-label="Close player">✕</button>{/if}
+        {#if keys.length}
+          <div class="keys" aria-label="Recent keystrokes" data-testid="keystrokes">
+            {#each keys as k, i (i)}<kbd>{k}</kbd>{/each}
+          </div>
+        {/if}
+        {#if notice}<p class="notice" role="status">{notice}</p>{/if}
       </div>
-    </header>
-
-    {#key `${uuid}:${reload}`}
-      <Player
-        bind:this={player}
-        {uuid}
-        {seek}
-        theme={playerTheme(prefs.resolved)}
-        keystrokeOverlay={prefs.keystrokeOverlay}
-        bind:currentTime
-        bind:duration
-        bind:playing
-        oninput={onKey}
-      />
-    {/key}
-
-    <Rail
-      duration={total}
-      {commands}
-      bands={marks.bands}
-      nested={marks.nested}
-      hits={hitTimes}
-      {currentTime}
-      onseek={seekTo}
-      bind:selection
-      annotations={annotationSpans}
-    />
-    <CommandStrip {commands} {current} {focusSeq} onseek={seekTo} />
-
-    <div class="foot">
-      {#if currentCmd}
-        <div class="cmdinfo" data-testid="current-command">
-          <code>$ {oneLine(currentCmd.typed)}</code>
-          <span class={`exit ${currentCmd.exit === null ? 'unknown' : currentCmd.exit === 0 ? 'ok' : 'fail'}`}>{currentCmd.exit ?? '?'}</span>
-          {#if currentCmd.cwd}<span class="muted mono">{currentCmd.cwd}</span>{/if}
-          {#if currentCmd.approx}<span class="badge approx">approx</span>{/if}
-        </div>
-      {/if}
-      {#if hitTimes.length}
-        <span class="muted" data-testid="hit-count"
-          >{hitTimes.length} hit{hitTimes.length === 1 ? '' : 's'} here{hitsTruncated ? ' (more hits than shown)' : ''} ·
-          <kbd>n</kbd>/<kbd>N</kbd></span
-        >
-      {/if}
-      {#if keys.length}
-        <div class="keys" aria-label="Recent keystrokes" data-testid="keystrokes">
-          {#each keys as k, i (i)}<kbd>{k}</kbd>{/each}
-        </div>
-      {/if}
     </div>
-    {#if notice}<p class="notice" role="status">{notice}</p>{/if}
     <AnnotationsPanel
       bind:this={annotations}
       bind:spans={annotationSpans}
@@ -373,7 +384,20 @@
     gap: 0.5rem;
     align-content: start;
     min-width: 0;
-    padding: 0.6rem;
+    padding: var(--pad);
+    --pad: 0.6rem;
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    /* header, player, rail, command strip, current command */
+    grid-template-rows: auto minmax(var(--player-min), 1fr) auto auto auto;
+    gap: 0.5rem;
+    /* The height of the scrolling pane around the view (its container), or of the window
+       where there is none. When the rest needs more (a phone), the stage grows and the pane
+       scrolls. */
+    min-height: calc(100cqh - 2 * var(--pad));
+    --player-min: 12rem;
   }
   .head {
     /* Above the player's overlays, so the export menu stays clickable. */
@@ -414,6 +438,8 @@
     flex-wrap: wrap;
     gap: 0.4rem 1rem;
     align-items: center;
+    /* One line even when empty, so the first keystroke does not shrink the player. */
+    min-height: 1.75rem;
     font-size: 0.9em;
   }
   .cmdinfo {

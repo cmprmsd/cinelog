@@ -63,6 +63,18 @@ pub fn run(req: RecRequest) -> ! {
     }
 }
 
+/// The validated registry entry of `holder`, a recorder of pts `n` that runs under another
+/// uid (a member's PERSONAL recording around root's `sudo`); `None` when it is not one or
+/// its entry cannot be read and validated. `cinelog pause` uses it to keep a secret out of
+/// that recording.
+pub fn foreign_recording(
+    holder: &cinelog_detect::Holder,
+    n: u32,
+    detector: &dyn cinelog_detect::Detector,
+) -> Option<cinelog_core::registry::RegistryEntry> {
+    setup::foreign_recording(holder, n, detector)
+}
+
 /// Execs the requested shell unrecorded (§5.1 "never fails the shell").
 ///
 /// Sets `CINELOG_FAILED=<reason>`, `CINELOG_FAILED_TTY=<tty of fd 0>` and

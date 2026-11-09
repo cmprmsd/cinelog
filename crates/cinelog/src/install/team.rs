@@ -19,11 +19,9 @@ use anyhow::{Context, Result, bail};
 use cinelog_core::config::legacy;
 use cinelog_core::location;
 use cinelog_core::paths::{Paths, SystemRoot, team};
-use cinelog_core::server::ServerInfo;
 use cinelog_core::{Config, Scope};
-use cinelog_index::model::{DbPaths, settings_keys};
+use cinelog_index::model::DbPaths;
 use cinelog_web::hosts::HostAllowlist;
-use cinelog_web::server::BindSpec;
 use cinelog_web::tls::{self, TlsOptions};
 use sha2::{Digest, Sha256};
 
@@ -403,10 +401,10 @@ pub fn install_on(opts: &Options, host: &Host<'_>, steps: &mut Steps) -> Result<
     };
     install_unit(opts, host, &unit_text, restart, steps)?;
     restart_detached(opts, host, &paths, steps);
-    member_token(&paths, host, steps)?;
+    let url = team_url(&team_cfg, &paths, cfg.legacy_port);
+    member_token(&paths, host, &url, steps)?;
 
     steps.note("recommended: `Defaults always_set_home` in sudoers or `sudo -i`, so root never runs user dotfiles");
-    let url = team_url(&team_cfg, &paths, cfg.legacy_port);
     steps.note(format!(
         "the team web UI is {url} (browsers send cookies to every port of a host: give the team server a \
          hostname of its own with server.hostnames in team.toml)"
@@ -419,44 +417,9 @@ pub fn install_on(opts: &Options, host: &Host<'_>, steps: &mut Steps) -> Result<
     Ok(())
 }
 
-/// The URL members reach the team server at: the running server's, else what it will bind
-/// (a port in `server.bind`, the port it persisted, root's old viewer port, else 10000).
-/// Members cannot read `/run/cinelog/server.json`, so the install prints it.
+/// The URL members reach the team server at (root's old viewer port carries over).
 fn team_url(cfg: &Config, paths: &Paths, legacy_port: Option<u16>) -> String {
-    if let Some(live) = ServerInfo::read_live(&paths.runtime_dir) {
-        return live.url;
-    }
-    let bound = cfg.server.bind.iter().find_map(|b| b.parse::<BindSpec>().ok()?.port);
-    let port = bound
-        .or_else(|| persisted_port(&DbPaths::in_dir(&paths.db_dir).meta))
-        .or_else(|| old_server::persisted_port(legacy_port, &paths.migrated_port_file()))
-        .unwrap_or(cinelog_core::server::BASE_PORT);
-    let host = cfg
-        .server
-        .hostnames
-        .first()
-        .cloned()
-        .unwrap_or_else(cinelog_core::paths::hostname);
-    let host = if host.contains(':') { format!("[{host}]") } else { host };
-    format!("https://{host}:{port}")
-}
-
-/// The port the team server persisted in meta.db (read-only; `None` without one).
-fn persisted_port(meta: &Path) -> Option<u16> {
-    use cinelog_index::schema::{self, Access, DbKind};
-    if !meta.exists() {
-        return None;
-    }
-    let conn = schema::open(meta, DbKind::Meta, Access::ReadOnly).ok()?;
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        [settings_keys::PORT],
-        |r| r.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()?
-    .parse()
-    .ok()
+    super::web_url(cfg, paths, Scope::Team, 0, legacy_port)
 }
 
 /// The log root as the server sees it (unprefixed: the unit is for the real system).
@@ -628,8 +591,8 @@ fn certificate(cfg: &Config, paths: &Paths, steps: &mut Steps) -> Option<Certifi
     }
 }
 
-/// The first named web token, for the member who runs the install (shown once).
-fn member_token(paths: &Paths, host: &Host<'_>, steps: &mut Steps) -> Result<()> {
+/// The first named web token, for the member who runs the install (shown once, last).
+fn member_token(paths: &Paths, host: &Host<'_>, url: &str, steps: &mut Steps) -> Result<()> {
     let Some(user) = host.sudo_user.as_deref().filter(|u| *u != "root") else {
         steps.note("no $SUDO_USER: create member tokens with `sudo cinelog token new NAME`");
         return Ok(());
@@ -641,7 +604,16 @@ fn member_token(paths: &Paths, host: &Host<'_>, steps: &mut Steps) -> Result<()>
         return Ok(());
     }
     match crate::token::ensure_named(&paths.auth_file, user, host.now)? {
-        Some(t) => steps.done(format!("team web token for {} (shown once): {}", t.name, t.secret)),
+        Some(t) => {
+            steps.done(format!("created the team web token for {} (shown below, once)", t.name));
+            steps.set_finale(
+                format!(
+                    "Open {url} and sign in with this token:\n  team web token for {} (shown once): {}",
+                    t.name, t.secret
+                ),
+                true,
+            );
+        }
         None => steps.note(format!("kept the team web token of {user}")),
     }
     Ok(())
@@ -855,6 +827,9 @@ pub fn uninstall_on(sys: &System, host: &Host<'_>, steps: &mut Steps) -> Result<
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+
+    use cinelog_core::server::ServerInfo;
+    use cinelog_index::model::settings_keys;
 
     use super::*;
 
@@ -1337,11 +1312,19 @@ mod tests {
         assert_eq!(tf.tokens.len(), 1);
         assert_eq!(tf.tokens[0].name, "alice");
         assert_eq!(mode(&tokens_file), 0o600);
-        let text = steps.to_string();
-        let secret = text
+        let finale = steps.finale().unwrap_or_else(|| panic!("{steps}"));
+        assert!(finale.secret);
+        let secret = finale
+            .text
             .lines()
             .find_map(|l| l.split("(shown once): ").nth(1))
-            .unwrap_or_else(|| panic!("{text}"));
+            .unwrap_or_else(|| panic!("{}", finale.text));
+        assert!(
+            finale.text.starts_with("Open https://") && finale.text.contains(":10000 and sign in"),
+            "{}",
+            finale.text
+        );
+        assert!(!steps.to_string().contains(secret), "the summary never holds the token");
         assert_eq!(tf.verify(secret).map(|t| t.name.as_str()), Some("alice"));
         assert!(!std::fs::read_to_string(&tokens_file).unwrap().contains(secret));
 
@@ -1351,7 +1334,7 @@ mod tests {
             again.to_string().contains("kept the team web token of alice"),
             "{again}"
         );
-        assert!(!again.to_string().contains("shown once"));
+        assert!(again.finale().is_none() && !again.to_string().contains("shown once"));
         assert_eq!(cinelog_web::tokens::TokenFile::load(&tokens_file).unwrap(), tf);
 
         for (user, expect) in [

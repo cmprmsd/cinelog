@@ -3,7 +3,7 @@
   // "not recorded here" marks, annotation spans, density bars when aggregated, collapsed
   // idle breaks. Pointer: hover shows the command, a click opens it, a drag zooms (brush).
   // Keyboard (chart focused): arrows move between commands, Enter opens.
-  import type { Timeline, TimelineBlock } from '../../lib/api/types';
+  import type { Scope, Timeline, TimelineBlock } from '../../lib/api/types';
   import { fmtDuration, fmtTs, oneLine } from '../../lib/format';
   import {
     annotationColor,
@@ -21,6 +21,7 @@
     LANE_H,
     locateBlock,
     markGeoms,
+    markLink,
     maxDensity,
     nearestBlock,
     ROW_H,
@@ -47,8 +48,10 @@
     onopen: (b: TimelineBlock) => void;
     onopensession: (uuid: string) => void;
     onzoom: (from: number, to: number) => void;
+    /** This server's scope: a nested child of the other scope opens on its own server. */
+    scope?: Scope | null;
   }
-  let { timeline, utc, collapse, now, selected, receivedAt, onopen, onopensession, onzoom }: Props = $props();
+  let { timeline, utc, collapse, now, selected, receivedAt, onopen, onopensession, onzoom, scope = null }: Props = $props();
 
   const AXIS_H = 30;
   const BRUSH_MIN_PX = 5;
@@ -183,8 +186,11 @@
       if (!b) return;
       cursor = { session: b.session, seq: b.seq };
       onopen(b);
-    } else if (h.kind === 'mark' && h.mark.mark.kind === 'nested' && h.mark.mark.child) {
-      onopensession(h.mark.mark.child);
+    } else if (h.kind === 'mark' && h.mark.mark.kind === 'nested') {
+      const link = markLink(h.mark.mark, scope, location.hostname);
+      // Served by the other scope's server (a TEAM `sudo -i`): a new tab, its own sign-in.
+      if (link.external) window.open(link.external, '_blank', 'noopener,noreferrer');
+      else if (link.child) onopensession(link.child);
     } else if (h.kind === 'density' && timeline.bin_secs) {
       const mid = h.bar.bin.ts + timeline.bin_secs / 2;
       const span = Math.max(600, timeline.bin_secs * 12);
@@ -450,9 +456,11 @@
             <div class="tip-typed">$ {info.typed}</div>
             {#each info.lines as line, li (li)}<div>{line}</div>{/each}
           {:else if hover.kind === 'mark'}
+            {@const link = markLink(hover.mark.mark, scope, location.hostname)}
             <div class="tip-title">{hover.mark.label}</div>
             <div>{hover.mark.point ? fmtTs(hover.mark.mark.ts, utc) : spanText(hover.mark.mark.ts, hover.mark.mark.ts_end)}</div>
-            {#if hover.mark.mark.kind === 'nested' && hover.mark.mark.child}<div class="muted">click to open it</div>{/if}
+            {#if link.external}<div class="muted">click to open it on the {hover.mark.mark.child_scope} server (new tab)</div>
+            {:else if link.child}<div class="muted">click to open it</div>{/if}
           {:else if hover.kind === 'annotation'}
             <div class="tip-title">annotation by {oneLine(hover.anno.annotation.author)}</div>
             {#if hover.anno.annotation.tags.length}<div>{hover.anno.annotation.tags.map((t) => `#${oneLine(t)}`).join(' ')}</div>{/if}

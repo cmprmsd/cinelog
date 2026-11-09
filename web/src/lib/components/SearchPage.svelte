@@ -244,6 +244,8 @@
     overflow: auto;
     min-width: 0;
     min-height: 0;
+    /* The session view sizes its player to this pane's height (cqh). */
+    container-type: size;
   }
   @media (max-width: 900px) {
     .page.split {

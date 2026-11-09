@@ -79,7 +79,9 @@ function cinelogEvents(f: FixSession): Ev[] {
     ev.push([c.t_end, 'o', prompt(f, c.cwd)]);
   });
   for (const m of f.markers) {
-    const data = m.kind === 'nested' ? { scope: 'team', pid: 5151, starttime: 77, ...m.data, mode: 'record' } : m.data;
+    // The child is served by this same server, so it has this session's scope (a `team`
+    // child would be linked to the TEAM server instead).
+    const data = m.kind === 'nested' ? { scope: f.session.scope, pid: 5151, starttime: 77, ...m.data, mode: 'record' } : m.data;
     ev.push([m.t, 'm', marker(m.kind, data)]);
   }
   ev.sort((a, b) => a[0] - b[0]);

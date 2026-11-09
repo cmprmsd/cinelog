@@ -176,7 +176,9 @@ export function buildDemo(now: number): DemoSession[] {
       { t: 3000, k: 'skip', data: { sh: SH } },
       { t: 3600, k: 'pause', data: { reason: 'user', detail: 'lunch' } },
       { t: 6900, k: 'resume', data: { reason: 'user' } },
-      { t: 7303, k: 'nested', data: { child_uuid: DEMO.root, scope: 'team', user: 'root', sudo_user: DEMO.user, pid: 41720, starttime: 991200, mode: 'pause' } },
+      // The root shell is served by this (PERSONAL) demo server, so its marker says so: a
+      // `team` child would be linked to the TEAM server, which the demo does not run.
+      { t: 7303, k: 'nested', data: { child_uuid: DEMO.root, scope: 'personal', user: 'root', sudo_user: DEMO.user, pid: 41720, starttime: 991200, mode: 'pause' } },
       { t: 7303, k: 'pause', data: { reason: 'nested', detail: 'root' } },
       { t: 8699.9, k: 'resume', data: { reason: 'nested-end' } },
     ],

@@ -173,7 +173,7 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       server_started_at: startedAt,
       live: visible()
         .filter((f) => f.session.state === 'live')
-        .map((f) => recorderOf(f.session.uuid) ?? { session: f.session, status: 'recording', reason: null, detail: null, since: null }),
+        .map((f) => recorderOf(f.session.uuid) ?? { session: f.session, status: 'recording', reason: null, detail: null, since: null, child_scope: null, child_url: null }),
     };
     res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
     busClients.add(res);

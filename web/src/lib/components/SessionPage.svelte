@@ -28,5 +28,7 @@
     height: 100%;
     overflow: auto;
     max-width: 90rem;
+    /* The session view sizes its player to this pane's height (cqh). */
+    container-type: size;
   }
 </style>

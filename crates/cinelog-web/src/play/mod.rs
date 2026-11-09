@@ -45,7 +45,7 @@ use axum::routing::get;
 
 use self::plan::{Plan, Progress};
 use self::session::{Loaded, mode_for};
-use self::source::clamp_size;
+use self::source::plausible_size;
 use crate::api::db::{Forgets, IndexDb, SessionRow, blocking, parse_uuid};
 use crate::api::extract::ApiPath;
 use crate::api::types::{PlayIndex, PlayInfo, PlayMode, PlaySegment};
@@ -403,7 +403,7 @@ async fn play_info(State(st): State<AppState>, ApiPath(uuid): ApiPath<String>) -
     blocking(move || {
         let s = Loaded::load(&st.ctx, &st.play.markers, &uuid)?;
         let session = s.row.session.clone();
-        let (cols, rows) = clamp_size((session.cols, session.rows));
+        let (cols, rows) = plausible_size((session.cols, session.rows));
         let mode = mode_for(&st.ctx, s.files.total_bytes());
         let base = format!("/api/sessions/{uuid}");
         let info = match mode {

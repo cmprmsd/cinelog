@@ -619,6 +619,55 @@ t_session_missing_binary_warns() {
   sp_stop s
 }
 
+# Root's zsh sourcing a member's module (user-owned, so untrusted): never "run cinelog-fetch",
+# which refuses there as root, but the team install from that module. Root is faked with an
+# unprivileged user namespace, where our own files appear root-owned.
+t_unit_root_without_trusted_binary_points_at_team_install() {
+  if ! unshare -r true 2>/dev/null; then
+    (( VERBOSE )) && print -r -- "    skip: no unprivileged user namespaces"
+    return 0
+  fi
+  local mod out
+  for bin in bin nobin; do
+    mkmodule ${bin:#bin}; mod=$REPLY
+    chmod g+w $mod   # writable by others: root must not trust it
+    out=$(unshare -r zsh -fc 'source $1/cinelog.plugin.zsh; _cl_no_bin; print -r -- "<$EUID $REPLY>"' zsh $mod 2>&1)
+    if [[ $bin == bin ]]; then
+      eq "$out" "<0 root shells are recorded by the team install - run: sudo $mod/bin/cinelog install --team --system-zshrc>" "$bin"
+    else
+      eq "$out" "<0 root shells are recorded by the team install - as root run cinelog-fetch, then: sudo $mod/bin/cinelog install --team --system-zshrc>" "$bin"
+    fi
+  done
+  _cl_no_bin
+  eq "$REPLY" "cinelog binary missing - run: cinelog-fetch" "non-root keeps the fetch hint"
+}
+
+# The recorder's `web` opt (PROTOCOL.md §6.6) adds one line below the session line; the
+# bare `cinelog` the install hint names works before ~/.local/bin/cinelog exists.
+t_session_motd_web_hints() {
+  local web want
+  for web want in install 'cinelog: web UI not set up yet - run: cinelog install (prints your login token)' \
+                  starting "cinelog: web UI is starting - cinelog link prints this session's address" \
+                  '' ''; do
+    sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" \
+      FAKE_REG_OPTS="motd=0,url=,web=$web" PATH=/usr/bin:/bin || return
+    sp_expect s || { fail "no prompt"; sp_stop s; return; }
+    local plain=${SP_BUF[s]//$'\e'\[[0-9;]#m}
+    if [[ -n $want ]]; then
+      [[ $plain == *'cinelog: session 56789abc → /logs/a "b".cast'$'\r'#$'\n'"$want"* ]] ||
+        fail "web=$web: hint below the session line: ${(q+)plain}"
+    else
+      [[ $plain == *'web UI'* ]] && fail "web=: no hint: ${(q+)plain}"
+    fi
+    if [[ $web == install ]]; then
+      sp_run s 'print -r -- "<${+commands[cinelog]} ${+functions[cinelog]}>"; cinelog install'
+      [[ $REPLY == *'<0 1>'* ]] || fail "cinelog is a function before the install: ${(q+)REPLY}"
+      sp_log s; [[ $REPLY == *$'\n'install ]] || fail "cinelog install runs the module binary: ${(q+)REPLY}"
+    fi
+    sp_stop s
+  done
+}
+
 t_session_subshell_attaches_via_registry() {
   sp_start s FAKE_NONCE=$NONCE "FAKE_CHECK=recorded 0190f0e0-1111-7222-8333-123456789abc" || return
   sp_expect s || { fail "no prompt"; sp_stop s; return; }

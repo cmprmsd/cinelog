@@ -32,9 +32,7 @@ use crate::api::types::{
 use crate::error::{Result, WebError};
 use crate::play::plan::{apply, terminal};
 use crate::play::session::{Loaded, mask_for, mode_for};
-use crate::play::source::{
-    CastFiles, Events, PartFile, Shift, StartPoint, clamp_size, secs_to_us, sizes_at, us_to_secs,
-};
+use crate::play::source::{CastFiles, Events, PartFile, Shift, StartPoint, secs_to_us, sizes_at, us_to_secs};
 use crate::play::stream::{Mask, OutEvent, Rewriter};
 use crate::state::AppState;
 
@@ -189,7 +187,7 @@ fn size_at(st: &AppState, src: &Source, pos: (usize, u64)) -> Result<(u16, u16)>
         Some((at, size)) => (at.0, at.1, size),
         None => {
             let h = src.files.header()?;
-            (0, 0, clamp_size((h.term.cols, h.term.rows)))
+            (0, 0, h.term.size())
         }
     };
     let size = sizes_at(&src.files, from, &[pos])?
@@ -237,7 +235,7 @@ fn checkpoint(st: &AppState, src: &Source) -> Result<Start> {
     Ok(Start {
         at: StartPoint::ORIGIN,
         start_us: 0,
-        size: clamp_size((h.term.cols, h.term.rows)),
+        size: h.term.size(),
         init: String::new(),
         shown: vec![false; spans],
     })

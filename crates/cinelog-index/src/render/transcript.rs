@@ -24,6 +24,8 @@ use avt::parser::{DecMode, Function};
 use avt::{Line, Observation, Observer, Operation, ScreenKind, Terminal};
 use serde::{Deserialize, Serialize};
 
+use cinelog_cast::sane_size;
+
 use super::chunker::{Chunker, wanted};
 use super::exact::{F64, XStamp};
 use crate::api::Transcript;
@@ -207,8 +209,10 @@ pub(crate) struct AvtTranscript {
 }
 
 impl AvtTranscript {
+    /// A terminal of the cast header's size: `cols x rows`, or [`cinelog_cast::FALLBACK_SIZE`]
+    /// when that is not a [`sane_size`].
     pub(crate) fn new(cols: u16, rows: u16, opts: RenderOptions) -> Result<Self> {
-        let (cols, rows) = clamp_size(cols, rows);
+        let (cols, rows) = sane_size(cols, rows).unwrap_or(cinelog_cast::FALLBACK_SIZE);
         Ok(Self {
             term: new_terminal(cols, rows)?,
             opts,
@@ -230,7 +234,7 @@ impl AvtTranscript {
 
     pub(crate) fn restore(state: &TranscriptState, opts: RenderOptions) -> Result<Self> {
         let st: State = serde_json::from_str(&state.state)?;
-        if clamp_size(st.cols, st.rows) != (st.cols, st.rows) {
+        if sane_size(st.cols, st.rows).is_none() {
             return Err(IndexError::Invalid(
                 "transcript state: terminal size out of range".into(),
             ));
@@ -277,16 +281,6 @@ impl AvtTranscript {
     fn primary_end(&self) -> u64 {
         self.st.base + occupied(self.term.primary_screen().visible_lines()) as u64
     }
-}
-
-/// Largest terminal the indexer emulates (as the web player serves it): a hostile or broken
-/// `stty cols 65535 rows 65535` would otherwise allocate billions of cells.
-pub const MAX_COLS: u16 = 1000;
-pub const MAX_ROWS: u16 = 500;
-
-/// A terminal size within `1x1 ..= MAX_COLS x MAX_ROWS`.
-pub(crate) fn clamp_size(cols: u16, rows: u16) -> (u16, u16) {
-    (cols.clamp(1, MAX_COLS), rows.clamp(1, MAX_ROWS))
 }
 
 fn new_terminal(cols: u16, rows: u16) -> Result<Terminal> {
@@ -647,7 +641,11 @@ impl Transcript for AvtTranscript {
     }
 
     fn resize(&mut self, at: Stamp, cols: u16, rows: u16) {
-        let (cols, rows) = clamp_size(cols, rows);
+        // A size no terminal has (a broken `stty`, the old plugin's 3350-column resizes) is
+        // dropped, as the web player drops it: the screen keeps its size.
+        let Some((cols, rows)) = sane_size(cols, rows) else {
+            return;
+        };
         if (cols, rows) == self.size() {
             return;
         }

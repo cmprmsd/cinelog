@@ -164,7 +164,12 @@
       {/each}
       {#each nested as n, i (i)}
         <li>
-          {#if n.child}
+          {#if n.external}
+            <!-- The child is served by the other scope's server (a TEAM `sudo -i`): a new tab, its own sign-in. -->
+            <a class="btn mk nested" href={n.external} target="_blank" rel="noopener noreferrer" title="Opens on the server that recorded it"
+              >↗ {n.label} <span class="muted">{fmtClock(n.t)}</span></a
+            >
+          {:else if n.child}
             <a class="btn mk nested" href={`/s/${n.child}`} onclick={router.link}>↘ {n.label} <span class="muted">{fmtClock(n.t)}</span></a>
           {:else}
             <button type="button" class="mk nested" onclick={() => onseek(n.t)}>{n.label} <span class="muted">{fmtClock(n.t)}</span></button>

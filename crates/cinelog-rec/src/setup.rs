@@ -17,7 +17,7 @@ use cinelog_detect::{
     CheckRequest, Detector, Holder, HolderClass, PrincipalRequest, ProcDetector, RealProcFs, StartDecision,
     TtyIdentity, tty_of_fd,
 };
-use cinelog_proto::{Extra, PROTOCOL_VERSION, Scope, SessionInfo, env};
+use cinelog_proto::{Extra, PROTOCOL_VERSION, Scope, SessionInfo, WebHint, env};
 
 use crate::RecRequest;
 use crate::pty::{self, ChildSpec};
@@ -109,24 +109,41 @@ fn foreign_registry_dir(h: &Holder, root: &SystemRoot) -> PathBuf {
 }
 
 /// Session of the outer recorder when it runs under another uid and we may read its
-/// registry (root inside a user's recording, `su` without a PTY). The entry must be
-/// owned by that uid and pass the registry validation (§5.1): pid, starttime, boot_id.
+/// registry (root inside a user's recording, `su` without a PTY).
 fn parent_uuid(
     holder: Option<&Holder>,
     tty: &TtyIdentity,
     registry_dir: impl FnOnce(&Holder) -> PathBuf,
     detector: &dyn Detector,
 ) -> Option<String> {
-    let h = holder?;
-    let (HolderClass::OwnRecorder { same_uid: false }, TtyIdentity::Pts(n)) = (&h.class, tty) else {
+    let TtyIdentity::Pts(n) = tty else { return None };
+    foreign_entry(holder?, *n, registry_dir, detector).map(|e| e.uuid)
+}
+
+/// Registry entry of `h`, the recorder of pts `n`, when it runs under another uid. The
+/// entry must be owned by that uid and pass the registry validation (§5.1): pid,
+/// starttime, boot_id.
+pub(crate) fn foreign_entry(
+    h: &Holder,
+    n: u32,
+    registry_dir: impl FnOnce(&Holder) -> PathBuf,
+    detector: &dyn Detector,
+) -> Option<RegistryEntry> {
+    let HolderClass::OwnRecorder { same_uid: false } = h.class else {
         return None;
     };
-    let path = Registry::new(registry_dir(h)).path_for(&TtyKey::Pts(*n));
+    let path = Registry::new(registry_dir(h)).path_for(&TtyKey::Pts(n));
     let entry: RegistryEntry = serde_json::from_slice(&read_foreign(&path, Some(h.uid))?).ok()?;
     let valid = entry.pid == h.pid
         && detector.starttime(h.pid) == Some(entry.starttime)
         && detector.boot_id().as_deref() == Some(entry.boot_id.as_str());
-    valid.then_some(entry.uuid)
+    valid.then_some(entry)
+}
+
+/// [`foreign_entry`] in the registry directory `h` uses on this system.
+pub(crate) fn foreign_recording(h: &Holder, n: u32, detector: &dyn Detector) -> Option<RegistryEntry> {
+    let root = system_root();
+    foreign_entry(h, n, |h| foreign_registry_dir(h, &root), detector)
 }
 
 /// Free space a log dir needs before a recording starts (PROTOCOL §6.4): a full disk falls
@@ -265,7 +282,9 @@ pub(crate) fn prepare(req: &RecRequest) -> Result<(Launch, PathBuf), Fallback> {
     // The session's web URL for the title (`shell.title_link`) and the MOTD, when this
     // scope's server already runs; `cinelog link` looks it up at any time.
     let url = session_url(&paths.runtime_dir, &id.to_string());
-    let opts = cfg.shell.to_opts(url.as_deref()).to_env_value();
+    let mut shell_opts = cfg.shell.to_opts(url.as_deref());
+    shell_opts.web = web_hint(scope, &paths.auth_file, url.is_some(), cfg.server.autostart);
+    let opts = shell_opts.to_env_value();
     let extra = [
         (env::NONCE_FD, nonce_read.as_raw_fd().to_string()),
         (env::REC_PID, own_pid.to_string()),
@@ -404,9 +423,46 @@ fn session_url(runtime_dir: &Path, uuid: &str) -> Option<String> {
     cinelog_core::server::ServerInfo::read_live(runtime_dir).map(|s| s.session_url(uuid))
 }
 
+/// What the MOTD says about the PERSONAL web UI besides its URL (PROTOCOL §6.6 `web`).
+/// Without a token file `cinelog install` never ran: a server may run, but nobody can sign
+/// in. Without a running server the autostart below is about to start one. The TEAM
+/// server is a system unit the team install sets up.
+fn web_hint(scope: Scope, auth_file: &Path, has_url: bool, autostart: Autostart) -> WebHint {
+    if scope != Scope::Personal {
+        WebHint::None
+    } else if !auth_file.exists() {
+        WebHint::Install
+    } else if !has_url && autostart != Autostart::Off {
+        WebHint::Starting
+    } else {
+        WebHint::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_hint_names_the_missing_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.toml");
+        let hint = |scope, url, autostart| web_hint(scope, &auth, url, autostart);
+        assert_eq!(
+            hint(Scope::Personal, true, Autostart::Auto),
+            WebHint::Install,
+            "no token yet"
+        );
+        assert_eq!(hint(Scope::Team, false, Autostart::Auto), WebHint::None);
+        std::fs::write(&auth, "").unwrap();
+        assert_eq!(hint(Scope::Personal, false, Autostart::Auto), WebHint::Starting);
+        assert_eq!(hint(Scope::Personal, false, Autostart::Off), WebHint::None, "chosen");
+        assert_eq!(
+            hint(Scope::Personal, true, Autostart::Auto),
+            WebHint::None,
+            "the URL says it"
+        );
+    }
 
     #[test]
     fn the_session_url_comes_from_a_live_server() {

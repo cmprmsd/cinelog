@@ -2,7 +2,9 @@
   import { untrack } from 'svelte';
   import { api, errorText, isAbort } from '../api/client';
   import type { PlayInfo } from '../api/types';
-  import { createPlayer, onPlayerError, type Player } from '../player';
+  import type { FitMode } from '../fit';
+  import { createPlayer, onPlayerError, onTermSize, type Player } from '../player';
+  import FitBox from './FitBox.svelte';
 
   interface Props {
     uuid: string;
@@ -10,6 +12,9 @@
     seek: { t: number; nonce: number };
     theme: string;
     keystrokeOverlay: boolean;
+    /** How the terminal fits the box; `effectiveFit` is the mode in effect. */
+    fit: FitMode;
+    effectiveFit?: FitMode;
     currentTime?: number;
     duration?: number | null;
     playing?: boolean;
@@ -21,6 +26,8 @@
     seek,
     theme,
     keystrokeOverlay,
+    fit,
+    effectiveFit = $bindable('screen'),
     currentTime = $bindable(0),
     duration = $bindable(null),
     playing = $bindable(false),
@@ -35,6 +42,8 @@
   let error = $state<string | null>(null);
   /** What the player itself reports (unlike `currentTime`, never set from a seek request). */
   let reported = $state(0);
+  /** The terminal's size: the header's until the player reports it (seeks and resizes change it). */
+  let term = $state({ cols: 0, rows: 0 });
   let player: Player | null = null;
   let pendingStart: number | null = null;
   /** Seeks in flight: until they settle the player still reports the old position. */
@@ -62,6 +71,7 @@
       try {
         const i = await api.play(id, ctl.signal);
         info = i;
+        if (term.cols === 0) term = { cols: i.cols, rows: i.rows };
         if (!i.ready) timer = setTimeout(load, POLL_MS);
       } catch (e) {
         if (!isAbort(e)) error = errorText(e);
@@ -90,6 +100,9 @@
     seeking = 0;
     error = null;
     onPlayerError(p, (m) => (error = m));
+    onTermSize(p, (cols, rows) => {
+      if (cols !== term.cols || rows !== term.rows) term = { cols, rows };
+    });
     p.addEventListener('play', () => (playing = true));
     p.addEventListener('playing', () => (playing = true));
     p.addEventListener('pause', () => (playing = false));
@@ -165,21 +178,24 @@
   {:else if !info}
     <p class="muted" role="status">Loading recording…</p>
   {/if}
-  <div class="mount" bind:this={el}></div>
+  <div class="frame">
+    <FitBox cols={term.cols} rows={term.rows} mode={fit} bind:mount={el} bind:effective={effectiveFit} />
+  </div>
 </div>
 
 <style>
+  /* As tall as the parent makes it: the terminal fits into the frame, never the other way. */
   .player {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 0.4rem;
     min-width: 0;
+    min-height: 0;
   }
-  .mount {
-    min-width: 0;
-  }
-  .mount :global(.ap-player) {
-    border-radius: var(--radius);
+  .frame {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 0;
   }
   .building {
     display: flex;

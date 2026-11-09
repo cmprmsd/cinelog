@@ -7,11 +7,12 @@ use super::source::{Events, StartPoint};
 use super::stream::{LabelMerge, OutEvent, Rewriter, v3_line};
 use crate::error::Result;
 
-/// The header served for a session: part 1's, as v3 (`version` first), its size clamped.
+/// The header served for a session: part 1's, as v3 (`version` first), an implausible size
+/// replaced by the fallback.
 pub(crate) fn header_line(header: &cinelog_cast::Header) -> Vec<u8> {
     let mut h = header.clone();
     h.version = cinelog_cast::CAST_VERSION;
-    (h.term.cols, h.term.rows) = super::source::clamp_size((h.term.cols, h.term.rows));
+    (h.term.cols, h.term.rows) = h.term.size();
     let mut out = serde_json::to_vec(&h).unwrap_or_else(|_| unreachable!("headers serialise"));
     out.push(b'\n');
     out

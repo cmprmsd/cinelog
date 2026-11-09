@@ -11,14 +11,20 @@
   import { api, ApiFailure, errorText, isAbort } from '../api/client';
   import { bus } from '../api/events.svelte';
   import type { BusEvent, Session, SessionDetail } from '../api/types';
+  import FitBox from '../components/FitBox.svelte';
+  import FitToggle from '../components/FitToggle.svelte';
   import SessionView from '../components/SessionView.svelte';
+  import type { FitMode } from '../fit';
   import { stateFromQuery } from '../filters';
   import { fmtClock, fmtTs, keyLabel, tzLabel } from '../format';
+  import { useKeys } from '../keymap';
+  import { onTermSize } from '../player';
   import { playerTheme, prefs } from '../prefs.svelte';
-  import { liveHref, sessionHref } from '../route';
+  import { sessionHref } from '../route';
   import { router } from '../router.svelte';
   import {
     badgeFor,
+    childLiveHref,
     detailAbsent,
     initialView,
     liveOptions,
@@ -48,10 +54,14 @@
   let clock = $state<number | null>(null);
   let keys = $state<string[]>([]);
   let retryIn = $state<number | null>(null);
+  /** The terminal's size from `LiveInit` and the stream's resizes (0: not joined yet). */
+  let term = $state({ cols: 0, rows: 0 });
+  let fitEffective = $state<FitMode>('screen');
 
   const badge = $derived(badgeFor(view));
   const streaming = $derived(view.stream !== 'unavailable' && view.stream !== 'missing');
   const s = $derived(detail?.session ?? view.recorder?.session ?? null);
+  const childLink = $derived(badge.child ? childLiveHref(badge.child, view.recorder, s?.scope ?? null, location.hostname) : null);
   const search = $derived(stateFromQuery(router.query));
 
   function apply(input: LiveInput): void {
@@ -143,6 +153,9 @@
     onPlayerEvent(p, 'loading', onTrouble);
     onPlayerEvent(p, 'offline', () => apply({ type: 'stream-offline' }));
     p.addEventListener('ended', () => apply({ type: 'stream-done' }));
+    onTermSize(p, (cols, rows) => {
+      if (cols !== term.cols || rows !== term.rows) term = { cols, rows };
+    });
     p.addEventListener('input', (e) => (keys = [...keys, keyLabel(e.data)].slice(-40)));
     const add = p.addEventListener as unknown as (name: string, fn: () => void) => void;
     add.call(p, 'error', onTrouble);
@@ -236,6 +249,8 @@
     clearTimers();
   });
 
+  $effect(() => useKeys({ 'toggle-fit': () => prefs.toggleFit() }));
+
   const where = (session: Session) => {
     const t = session.tmux;
     if (t.pane) return `tmux ${t.session ?? t.session_id ?? '?'}:${t.window ?? '?'}${t.window_name ? ` (${t.window_name})` : ''} ${t.pane}`;
@@ -262,9 +277,16 @@
         {#if clock !== null && view.stream !== 'unavailable'}<span data-testid="live-clock">at {fmtClock(clock)}</span>{/if}
         <span title="Watching cannot send input to the session">view only</span>
       </div>
-      {#if badge.child}
+      {#if childLink}
         <div class="links">
-          <a href={liveHref(badge.child)} onclick={router.link} data-testid="live-child">↘ watch the nested session</a>
+          {#if childLink.external}
+            <!-- Recorded by the other scope (a TEAM `sudo -i`): its server, a new tab, its own sign-in. -->
+            <a href={childLink.href} target="_blank" rel="noopener noreferrer" title="Opens on the server that records it" data-testid="live-child"
+              >↗ watch the nested session</a
+            >
+          {:else}
+            <a href={childLink.href} onclick={router.link} data-testid="live-child">↘ watch the nested session</a>
+          {/if}
         </div>
       {/if}
     </div>
@@ -278,6 +300,7 @@
         onclick={() => prefs.setKeystrokeOverlay(!prefs.keystrokeOverlay)}
         title="Show keystrokes over the terminal">Keys overlay</button
       >
+      <FitToggle effective={fitEffective} />
     </div>
   </header>
 
@@ -299,7 +322,7 @@
   {/if}
 
   <div class="player" class:hidden={!streaming} data-testid="live-player">
-    <div class="mount" bind:this={el}></div>
+    <FitBox cols={term.cols} rows={term.rows} mode={prefs.fit} controls={false} bind:mount={el} bind:effective={fitEffective} />
   </div>
 
   {#if keys.length && streaming}
@@ -317,12 +340,18 @@
 </section>
 
 <style>
-  .live {
-    display: grid;
+  /* As tall as the page's pane: the player takes what the header and banners leave. (Not
+     `.live`, which is also the badge's class.) */
+  section.live {
+    display: flex;
+    flex-direction: column;
     gap: 0.5rem;
-    align-content: start;
     min-width: 0;
+    min-height: 100cqh;
     padding: 0.6rem;
+  }
+  section.live > * {
+    min-width: 0;
   }
   .head {
     display: flex;
@@ -385,13 +414,11 @@
     align-items: center;
   }
   .player {
-    min-width: 0;
+    position: relative;
+    flex: 1 0 12rem;
   }
   .player.hidden {
     display: none;
-  }
-  .mount :global(.ap-player) {
-    border-radius: var(--radius);
   }
   .keys {
     display: flex;

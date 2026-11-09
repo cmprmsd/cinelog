@@ -26,7 +26,7 @@
   const liveKey = $derived(live.map((l) => l.session.uuid).join(','));
 
   /** A polled session (bus down): its recorder status is unknown, shown as recording. */
-  const polled = (session: Session): LiveSession => ({ session, status: 'recording', reason: null, detail: null, since: null });
+  const polled = (session: Session): LiveSession => ({ session, status: 'recording', reason: null, detail: null, since: null, child_scope: null, child_url: null });
 
   function onBus(e: BusEvent): void {
     switch (e.type) {

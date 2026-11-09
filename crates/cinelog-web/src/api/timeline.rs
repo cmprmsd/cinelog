@@ -21,7 +21,7 @@ use serde_json::Value;
 use super::db::{DbResult, Forgets, IndexDb, SessionFilter, SessionRow, blocking};
 use super::extract::ApiQuery;
 use super::types::{
-    DensityBin, Session, SessionState, TimeSpan, Timeline, TimelineAnnotation, TimelineBlock, TimelineGroup,
+    DensityBin, Scope, Session, SessionState, TimeSpan, Timeline, TimelineAnnotation, TimelineBlock, TimelineGroup,
     TimelineLane, TimelineMark, TimelineMarkKind, TimelineParams, TimelineRow, TimelineSession,
 };
 use crate::error::{Result, WebError};
@@ -375,6 +375,8 @@ fn mark(session: &str, kind: TimelineMarkKind, ts: f64, ts_end: Option<f64>) -> 
         reason: None,
         detail: None,
         child: None,
+        child_scope: None,
+        child_url: None,
     }
 }
 
@@ -404,6 +406,12 @@ fn marker_marks(s: &Sess, list: &[im::MarkerRow], forgets: &Forgets) -> Vec<Time
                 n.reason = text(&d, "mode");
                 n.detail = text(&d, "user");
                 n.child = text(&d, "child_uuid").filter(|c| !forgets.session(c));
+                if n.child.is_some() {
+                    n.child_scope = d
+                        .get("scope")
+                        .and_then(|v| serde_json::from_value::<Scope>(v.clone()).ok());
+                    n.child_url = text(&d, "url");
+                }
                 out.push(n);
             }
             "gap" => {
@@ -1009,7 +1017,9 @@ mod tests {
             10.0,
             &m(
                 "nested",
-                &format!(r#","child_uuid":"{child}","scope":"personal","user":"root","mode":"record""#),
+                &format!(
+                    r#","child_uuid":"{child}","scope":"personal","user":"root","url":"https://h:10000/s/{child}","mode":"record""#
+                ),
             ),
         );
         a.m(12.0, &m("gap", r#","dropped_bytes":100,"from_t":11.0,"to_t":12.0"#));
@@ -1134,6 +1144,9 @@ mod tests {
         assert_eq!(marks[1]["ts_end"], Value::Null);
         assert_eq!(marks[2]["child"], uuid(3));
         assert_eq!(marks[2]["detail"], "root");
+        assert_eq!(marks[2]["child_scope"], "personal");
+        assert_eq!(marks[2]["child_url"], format!("https://h:10000/s/{}", uuid(3)));
+        assert_eq!(marks[0]["child_scope"], Value::Null, "only nested marks name a child");
         assert!(close(&marks[3]["ts"], START + 1.0 + 11.0));
         assert!(close(&marks[3]["ts_end"], START + 1.0 + 12.0));
         assert_eq!(marks[3]["detail"], "100 bytes dropped");

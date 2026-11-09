@@ -19,6 +19,7 @@ import {
   locateBlock,
   markGeoms,
   markLabel,
+  markLink,
   maxDensity,
   nearestBlock,
   rowAt,
@@ -108,7 +109,7 @@ describe('layout', () => {
     expect(sessionEnd(undefined, 900)).toBeNull();
     const r = row('a', [block(1, 100, null)], {
       sessions: [degraded],
-      marks: [{ session: S, kind: 'pause', ts: 300, ts_end: null, reason: null, detail: null, child: null }],
+      marks: [{ session: S, kind: 'pause', ts: 300, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null }],
     });
     const xs = blockXs(r, scale, sessions, 900);
     const [pause] = markGeoms(r, scale, sessions, 900);
@@ -208,6 +209,8 @@ describe('hit testing', () => {
       reason: null,
       detail: null,
       child: null,
+      child_scope: null,
+      child_url: null,
     });
     const r2 = row('m', [], { marks: [mark('pause', 100, 400), mark('skip', 200), mark('pause', 900, null)] });
     const geoms = markGeoms(r2, scale, new Map([[S, session({ ended_at: 950 })]]), 1000);
@@ -220,6 +223,33 @@ describe('hit testing', () => {
 });
 
 describe('marks, annotations and density', () => {
+  it('opens a nested child of the other scope on its own server', () => {
+    const child = 'c0ffee00-0000-4000-8000-000000000001';
+    const nested = (child_scope: TimelineMark['child_scope'], child_url: string | null = null): TimelineMark => ({
+      session: S,
+      kind: 'nested',
+      ts: 0,
+      ts_end: null,
+      reason: 'pause',
+      detail: 'root',
+      child,
+      child_scope,
+      child_url,
+    });
+    // Same scope (or unknown): in-app.
+    expect(markLink(nested('personal'), 'personal', 'box.lan')).toEqual({ child, external: null });
+    expect(markLink(nested(null), 'personal', 'box.lan')).toEqual({ child, external: null });
+    // A TEAM `sudo -i` in a PERSONAL shell: the reported URL, else the TEAM port on this host.
+    expect(markLink(nested('team', `https://ops.lan:10000/s/${child}`), 'personal', 'box.lan')).toEqual({
+      child,
+      external: `https://ops.lan:10000/s/${child}`,
+    });
+    expect(markLink(nested('team'), 'personal', 'box.lan').external).toBe(`https://box.lan:10000/s/${child}`);
+    // A PERSONAL child seen from TEAM without a reported URL: nowhere to go.
+    expect(markLink(nested('personal'), 'team', 'box.lan')).toEqual({ child: null, external: null });
+    expect(markLink({ ...nested('team'), kind: 'skip' }, 'personal', 'box.lan')).toEqual({ child: null, external: null });
+  });
+
   it('labels every mark kind', () => {
     const m = (kind: TimelineMark['kind'], reason: string | null, detail: string | null): TimelineMark => ({
       session: S,
@@ -229,6 +259,8 @@ describe('marks, annotations and density', () => {
       reason,
       detail,
       child: null,
+      child_scope: null,
+      child_url: null,
     });
     expect(markLabel(m('pause', 'multiplexer', 'tmux: client'))).toBe('recording paused (multiplexer: tmux: client)');
     expect(markLabel(m('pause', null, null))).toBe('recording paused');

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use cinelog_cast::{
     CastError, CastReader, Event, EventCode, Format, Header, PartsReader, ResumePoint, existing_part, is_zstd_magic,
-    parse_event_line, parse_resize, read_header,
+    parse_event_line, parse_sane_resize, read_header, sane_size,
 };
 
 use crate::api::db::{IndexDb, SessionRow};
@@ -50,19 +50,19 @@ pub(crate) fn us_to_secs(t: u64) -> f64 {
     t as f64 / 1e6
 }
 
-/// Largest terminal served and emulated. avt allocates every cell of its screen, and the
-/// recorder stores the tty's size as it is (`stty cols 65535 rows 65535` is 4e9 cells).
-pub(crate) const MAX_COLS: u16 = 1000;
-pub(crate) const MAX_ROWS: u16 = 500;
-
-/// A terminal size within `1x1 ..= MAX_COLS x MAX_ROWS`.
-pub(crate) fn clamp_size((cols, rows): (u16, u16)) -> (u16, u16) {
-    (cols.clamp(1, MAX_COLS), rows.clamp(1, MAX_ROWS))
+/// A size from a header or index.db as served and emulated: itself when it is a
+/// [`sane_size`], otherwise [`cinelog_cast::FALLBACK_SIZE`]. avt allocates every cell of
+/// its screen, and the recorder stores the tty's size as it is (`stty cols 65535 rows
+/// 65535` is 4e9 cells).
+pub(crate) fn plausible_size((cols, rows): (u16, u16)) -> (u16, u16) {
+    sane_size(cols, rows).unwrap_or(cinelog_cast::FALLBACK_SIZE)
 }
 
-/// The clamped size of resize data `COLSxROWS`; `None` when it is not one (or has a zero).
+/// The size of resize data `COLSxROWS`; `None` when it is not one, or not a [`sane_size`]
+/// (a resize to 3350 columns from the old plugin's tmux bugs): such resizes are dropped,
+/// not clamped, so the player keeps a readable size.
 pub(crate) fn parse_size(data: &str) -> Option<(u16, u16)> {
-    parse_resize(data).filter(|&(c, r)| c > 0 && r > 0).map(clamp_size)
+    parse_sane_resize(data)
 }
 
 fn is_zstd(path: &std::path::Path) -> std::io::Result<bool> {
@@ -317,7 +317,11 @@ pub(crate) fn sizes_at(
         };
         let (header, _, mut pos) = read_header(&mut src).map_err(cast_err)?;
         if idx > start_idx {
-            size = clamp_size((header.term.cols, header.term.rows));
+            // A later part's implausible header is dropped like its synthetic resize
+            // (`PartsReader`) is: the size carries over.
+            if let Some(s) = sane_size(header.term.cols, header.term.rows) {
+                size = s;
+            }
         }
         if idx == start_idx && start_off > pos {
             std::io::copy(&mut (&mut src).take(start_off - pos), &mut std::io::sink())?;

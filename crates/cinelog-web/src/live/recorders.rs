@@ -93,27 +93,58 @@ pub(crate) fn find(dirs: &[PathBuf], scope: Scope, uuid: &str) -> Option<Recorde
     scan(dirs, scope).remove(uuid)
 }
 
-/// Whether the cast at `path` ends with an exit (`x`) event. Only its last bytes are read;
-/// a compressed or unreadable file counts as not ended.
-pub(crate) fn has_exit(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else { return false };
-    let Ok(len) = f.metadata().map(|m| m.len()) else {
-        return false;
-    };
-    let start = len.saturating_sub(TAIL_BYTES);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return false;
-    }
+/// The last [`TAIL_BYTES`] of the file at `path`.
+fn read_tail(path: &Path) -> Option<Vec<u8>> {
+    let mut f = File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES))).ok()?;
     let mut tail = Vec::new();
-    if f.read_to_end(&mut tail).is_err() {
-        return false;
-    }
+    f.read_to_end(&mut tail).ok()?;
+    Some(tail)
+}
+
+/// The complete non-empty lines of `tail`, last first.
+fn lines_rev(tail: &[u8]) -> impl Iterator<Item = &[u8]> {
     tail.split(|b| *b == b'\n')
         .rev()
         .map(<[u8]>::trim_ascii)
         .filter(|l| !l.is_empty())
+}
+
+/// Whether the cast at `path` ends with an exit (`x`) event. Only its last bytes are read;
+/// a compressed or unreadable file counts as not ended.
+pub(crate) fn has_exit(path: &Path) -> bool {
+    let Some(tail) = read_tail(path) else { return false };
+    lines_rev(&tail)
         .find_map(parse_event_line)
         .is_some_and(|ev| ev.code == EventCode::Exit)
+}
+
+/// The child session a nested pause names, as its `nested` marker describes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NestedChild {
+    pub uuid: String,
+    pub scope: t::Scope,
+    /// The child's session URL as its recorder reported it.
+    pub url: Option<String>,
+}
+
+/// The last `nested` marker for `child` in the cast part at `path`. A nested pause records
+/// nothing, so the marker (written just before the pause) is among the last bytes, which are
+/// all that is read.
+pub(crate) fn nested_child(path: &Path, child: &str) -> Option<NestedChild> {
+    let tail = read_tail(path)?;
+    lines_rev(&tail)
+        .filter_map(parse_event_line)
+        .filter(|ev| ev.code == EventCode::Marker)
+        .find_map(|ev| match CastMarker::from_json(&ev.decode_data()) {
+            Ok(Some(CastMarker::Nested(n))) if n.child_uuid.eq_ignore_ascii_case(child) => Some(NestedChild {
+                uuid: child.to_owned(),
+                scope: n.scope.into(),
+                url: n.url.filter(|u| !u.is_empty()),
+            }),
+            _ => None,
+        })
 }
 
 /// What a session's first part says about it (header and `session` marker), for a live

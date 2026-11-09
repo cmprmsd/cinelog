@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { BusEvent, LiveSession, Session } from '../api/types';
 import {
   badgeFor,
+  childLiveHref,
   detailAbsent,
   initialView,
   liveOptions,
@@ -29,6 +30,8 @@ const rec = (over: Partial<LiveSession> = {}, uuid = ID): LiveSession => ({
   reason: null,
   detail: null,
   since: null,
+  child_scope: null,
+  child_url: null,
   ...over,
 });
 
@@ -176,6 +179,24 @@ describe('badges', () => {
     const deg = recorderBadge(rec({ status: 'degraded', reason: 'disk full', detail: 'ENOSPC' }));
     expect(deg).toMatchObject({ kind: 'degraded', label: 'degraded' });
     expect(deg.title).toContain('ENOSPC');
+  });
+
+  it('watches a nested child on the server that records it', () => {
+    const nested = (over: Partial<LiveSession> = {}) => rec({ status: 'paused', reason: 'nested', detail: CHILD, ...over });
+    // Same scope, or the marker not found yet: in-app.
+    expect(childLiveHref(CHILD, nested({ child_scope: 'personal' }), 'personal', 'box.lan')).toEqual({ href: `/live/${CHILD}`, external: false });
+    expect(childLiveHref(CHILD, nested(), 'personal', 'box.lan')).toEqual({ href: `/live/${CHILD}`, external: false });
+    expect(childLiveHref(CHILD, null, 'personal', 'box.lan')).toEqual({ href: `/live/${CHILD}`, external: false });
+    // A TEAM `sudo -i` in a PERSONAL shell: the live page on the reported server, else the TEAM port here.
+    expect(childLiveHref(CHILD, nested({ child_scope: 'team', child_url: `https://ops.lan:10000/s/${CHILD}` }), 'personal', 'box.lan')).toEqual({
+      href: `https://ops.lan:10000/live/${CHILD}`,
+      external: true,
+    });
+    expect(childLiveHref(CHILD, nested({ child_scope: 'team' }), 'personal', 'box.lan')).toEqual({ href: `https://box.lan:10000/live/${CHILD}`, external: true });
+    // A PERSONAL child seen from TEAM without a reported URL: no link.
+    expect(childLiveHref(CHILD, nested({ child_scope: 'personal' }), 'team', 'box.lan')).toBeNull();
+    // Child info of another pause does not apply.
+    expect(childLiveHref(CHILD, nested({ detail: OTHER, child_scope: 'team' }), 'personal', 'box.lan')).toEqual({ href: `/live/${CHILD}`, external: false });
   });
 
   it('the stream state wins over the recorder when the stream is not open', () => {

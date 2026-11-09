@@ -158,6 +158,7 @@ impl ShellConfig {
             title: self.title,
             title_link: self.title_link,
             url: url.unwrap_or_default().to_owned(),
+            web: cinelog_proto::WebHint::None,
         }
     }
 }

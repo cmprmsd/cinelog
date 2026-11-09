@@ -22,7 +22,8 @@
   is not installed (`pnpm exec playwright install chromium`).
 
 Some specs reshape responses with `page.route` instead of adding fixtures: cursor pages of a
-session's hits (`n`/`N`), a failing next result page, `PlayInfo.ready=false` build progress, and
+session's hits (`n`/`N`), a failing next result page, `PlayInfo.ready=false` build progress, a
+tall (121×70) or resizing terminal for the player's fit (`fit.spec.ts`), and
 the metadata 404 of a live session the indexer has not caught up with yet. They run unchanged against a real server.
 `annotations-overview.spec.ts` creates annotations by a second author through the mock-only
 `POST /api/_mock/annotations` (an `AnnotationCreate` plus `author`) and skips those steps

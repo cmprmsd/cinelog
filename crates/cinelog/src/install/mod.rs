@@ -13,19 +13,42 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use cinelog_core::paths::{EnvSnapshot, SystemRoot};
+use cinelog_core::paths::{EnvSnapshot, Paths, SystemRoot};
+use cinelog_core::server::ServerInfo;
+use cinelog_core::{Config, Scope};
+use cinelog_index::model::{DbPaths, settings_keys};
+use cinelog_web::server::BindSpec;
 use fsutil::{Outcome, pretty};
 
 use crate::cli::InstallArgs;
+use crate::ctx::Ctx;
 use crate::{doctor, module};
 
 /// What an install did, in order, for the summary.
 #[derive(Debug, Default)]
 pub struct Steps {
     lines: Vec<String>,
+    finale: Option<Finale>,
+}
+
+/// The last lines of the output, below the summary: where to sign in, and the login token
+/// when the install created one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finale {
+    pub text: String,
+    /// `text` holds a secret: it is printed outside the recording of the terminal.
+    pub secret: bool,
 }
 
 impl Steps {
+    pub fn finale(&self) -> Option<&Finale> {
+        self.finale.as_ref()
+    }
+
+    pub fn set_finale(&mut self, text: String, secret: bool) {
+        self.finale = Some(Finale { text, secret });
+    }
+
     fn push(&mut self, mark: &str, msg: String) {
         self.lines.push(format!("  {mark} {msg}"));
     }
@@ -79,6 +102,48 @@ impl fmt::Display for Steps {
         }
         Ok(())
     }
+}
+
+/// The web UI's address: the running server's, else the one it will bind (a port in
+/// `server.bind`, the port it persisted, the old viewer's port, else the `auto` port of
+/// §7.1) on its first `server.hostnames` entry or this host's name. Members cannot read
+/// root's `server.json`, and the personal server may still be starting, so the install
+/// prints this.
+pub fn web_url(cfg: &Config, paths: &Paths, scope: Scope, uid: u32, legacy_port: Option<u16>) -> String {
+    if let Some(live) = ServerInfo::read_live(&paths.runtime_dir) {
+        return live.url;
+    }
+    let bound = cfg.server.bind.iter().find_map(|b| b.parse::<BindSpec>().ok()?.port);
+    let port = bound
+        .or_else(|| persisted_port(&DbPaths::in_dir(&paths.db_dir).meta))
+        .or_else(|| old_server::persisted_port(legacy_port, &paths.migrated_port_file()))
+        .unwrap_or_else(|| cinelog_core::server::auto_port(scope, uid));
+    let host = cfg
+        .server
+        .hostnames
+        .first()
+        .cloned()
+        .unwrap_or_else(cinelog_core::paths::hostname);
+    let host = if host.contains(':') { format!("[{host}]") } else { host };
+    format!("https://{host}:{port}")
+}
+
+/// The port the server persisted in meta.db (read-only; `None` without one).
+fn persisted_port(meta: &Path) -> Option<u16> {
+    use cinelog_index::schema::{self, Access, DbKind};
+    if !meta.exists() {
+        return None;
+    }
+    let conn = schema::open(meta, DbKind::Meta, Access::ReadOnly).ok()?;
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [settings_keys::PORT],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()?
+    .parse()
+    .ok()
 }
 
 pub fn user_unit_file(env: &EnvSnapshot) -> PathBuf {
@@ -221,14 +286,22 @@ pub fn run(args: &InstallArgs) -> ExitCode {
     let result = execute(args, &mut steps);
     println!("cinelog install ({scope})");
     print!("{steps}");
-    match result {
-        Ok(report) => {
-            if let Some(r) = report {
-                println!();
-                print!("{r}");
-            }
-            ExitCode::SUCCESS
+    if let Ok(Some(r)) = &result {
+        println!();
+        print!("{r}");
+    }
+    // Also after a later failure: a token that was created is never shown again.
+    if let Some(f) = steps.finale() {
+        println!();
+        if f.secret {
+            let mut out = std::io::stdout().lock();
+            let _ = crate::pause::write_unrecorded(&Ctx::load(), &mut out, &format!("{}\n", f.text));
+        } else {
+            println!("{}", f.text);
         }
+    }
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("cinelog install: {e:#}");
             ExitCode::FAILURE

@@ -3,8 +3,9 @@
 // follows from both. Pure, so the rules are unit-tested without a browser.
 
 import type { Options, Player, Source } from 'asciinema-player';
-import type { BusEvent, LiveSession, SessionState } from '../api/types';
-import { isUuid } from '../route';
+import type { BusEvent, LiveSession, Scope, SessionState } from '../api/types';
+import { nestedLink } from '../markers';
+import { isUuid, liveHref } from '../route';
 
 /**
  * The stream as the page sees it:
@@ -184,6 +185,30 @@ export function recorderBadge(r: LiveSession): LiveBadge {
     default:
       return { kind: 'paused', label: 'paused', title: `Recording is paused${r.detail ? `: ${r.detail}` : ''}`, child: null };
   }
+}
+
+/**
+ * Where "watch the nested session" goes for the badge's `child`, on a server of `scope`:
+ * in-app (`/live/<child>`) for a child served here, the child's live page on the other
+ * scope's server (`external`, a new tab) for a TEAM `sudo -i` in a PERSONAL shell, `null`
+ * for a child of the other scope that cannot be located. The child's scope and URL come
+ * with the recorder status (`child_scope`, `child_url`, from the `nested` marker); without
+ * them the child is assumed to be served here.
+ */
+export function childLiveHref(
+  child: string,
+  recorder: LiveSession | null,
+  scope: Scope | null,
+  host: string,
+): { href: string; external: boolean } | null {
+  const own = recorder?.detail?.toLowerCase() === child;
+  const link = nestedLink(child, own ? (recorder?.child_scope ?? null) : null, own ? (recorder?.child_url ?? null) : null, scope, host);
+  if (link.external) {
+    const u = new URL(link.external);
+    u.pathname = liveHref(child);
+    return { href: u.href, external: true };
+  }
+  return link.child ? { href: liveHref(link.child), external: false } : null;
 }
 
 /** The page's badge: final stream states first, then the recorder status, then the stream. */

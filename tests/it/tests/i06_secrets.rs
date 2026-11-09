@@ -125,6 +125,53 @@ fn i6_remote_prompt_over_ssh_is_not_recorded() {
     assert_secret_nowhere(&sb, &s);
 }
 
+/// A login token printed once (`cinelog token new`; `install` prints its token the same
+/// way) reaches the terminal but not the cast: the recording pauses around exactly that
+/// line, behind a visible pause marker, and records again right after it. Before there is
+/// a token, the MOTD says how to get one.
+#[test]
+fn i6_printed_login_token_is_not_recorded() {
+    need!(Need::Zsh, Need::Tmux, Need::Plugin, Need::Recorder);
+    let sb = Sandbox::new().unwrap();
+    let t = sb.tmux().unwrap();
+    let r = sb.start_recorded(&t, "main").unwrap();
+    // A new user learns from the MOTD how to get a token (PROTOCOL.md §6.6 `web`).
+    let hint = "cinelog: web UI not set up yet - run: cinelog install (prints your login token)";
+    let motd = r.pane.capture().unwrap_or_default();
+    assert!(motd.contains(hint), "{motd}");
+    r.run("echo ordinary keystrokes").unwrap();
+    r.run("cinelog token new").unwrap();
+    r.run("echo after-the-token").unwrap();
+    let next = sb.start_recorded(&t, "main").unwrap();
+    let motd = next.pane.capture().unwrap_or_default();
+    assert!(!motd.contains(hint) && motd.contains("cinelog: session "), "{motd}");
+    let screen = r.pane.capture().unwrap_or_default();
+    let token = screen
+        .lines()
+        .find_map(|l| l.split("(shown once): ").nth(1))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("no token on screen:\n{screen}"))
+        .to_owned();
+    assert!(token.len() >= 32, "{token:?}");
+    let c = r.cast().unwrap();
+    let out = c.output();
+    let hits = leaked(&token, 8, &out, "");
+    assert!(hits.is_empty(), "output of {} leaks {hits:?}", c.path.display());
+    assert!(out.contains("after-the-token"), "recording resumed: {out:?}");
+    let pauses = c.markers_of("pause");
+    assert!(
+        pauses
+            .iter()
+            .any(|m| m.str("reason") == Some("user") && m.str("detail") == Some("secret output")),
+        "a visible pause marks the gap: {:?}",
+        c.markers().iter().map(|m| m.json.to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        c.pause_intervals().iter().all(|(_, end)| end.is_some()),
+        "no pause stays open"
+    );
+}
+
 /// Root-gated: a real sudo prompt of a password-requiring user (`CINELOG_IT_PW_USER`,
 /// `CINELOG_IT_PW_PASS`, provisioned by CI) in that user's own recorded shell.
 ///

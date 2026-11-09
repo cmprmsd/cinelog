@@ -17,5 +17,7 @@
   .page {
     height: 100%;
     overflow: auto;
+    /* The live view sizes its player to this pane's height (cqh). */
+    container-type: size;
   }
 </style>

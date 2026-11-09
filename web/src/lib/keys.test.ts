@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { dispatch, useKeys } from './keymap';
-import { focusKind, shortcutFor, type KeyLike } from './keys';
+import { focusKind, SHORTCUTS, shortcutFor, type KeyLike } from './keys';
 
 const k = (key: string, mods: Partial<KeyLike> = {}): KeyLike => ({ key, ctrlKey: false, metaKey: false, altKey: false, ...mods });
 
@@ -14,7 +14,15 @@ describe('shortcuts', () => {
     expect(shortcutFor(k('t'), 'none')).toBe('timeline');
     expect(shortcutFor(k('l'), 'none')).toBe('toggle-live');
     expect(shortcutFor(k('a'), 'link')).toBe('annotate');
+    expect(shortcutFor(k('A'), 'none')).toBe('annotations');
+    expect(shortcutFor(k('w'), 'none')).toBe('toggle-fit');
+    expect(shortcutFor(k('W'), 'none')).toBeNull();
     expect(shortcutFor(k('x'), 'none')).toBeNull();
+  });
+
+  it('lists every bound key in the sheet', () => {
+    const listed = new Set(SHORTCUTS.flatMap((s) => s.keys));
+    for (const key of ['A', 'w', 't', 'a']) expect(listed).toContain(key);
   });
 
   it('leaves typing, modifiers and control activation alone', () => {

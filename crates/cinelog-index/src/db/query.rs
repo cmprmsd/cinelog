@@ -367,6 +367,7 @@ fn cmd_hit(r: &Row<'_>) -> rusqlite::Result<CmdRow> {
             host: r.get(13)?,
             snippet: None,
             chunk_kind: None,
+            tags: Vec::new(),
         },
     })
 }
@@ -388,6 +389,7 @@ fn out_hit(r: &Row<'_>) -> rusqlite::Result<SearchHit> {
         approx: r.get::<_, Option<bool>>(11)?.unwrap_or(false),
         confidence: r.get(12)?,
         snippet: None,
+        tags: Vec::new(),
     })
 }
 
@@ -578,6 +580,28 @@ impl SqliteSearcher {
             }
             None => ForgetSet::default(),
         })
+    }
+
+    /// Fills in the hits' command tags from meta.db, which [`Self::forget_set`] opened if it
+    /// exists (one query per page, for just its commands).
+    fn attach_tags(&self, hits: &mut [SearchHit]) -> Result<()> {
+        let meta = self.meta.borrow();
+        let Some(conn) = meta.as_ref() else {
+            return Ok(());
+        };
+        let mut commands: Vec<(String, u64)> = hits
+            .iter()
+            .filter_map(|h| Some((h.session_uuid.clone(), h.cmd_seq?)))
+            .collect();
+        commands.sort_unstable();
+        commands.dedup();
+        let tags = meta::command_tags(conn, &commands)?;
+        for h in hits {
+            if let Some(t) = h.cmd_seq.and_then(|seq| tags.get(&(h.session_uuid.clone(), seq))) {
+                h.tags.clone_from(t);
+            }
+        }
+        Ok(())
     }
 
     /// Resolves a tag filter (`None` without one) from meta.db, which [`Self::forget_set`]
@@ -1012,6 +1036,7 @@ impl Searcher for SqliteSearcher {
             kind: h.kind,
             id: h.id,
         });
+        self.attach_tags(&mut hits)?;
         page.hits = hits;
         Ok(page)
     }

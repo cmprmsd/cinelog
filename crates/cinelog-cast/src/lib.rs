@@ -204,6 +204,35 @@ pub fn format_resize(cols: u16, rows: u16) -> String {
     format!("{cols}x{rows}")
 }
 
+/// Largest terminal size taken at its word. Larger sizes come from broken terminals, not
+/// real ones (`stty cols 65535`; the old plugin's tmux bugs recorded resizes to 3350
+/// columns, while 99% of real sessions stay under about 410): emulating them allocates
+/// every cell, and a player shrinks the whole screen to fit them.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 500;
+
+/// The size assumed when a header's own is implausible (asciinema's default).
+pub const FALLBACK_SIZE: (u16, u16) = (80, 24);
+
+/// `cols x rows` when it is a plausible terminal size: no zero, within
+/// [`MAX_COLS`] x [`MAX_ROWS`]. Readers drop a resize to anything else and keep the size
+/// they had.
+pub fn sane_size(cols: u16, rows: u16) -> Option<(u16, u16)> {
+    ((1..=MAX_COLS).contains(&cols) && (1..=MAX_ROWS).contains(&rows)).then_some((cols, rows))
+}
+
+/// Resize data `"COLSxROWS"` when it is a [`sane_size`]; `None` for anything to drop.
+pub fn parse_sane_resize(data: &str) -> Option<(u16, u16)> {
+    parse_resize(data).and_then(|(c, r)| sane_size(c, r))
+}
+
+impl TermInfo {
+    /// The header's size when it is a [`sane_size`], otherwise [`FALLBACK_SIZE`].
+    pub fn size(&self) -> (u16, u16) {
+        sane_size(self.cols, self.rows).unwrap_or(FALLBACK_SIZE)
+    }
+}
+
 /// Counters of a read pass. Tolerant readers skip bad lines instead of failing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadStats {
@@ -322,5 +351,20 @@ mod tests {
     fn resize_data() {
         assert_eq!(parse_resize(&format_resize(120, 40)), Some((120, 40)));
         assert_eq!(parse_resize("garbage"), None);
+    }
+
+    #[test]
+    fn implausible_sizes() {
+        assert_eq!(parse_sane_resize("407x60"), Some((407, 60)));
+        assert_eq!(parse_sane_resize("1000x500"), Some((MAX_COLS, MAX_ROWS)));
+        for bad in ["3350x50", "1001x24", "80x501", "0x24", "80x0", "65535x65535", "wide"] {
+            assert_eq!(parse_sane_resize(bad), None, "{bad}");
+        }
+        let mut h = Header::new_v3(3350, 50, None, 0, None);
+        assert_eq!(h.term.size(), FALLBACK_SIZE);
+        (h.term.cols, h.term.rows) = (0, 0);
+        assert_eq!(h.term.size(), FALLBACK_SIZE);
+        (h.term.cols, h.term.rows) = (200, 50);
+        assert_eq!(h.term.size(), (200, 50));
     }
 }

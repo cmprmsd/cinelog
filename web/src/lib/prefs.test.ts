@@ -27,4 +27,14 @@ describe('prefs', () => {
     applyTheme('light');
     expect(document.documentElement.dataset.theme).toBe('light');
   });
+
+  it('remembers the fit mode, screen by default', () => {
+    expect(prefs.fit).toBe('screen');
+    prefs.toggleFit();
+    expect(prefs.fit).toBe('width');
+    expect(localStorage.getItem('cinelog.fit')).toBe('width');
+    prefs.toggleFit();
+    expect(prefs.fit).toBe('screen');
+    expect(localStorage.getItem('cinelog.fit')).toBeNull();
+  });
 });

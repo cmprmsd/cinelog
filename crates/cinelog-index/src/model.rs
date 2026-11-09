@@ -318,8 +318,8 @@ impl SessionMeta {
             ended_at: None,
             exit_status: None,
             tz: non_empty(&info.tz),
-            cols: header.term.cols,
-            rows: header.term.rows,
+            cols: header.term.size().0,
+            rows: header.term.size().1,
             term: header.term.term_type.clone(),
             legacy: false,
             hidden: false,
@@ -1070,6 +1070,10 @@ pub struct SearchHit {
     pub chunk_kind: Option<ChunkKind>,
     pub approx: bool,
     pub confidence: Option<f64>,
+    /// The tags of the non-deleted annotations on the hit's command (meta.db), sorted and
+    /// distinct; empty for gap output and commands without any.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl SearchHit {

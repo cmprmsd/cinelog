@@ -510,6 +510,14 @@ async fn forgotten_commands_of_an_unindexed_session_stay_masked() {
     c.m(3.01, &cmd(3, 100, 3, "cat key"));
     c.o(3.02, "keyvm3x one\r\n");
     c.flush();
+    // Until it is forgotten it streams like any command; the stream may already have sent
+    // it (it polls the cast), so wait for that before the forget makes it secret.
+    loop {
+        let msg = s.message().await;
+        if msg.to_string().contains("keyvm3x one") {
+            break;
+        }
+    }
     kit.cli_forget(ImTarget::Command { uuid: uuid(14), seq: 3 });
     kit.state.bus.publish(forgotten_event(14, 3));
     let init = read_until(&mut s, SECRETS, |m| m.get("init").is_some()).await;
@@ -764,6 +772,62 @@ fn watcher_publishes_session_start_update_and_end() {
     };
     assert_eq!((e.session.as_str(), e.state), (uuid(20).as_str(), SessionState::Ended));
     assert!(st.live.snapshot().is_empty());
+}
+
+#[test]
+fn a_nested_pause_names_its_child_from_the_marker() {
+    let kit = Kit::new(8);
+    let st = &kit.state;
+    let mut rx = st.bus.subscribe();
+    let mut w = Watcher::new(st, fast());
+    let mut c = Cast::new(kit.dir.path(), 30, 80, 24, &Meta::default());
+    c.o(0.5, "$ sudo -i\r\n");
+    c.flush();
+    let child = uuid(31);
+    let reason = format!("nested: {child}");
+    register(&kit, 3, 30, &c.path, RecState::Paused, Some(&reason), true);
+    // The registry may change before the cast has the marker: no child yet.
+    w.tick(st, Instant::now());
+    let evs = drain(&mut rx);
+    let [BusEvent::SessionStart(l)] = evs.as_slice() else {
+        panic!("{evs:?}")
+    };
+    assert_eq!((l.detail.as_deref(), l.child_scope), (Some(child.as_str()), None));
+    let since = l.since;
+
+    // A TEAM `sudo -i` in this PERSONAL shell, served by the TEAM server.
+    let url = format!("https://box.lan:10000/s/{child}");
+    c.m(
+        1.0,
+        &format!(
+            r#"{{"cl":1,"k":"nested","child_uuid":"{child}","scope":"team","user":"root","url":"{url}","mode":"pause"}}"#
+        ),
+    );
+    c.m(
+        1.0,
+        &format!(r#"{{"cl":1,"k":"pause","reason":"nested","detail":"{child}"}}"#),
+    );
+    c.flush();
+    w.tick(st, Instant::now());
+    let evs = drain(&mut rx);
+    let [BusEvent::SessionUpdate(l)] = evs.as_slice() else {
+        panic!("{evs:?}")
+    };
+    assert_eq!(l.child_scope, Some(crate::api::types::Scope::Team));
+    assert_eq!(l.child_url.as_deref(), Some(url.as_str()));
+    assert_eq!(l.since, since, "the status did not change");
+    w.tick(st, Instant::now());
+    assert!(drain(&mut rx).is_empty(), "nothing changed");
+
+    // Another pause: no child.
+    register(&kit, 3, 30, &c.path, RecState::Paused, Some("user: lunch"), true);
+    w.tick(st, Instant::now());
+    let evs = drain(&mut rx);
+    let [BusEvent::SessionUpdate(l)] = evs.as_slice() else {
+        panic!("{evs:?}")
+    };
+    assert_eq!((l.child_scope, l.child_url.as_deref()), (None, None));
+    assert!(recorders::nested_child(&c.path, &uuid(32)).is_none(), "another child");
 }
 
 #[test]

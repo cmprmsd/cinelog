@@ -4,6 +4,7 @@
 
 import type {
   DensityBin,
+  Scope,
   Timeline,
   TimelineAnnotation,
   TimelineBlock,
@@ -12,6 +13,7 @@ import type {
   TimelineSession,
 } from '../../lib/api/types';
 import { fmtDuration, fmtTs, oneLine } from '../../lib/format';
+import { nestedLink } from '../../lib/markers';
 import type { TimeScale } from './scale';
 
 export const LANE_H = 24;
@@ -222,6 +224,16 @@ export function markLabel(m: TimelineMark): string {
     case 'forgotten':
       return m.detail ? `forgotten by ${oneLine(m.detail)}` : 'forgotten';
   }
+}
+
+/**
+ * Where a click on a `nested` mark goes, on a timeline served by a server of `scope`:
+ * `external` (a new tab) for a child of the other scope, `child` (in-app) for one served
+ * here; neither for other marks and for a child that cannot be located.
+ */
+export function markLink(m: TimelineMark, scope: Scope | null, host: string): { child: string | null; external: string | null } {
+  if (m.kind !== 'nested') return { child: null, external: null };
+  return nestedLink(m.child, m.child_scope, m.child_url, scope, host);
 }
 
 export function markGeoms(

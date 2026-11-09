@@ -1,6 +1,7 @@
 //! meta.db (§6.3): forget requests, settings, annotations and tags, and the JSON Lines
 //! export/import behind the nightly backup and `cinelog meta export|import`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -283,6 +284,33 @@ pub(crate) fn tag_targets(conn: &Connection, tags: &[String], limit: usize) -> R
         });
     }
     Ok((out, capped))
+}
+
+/// The tags of the non-deleted annotations on each of `commands` (`(session, seq)`), sorted
+/// and distinct; commands without any are left out.
+pub(crate) fn command_tags(
+    conn: &Connection,
+    commands: &[(String, u64)],
+) -> Result<HashMap<(String, u64), Vec<String>>> {
+    let mut out: HashMap<(String, u64), Vec<String>> = HashMap::new();
+    if commands.is_empty() {
+        return Ok(out);
+    }
+    let mut st = conn.prepare_cached(
+        "SELECT DISTINCT a.session_uuid, a.cmd_seq, t.name FROM annotations a
+         JOIN annotation_tags x ON x.annotation_id = a.id JOIN tags t ON t.id = x.tag_id
+         WHERE a.deleted_at IS NULL
+           AND (a.session_uuid, a.cmd_seq) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?1))
+         ORDER BY t.name",
+    )?;
+    let rows = st.query_map([serde_json::to_string(commands)?], |r| {
+        Ok((r.get::<_, String>(0)?, super::u64_at(r, 1)?, r.get::<_, String>(2)?))
+    })?;
+    for row in rows {
+        let (session, seq, name) = row?;
+        out.entry((session, seq)).or_default().push(name);
+    }
+    Ok(out)
 }
 
 /// Tags by name with their live usage count; `only` selects one name (empty: all).

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
-use super::recorders::{self, Recorder};
+use super::recorders::{self, NestedChild, Recorder};
 use crate::api::db::{Forgets, IndexDb};
 use crate::api::types::{
     self as t, BusEvent, Forgotten, IndexProgress, LegacyProgress, LiveSession, RecStatus, SessionEnd, SessionState,
@@ -60,6 +60,7 @@ struct Key {
     status: RecStatus,
     reason: Option<String>,
     detail: Option<String>,
+    child: Option<(t::Scope, Option<String>)>,
     session: t::Session,
     indexed: bool,
 }
@@ -74,6 +75,7 @@ impl Key {
             status: o.live.status,
             reason: o.live.reason.clone(),
             detail: o.live.detail.clone(),
+            child: o.live.child_scope.map(|scope| (scope, o.live.child_url.clone())),
             session,
             indexed: o.indexed,
         }
@@ -93,12 +95,14 @@ struct Tracked {
 
 /// The live sessions of this pass: alive recorders whose session is not forgotten and not
 /// over as far as the index knows. Sessions the index has not seen yet are described from
-/// their cast (`fallback` caches that per uuid).
+/// their cast (`fallback` caches that per uuid), and the child of a nested pause from its
+/// `nested` marker (`children` caches that per uuid).
 fn observe(
     recs: &BTreeMap<String, Recorder>,
     forgets: &Forgets,
     db: Option<&IndexDb>,
     fallback: &mut HashMap<String, t::Session>,
+    children: &mut HashMap<String, NestedChild>,
 ) -> BTreeMap<String, Observed> {
     let mut out = BTreeMap::new();
     for rec in recs.values().filter(|r| r.alive) {
@@ -140,6 +144,16 @@ fn observe(
             RecStatus::Recording => (None, None),
             _ => split_state_reason(rec.state_reason.as_deref()),
         };
+        let child = match (reason.as_deref(), detail.as_deref()) {
+            (Some("nested"), Some(uuid)) => match children.get(&rec.uuid).filter(|c| c.uuid == uuid) {
+                Some(c) => Some(c.clone()),
+                // Not found yet (the marker may lag the registry): looked for again next pass.
+                None => recorders::nested_child(&rec.cast, uuid).inspect(|c| {
+                    children.insert(rec.uuid.clone(), c.clone());
+                }),
+            },
+            _ => None,
+        };
         let since = rec.changed_at.or(Some(session.started_at));
         out.insert(
             rec.uuid.clone(),
@@ -150,6 +164,8 @@ fn observe(
                     reason,
                     detail,
                     since,
+                    child_scope: child.as_ref().map(|c| c.scope),
+                    child_url: child.and_then(|c| c.url),
                 },
                 cast: rec.cast.clone(),
                 indexed,
@@ -157,6 +173,7 @@ fn observe(
         );
     }
     fallback.retain(|uuid, _| out.contains_key(uuid));
+    children.retain(|uuid, _| out.contains_key(uuid));
     out
 }
 
@@ -182,7 +199,13 @@ fn load_forgets(st: &AppState) -> Forgets {
 pub(crate) fn observe_now(st: &AppState) -> Vec<LiveSession> {
     let recs = recorders::scan(st.live.dirs(), st.ctx.scope);
     let db = IndexDb::open(&st.ctx).ok();
-    let observed = observe(&recs, &load_forgets(st), db.as_ref(), &mut HashMap::new());
+    let observed = observe(
+        &recs,
+        &load_forgets(st),
+        db.as_ref(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+    );
     sorted(observed.into_values().map(|o| o.live))
 }
 
@@ -213,6 +236,7 @@ pub(crate) struct Watcher {
     timing: Timing,
     tracked: BTreeMap<String, Tracked>,
     fallback: HashMap<String, t::Session>,
+    children: HashMap<String, NestedChild>,
     /// The bus, for the `forgotten` events of `POST /api/forget`.
     rx: broadcast::Receiver<BusEvent>,
     /// Forgotten rows already announced (or there before the first poll); `None` until
@@ -232,6 +256,7 @@ impl Watcher {
             timing,
             tracked: BTreeMap::new(),
             fallback: HashMap::new(),
+            children: HashMap::new(),
             rx: st.bus.subscribe(),
             known: None,
             pending: HashMap::new(),
@@ -247,7 +272,7 @@ impl Watcher {
         let recs = recorders::scan(st.live.dirs(), st.ctx.scope);
         let forgets = load_forgets(st);
         let db = IndexDb::open(&st.ctx).ok();
-        let observed = observe(&recs, &forgets, db.as_ref(), &mut self.fallback);
+        let observed = observe(&recs, &forgets, db.as_ref(), &mut self.fallback, &mut self.children);
         self.sessions(st, observed, &forgets, db.as_ref());
         drop(db);
         self.forgotten(st, now);

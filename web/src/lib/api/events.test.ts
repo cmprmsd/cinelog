@@ -121,6 +121,8 @@ describe('bus', () => {
       reason: null,
       detail: null,
       since: null,
+      child_scope: null,
+      child_url: null,
     });
     bus.subscribe(() => {});
     expect(bus.live).toEqual([]);
@@ -144,7 +146,7 @@ describe('bus', () => {
 
   it('forgets the live sessions when it stops', () => {
     const off = bus.subscribe(() => {});
-    sources[0]!.fire('hello', JSON.stringify({ version: 'v', server_started_at: 1, live: [{ session: { uuid: 'a', started_at: 1 }, status: 'recording', reason: null, detail: null, since: null }] }));
+    sources[0]!.fire('hello', JSON.stringify({ version: 'v', server_started_at: 1, live: [{ session: { uuid: 'a', started_at: 1 }, status: 'recording', reason: null, detail: null, since: null, child_scope: null, child_url: null }] }));
     expect(bus.live).toHaveLength(1);
     off();
     expect(bus.live).toEqual([]);

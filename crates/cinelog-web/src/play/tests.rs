@@ -501,21 +501,25 @@ fn sized_cast(kit: &Kit, cols: u16, rows: u16) -> Cast {
     let t = c.command(t + 0.2, 2, "echo huge", &["huge terminal"], 0);
     c.ev(t + 70.0, EventCode::Resize, "65535x0");
     c.ev(t + 70.1, EventCode::Resize, "1200x40");
+    c.ev(t + 70.15, EventCode::Resize, "3350x50");
+    c.ev(t + 70.16, EventCode::Resize, "120x40");
     let t = c.command(t + 70.2, 3, "echo after", &["after"], 0);
     c.exit(t + 0.5);
     c
 }
 
 /// Regression: sizes from `r` events and headers reached avt unclamped (65535x65535 is
-/// 4e9 cells and aborts the process).
+/// 4e9 cells and aborts the process); then a legacy cast's resize to 3350 columns was
+/// clamped to 1000 and the player shrank the screen to fit. Implausible resizes are now
+/// dropped, an implausible header becomes the fallback size.
 #[tokio::test]
-async fn huge_terminal_sizes_are_clamped() {
-    use super::source::{MAX_COLS, MAX_ROWS};
+async fn implausible_terminal_sizes_are_dropped() {
+    use cinelog_cast::{FALLBACK_SIZE, MAX_COLS, MAX_ROWS};
     let max = (u64::from(MAX_COLS), u64::from(MAX_ROWS));
     for threshold in [0, 8] {
         let kit = Kit::new(threshold);
         let c = sized_cast(&kit, 40, 8);
-        // The indexer's own avt has no clamp: index only the part before the resize.
+        // Indexed segments up to the first resize, built on demand after it.
         kit.index(&c.path, Some(300));
         let u = uuid(3);
         if threshold == 0 {
@@ -532,11 +536,13 @@ async fn huge_terminal_sizes_are_clamped() {
                 .filter(|e| e[1] == "r")
                 .map(|e| e[2].as_str().unwrap())
                 .collect();
-            assert_eq!(resizes, ["1000x500", "1000x40"], "no zero sizes");
+            assert_eq!(resizes, ["120x40"], "implausible sizes dropped");
         } else {
             let (_, _, body) = kit.get(&format!("/sessions/{u}/cast")).await;
             let text = String::from_utf8(body).unwrap();
-            assert!(text.contains(r#""r", "1000x500""#) && !text.contains("65535x65535"));
+            let resizes: Vec<&str> = text.lines().filter(|l| l.contains(r#", "r", "#)).collect();
+            assert_eq!(resizes.len(), 1, "{resizes:?}");
+            assert!(resizes[0].ends_with(r#""r", "120x40"]"#), "{resizes:?}");
         }
         for format in ["txt", "html", "cast"] {
             let (status, _, body) = kit.get(&format!("/sessions/{u}/export?format={format}")).await;
@@ -552,12 +558,12 @@ async fn huge_terminal_sizes_are_clamped() {
         let mut s = super::session::Loaded::load(kit.ctx(), &kit.state.play.markers, &u).unwrap();
         s.segments.clear();
         let plan = super::plan::Plan::build(&s, &super::plan::Progress::default()).unwrap();
-        assert_eq!((plan.cols, plan.rows), (MAX_COLS, MAX_ROWS));
+        assert_eq!((plan.cols, plan.rows), FALLBACK_SIZE);
         if threshold == 8 {
             let (_, _, body) = kit.get(&format!("/sessions/{u}/cast")).await;
             let text = String::from_utf8(body).unwrap();
             assert!(
-                text.starts_with(r#"{"version":3,"term":{"cols":1000,"rows":500"#),
+                text.starts_with(r#"{"version":3,"term":{"cols":80,"rows":24"#),
                 "{text:.60}"
             );
             let (status, _, body) = kit.get(&format!("/sessions/{u}/export?format=txt")).await;

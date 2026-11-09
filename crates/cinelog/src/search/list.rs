@@ -24,6 +24,7 @@ const PAGE: usize = 500;
 /// Display caps of the result line (fzf matches on what it shows).
 const TYPED_CHARS: usize = 300;
 const SNIPPET_CHARS: usize = 200;
+const TAGS_CHARS: usize = 100;
 
 /// How results are presented.
 pub enum Ui<'a> {
@@ -264,8 +265,9 @@ pub fn collect(
     Ok(all)
 }
 
-/// `<entry>\t<ts>\t<user>@<host>\t[exit]\t<typed>[\t┊ <snippet>]` (§9.5). The hidden first
-/// field is the [`EntryRef`] that `cinelog show` takes.
+/// `<entry>\t<ts>\t<user>@<host>\t[exit]\t<typed>[ [tag,…]][\t┊ <snippet>]` (§9.5), the
+/// tags of the command's annotations only when it has any. The hidden first field is the
+/// [`EntryRef`] that `cinelog show` takes.
 pub fn hit_line(hit: &SearchHit, env: &Env, style: Style) -> String {
     let ts = style.paint(DIM, &text::fmt_ts(hit.ts, &env.tz));
     let who = format!("{}@{}", text::one_line(&hit.user, 64), text::one_line(&hit.host, 64));
@@ -280,6 +282,11 @@ pub fn hit_line(hit: &SearchHit, env: &Env, style: Style) -> String {
         None => style.paint(DIM, "(outside commands)"),
     };
     let mut line = format!("{}\t{ts}\t{who}\t{exit}\t{typed}", hit.entry());
+    if !hit.tags.is_empty() {
+        let tags = text::one_line(&hit.tags.join(","), TAGS_CHARS);
+        line.push(' ');
+        line.push_str(&style.paint(DIM, &format!("[{tags}]")));
+    }
     if hit.kind == HitKind::Output {
         line.push_str("\t┊ ");
         match hit.chunk_kind {
@@ -296,7 +303,8 @@ pub fn hit_line(hit: &SearchHit, env: &Env, style: Style) -> String {
     line
 }
 
-/// A hit as JSON: the [`SearchHit`] fields plus `entry` (and `url` once a server runs).
+/// A hit as JSON: the [`SearchHit`] fields (`tags` always, empty without annotations) plus
+/// `entry` (and `url` once a server runs).
 pub fn hit_json(hit: &SearchHit, url: Option<String>) -> serde_json::Value {
     let mut v = serde_json::to_value(hit).unwrap_or_default();
     if let Some(obj) = v.as_object_mut() {
@@ -473,6 +481,7 @@ mod tests {
                     chunk_kind: None,
                     approx: false,
                     confidence: None,
+                    tags: Vec::new(),
                 })
                 .collect();
             let next = (end < self.total || self.partial).then(|| Cursor {

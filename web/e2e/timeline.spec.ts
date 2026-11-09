@@ -270,7 +270,7 @@ function week(to: number, per: number, aggregated: boolean): Timeline {
         tty: '/dev/pts/1',
         sessions: [{ uuid: session, user: 'root', state: 'ended' as const, started_at: from, ended_at: to, parent_uuid: null, legacy: false }],
         blocks: aggregated ? [] : blocks,
-        marks: [{ session, kind: 'skip' as const, ts: from + 9 * 3600, ts_end: null, reason: null, detail: null, child: null }],
+        marks: [{ session, kind: 'skip' as const, ts: from + 9 * 3600, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null }],
         density,
       });
     }

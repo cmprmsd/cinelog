@@ -641,13 +641,17 @@ t_root_refuses_writable_module() {
   chmod g+w $R/mod
   run_root --base-url=file:///rel --arch x86_64; assert_eq $? 1 || return 1
   contains $T/err "refusing to run as root" || return 1
+  not_contains $T/err "team install" || return 1
   [[ ! -e $R/mod/bin ]] || fail "created bin/"
 }
 
 t_root_refuses_foreign_owned_module() {
   setup_root root_foreign || return
   run_root --dir=/usr/share --base-url=file:///rel --arch x86_64; assert_eq $? 1 || return 1
-  contains $T/err "refusing to run as root"
+  contains $T/err "refusing to run as root" || return 1
+  # Root's zsh sourcing a member's module: point at the team install instead.
+  contains $T/err "root shells are recorded by the team install - as " || return 1
+  contains $T/err "run cinelog-fetch, then: sudo /usr/share/bin/cinelog install --team --system-zshrc"
 }
 
 # Regression: as root, CINELOG_FETCH_BASE_URL (kept by sudo -E) chose where the release

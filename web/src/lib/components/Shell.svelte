@@ -208,6 +208,7 @@
       'focus-search': () => searchBar?.focus(),
       help: () => sheet?.toggle(),
       timeline: () => router.goto('/timeline'),
+      annotations: () => router.goto('/annotations'),
       'toggle-live': () => {
         if (route.name === 'session') router.goto(liveHref(route.uuid));
         else if (route.name === 'live') router.goto(`/s/${route.uuid}`);
@@ -349,7 +350,7 @@
       {:else if route.name === 'session'}
         <SessionPage uuid={route.uuid} />
       {:else if route.name === 'timeline'}
-        <TimelinePage />
+        <TimelinePage scope={me.scope} />
       {:else if route.name === 'annotations'}
         <AnnotationsPage />
       {:else if route.name === 'live'}

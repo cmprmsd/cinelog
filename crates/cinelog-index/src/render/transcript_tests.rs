@@ -572,15 +572,29 @@ fn one_large_event_and_endless_lines() {
 }
 
 /// Regression: `stty cols 65535 rows 65535` in a recorded shell made the indexer allocate a
-/// 65535x65535 terminal (OOM abort of the daemon). Sizes are clamped like the web player's.
+/// 65535x65535 terminal (OOM abort of the daemon), and a legacy cast's resize to 3350 columns
+/// rendered at 1000. Implausible sizes are dropped like the web player drops them; a header's
+/// becomes the fallback size.
 #[test]
-fn huge_terminal_sizes_are_clamped() {
+fn implausible_terminal_sizes_are_dropped() {
+    use cinelog_cast::{FALLBACK_SIZE, MAX_COLS, MAX_ROWS};
     let mut t = tr(u16::MAX, u16::MAX);
+    assert_eq!(t.size(), FALLBACK_SIZE);
+    t.resize(at(0.5), 120, 40);
+    assert_eq!(t.size(), (120, 40));
+    for (c, r) in [
+        (u16::MAX, 3),
+        (3350, 40),
+        (MAX_COLS + 1, 40),
+        (120, MAX_ROWS + 1),
+        (0, 0),
+        (80, 0),
+    ] {
+        t.resize(at(1.0), c, r);
+        assert_eq!(t.size(), (120, 40), "{c}x{r}");
+    }
+    t.resize(at(2.0), MAX_COLS, MAX_ROWS);
     assert_eq!(t.size(), (MAX_COLS, MAX_ROWS));
-    t.resize(at(1.0), u16::MAX, 3);
-    assert_eq!(t.size(), (MAX_COLS, 3));
-    t.resize(at(2.0), 0, 0);
-    assert_eq!(t.size(), (1, 1));
     t.resize(at(3.0), 80, 24);
     t.output(at(4.0), "still fine\r\n");
     let all: Vec<String> = t.finish(at(5.0)).into_iter().map(|c| c.text).collect();

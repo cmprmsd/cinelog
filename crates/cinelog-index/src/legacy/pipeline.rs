@@ -188,7 +188,8 @@ impl LegacyPipeline {
             Some(r) => r,
             None => {
                 let (reader, _) = src.reader(None)?;
-                let tr = (tsrc.new)(src.header.term.cols, src.header.term.rows, opts.render)?;
+                let (cols, rows) = src.header.term.size();
+                let tr = (tsrc.new)(cols, rows, opts.render)?;
                 (reader, tr, State::new(log_stamp))
             }
         };
@@ -233,7 +234,9 @@ impl LegacyPipeline {
                 self.st.scanner = scanner;
             }
             EventCode::Resize => {
-                if let Some((cols, rows)) = cinelog_cast::parse_resize(data) {
+                // Implausible sizes (the old plugin's tmux bugs wrote resizes to 3350
+                // columns) are dropped here as in the transcript and the player.
+                if let Some((cols, rows)) = cinelog_cast::parse_sane_resize(data) {
                     // A banner may straddle the resize: keep its prefix, now timed here.
                     self.st.scanner.retime(at);
                     self.tr.resize(at, cols, rows);
@@ -669,8 +672,8 @@ fn session_meta(opts: &LegacyOptions, src: &Source, uuid: &str) -> SessionMeta {
         ended_at: None,
         exit_status: None,
         tz: jiff::tz::TimeZone::system().iana_name().map(str::to_owned),
-        cols: src.header.term.cols,
-        rows: src.header.term.rows,
+        cols: src.header.term.size().0,
+        rows: src.header.term.size().1,
         term: term_of(src),
         legacy: true,
         hidden: false,

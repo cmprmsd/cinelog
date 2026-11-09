@@ -315,6 +315,11 @@ annotations, in one meta.db transaction, so forgets and annotations follow the c
 3. Chapters for the command strip come from `/commands`; the player's own markers come from
    the stream (`cast`) or the index (`segmented`).
 
+Terminal sizes are sanity-checked in every mode, in export and by the indexer alike
+(`cinelog_cast::sane_size`): an `r` event to a size beyond 1000x500 or with a zero is
+dropped and the size before it stays (the old plugin's tmux bugs recorded resizes to 3350
+columns); a header with such a size is served as 80x24.
+
 ### 6.1 `GET /api/sessions/{uuid}/cast`
 `Content-Type: application/x-asciicast`, streamed. One asciicast v3 document over all
 parts: the header of part 1 (`version` first, `term`, `timestamp`), then the events with
@@ -433,10 +438,15 @@ event names must be ignored.
 | `tag` | `Tag` | after a tag is created or its colour changes |
 | `forgotten` | `Forgotten` | after `POST /api/forget`, and within 2 s for rows `cinelog forget` adds to meta.db |
 
-`LiveSession {session, status, reason, detail, since}`: `status` `recording`, `paused` or
-`degraded` (the registry state); `reason`/`detail` split the registry `state_reason` at the
-first `": "` (`api::types::split_state_reason`): `multiplexer` / `tmux: client`, `nested` /
-`<child uuid>`, `user` / `<--reason text>`, or the degraded error. A session not yet in
+`LiveSession {session, status, reason, detail, since, child_scope, child_url}`: `status`
+`recording`, `paused` or `degraded` (the registry state); `reason`/`detail` split the
+registry `state_reason` at the first `": "` (`api::types::split_state_reason`):
+`multiplexer` / `tmux: client`, `nested` / `<child uuid>`, `user` / `<--reason text>`, or
+the degraded error. With `reason` `nested`, `child_scope` and `child_url` are the `scope`
+and `url` of the last `nested` marker for that child in the cast part being written (read
+from its last 64 KiB; `null` until the marker is found, which may be one poll after the
+status): the live view links a child of the other scope to `/live/<uuid>` on that scope's
+server, like the timeline's `nested` points. A session not yet in
 index.db is sent with what the registry and the cast header give (`commands: 0`, `duration:
 null`) and updated once indexed. A subscriber that falls more than 1024 events behind gets a
 fresh `hello` and should refetch what it shows (annotations, timeline).
@@ -476,9 +486,15 @@ expired session signs out; while `status !== 'open'` callers fall back to pollin
   markers (`reason`, `detail` from the marker; without a `resume`, `ts_end` is `null` while
   live, else the session end), `skip` points (leading-space commands), `nested` points
   (`reason` = mode, `detail` = user, `child` = the nested session, `null` when that one is
-  forgotten), `gap` spans (dropped output; `ts..ts_end` is `marker.t - (to_t - from_t)` ..
+  forgotten; with a `child`, `child_scope` = its scope and `child_url` = the session URL
+  its recorder reported, from the marker's `scope` and `url`), `gap` spans (dropped output; `ts..ts_end` is `marker.t - (to_t - from_t)` ..
   `marker.t`, from the part offsets) and `forgotten` spans (`SessionDetail.masked`;
-  `detail` = who). Every pause or skip is visible (plan §15.2).
+  `detail` = who). Every pause or skip is visible (plan §15.2). A click on a `nested` point
+  opens the child in-app when it has this server's scope; a child of the other scope (a
+  TEAM `sudo -i` in a PERSONAL shell) is served by the other scope's server, so the client
+  opens it there in a new tab (`child_url` when it is an https URL of that very session,
+  else the TEAM default port 10000 on this host; a PERSONAL child seen from TEAM without
+  `child_url` gets no link).
 - **Idle:** spans of at least 600 s inside the window in which no block and no mark is drawn
   in any row (`idle`), drawn collapsed as a break mark. Pause, gap and forgotten spans count
   as busy (an open one until the session end, or now while live); skip and nested points

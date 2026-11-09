@@ -79,10 +79,9 @@ impl OutEvent {
     }
 }
 
-/// Resize data as served: clamped to [`super::source::MAX_COLS`] x
-/// [`super::source::MAX_ROWS`] (players allocate every cell too); `None` for data that is
-/// no size (or has a zero), which the server's terminal ignores and so the player must not
-/// see either.
+/// Resize data as served: `None` for data that is no size, or not a plausible one
+/// ([`cinelog_cast::sane_size`]; players allocate every cell too, and shrink the screen to
+/// fit), which the server's terminal ignores and so the player must not see either.
 fn resize_data(data: &str) -> Option<String> {
     let (c, r) = super::source::parse_size(data)?;
     Some(cinelog_cast::format_resize(c, r))
@@ -315,16 +314,19 @@ mod tests {
     }
 
     #[test]
-    fn resizes_are_clamped_or_dropped() {
+    fn implausible_resizes_are_dropped() {
         let mask = Mask::default();
         let mut r = Rewriter::new(&mask, vec![], true);
-        assert_eq!(
-            r.push(ev(1, EventCode::Resize, "65535x65535")),
-            Some(OutEvent::new(1, 'r', "1000x500"))
-        );
+        assert_eq!(r.push(ev(1, EventCode::Resize, "65535x65535")), None);
+        // A legacy cast's resize from the old plugin's tmux bugs.
+        assert_eq!(r.push(ev(1, EventCode::Resize, "3350x50")), None);
         assert_eq!(
             r.push(ev(2, EventCode::Resize, "80x24")),
             Some(OutEvent::new(2, 'r', "80x24"))
+        );
+        assert_eq!(
+            r.push(ev(2, EventCode::Resize, "1000x500")),
+            Some(OutEvent::new(2, 'r', "1000x500"))
         );
         assert_eq!(r.push(ev(3, EventCode::Resize, "80x0")), None);
         assert_eq!(r.push(ev(4, EventCode::Resize, "wide")), None);
@@ -337,9 +339,10 @@ mod tests {
             HashSet::new(),
         );
         let mut r = Rewriter::new(&masked, vec![], true);
+        assert_eq!(r.push(ev(5, EventCode::Resize, "2000x30")), None);
         assert_eq!(
-            r.push(ev(5, EventCode::Resize, "2000x30")),
-            Some(OutEvent::new(5, 'r', "1000x30"))
+            r.push(ev(6, EventCode::Resize, "200x30")),
+            Some(OutEvent::new(6, 'r', "200x30"))
         );
     }
 

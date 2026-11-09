@@ -73,6 +73,8 @@ function marks(f: FixSession, now: number): TimelineMark[] {
     reason: null,
     detail: null,
     child: null,
+    child_scope: null,
+    child_url: null,
   });
   const out: TimelineMark[] = [];
   let paused: TimelineMark | null = null;
@@ -91,7 +93,7 @@ function marks(f: FixSession, now: number): TimelineMark[] {
         out.push(mark('skip', at(m), null));
         break;
       case 'nested':
-        out.push({ ...mark('nested', at(m), null), reason: str(m.data.mode), detail: str(m.data.user), child: str(m.data.child_uuid) });
+        out.push({ ...mark('nested', at(m), null), reason: str(m.data.mode), detail: str(m.data.user), child: str(m.data.child_uuid), child_scope: m.data.scope === 'team' || m.data.scope === 'personal' ? m.data.scope : null, child_url: str(m.data.url) });
         break;
       case 'gap': {
         const from = typeof m.data.from_t === 'number' ? m.data.from_t : m.t;

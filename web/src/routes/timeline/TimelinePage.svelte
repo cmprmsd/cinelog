@@ -1,11 +1,11 @@
 <script lang="ts">
   // Team timeline (work package M4-B; plan §8.3, §15.2; docs/API.md §9.3). Route
-  // `/timeline?from=&to=&group=user|pane`, mounted by `Shell` without props. A click on a
-  // command opens its session below the chart (`SessionView`, commands and player); the
-  // opened command is kept in the URL as `open=<uuid>&cmd=<seq>`.
+  // `/timeline?from=&to=&group=user|pane`, mounted by `Shell` with the server's scope. A
+  // click on a command opens its session below the chart (`SessionView`, commands and
+  // player); the opened command is kept in the URL as `open=<uuid>&cmd=<seq>`.
   import { api, errorText, isAbort } from '../../lib/api/client';
   import { bus } from '../../lib/api/events.svelte';
-  import type { Timeline, TimelineBlock, TimelineGroup } from '../../lib/api/types';
+  import type { Scope, Timeline, TimelineBlock, TimelineGroup } from '../../lib/api/types';
   import SessionView from '../../lib/components/SessionView.svelte';
   import { EMPTY } from '../../lib/filters';
   import { fmtDuration, fmtTs, shortId, tzLabel } from '../../lib/format';
@@ -26,6 +26,9 @@
     zoomWindow,
     type TimelineView,
   } from './view';
+
+  /** This server's scope (`Me.scope`): nested children of the other scope open on their server. */
+  let { scope = null }: { scope?: Scope | null } = $props();
 
   /** Follow mode re-reads the window this often (and the bus triggers reloads sooner). */
   const FOLLOW_MS = 60_000;
@@ -237,6 +240,7 @@
           onopen={openBlock}
           onopensession={(uuid) => setOpen(uuid, null)}
           onzoom={(from, to) => setWindow({ from, to })}
+          {scope}
         />
       {/if}
     {:else if !error}
@@ -264,6 +268,9 @@
     height: 100%;
     padding: 0.6rem 0.8rem;
     overflow: auto;
+    /* The session view below the chart sizes its player to this pane's height (cqh), so
+       scrolled to it, it fits. */
+    container-type: size;
   }
   .bar {
     display: flex;

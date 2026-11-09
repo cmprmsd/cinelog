@@ -316,6 +316,19 @@ _clf_state_dir() {
   REPLY=$home/.local/state/cinelog
 }
 
+# After refusing a module that another user owns (root's zsh sourcing a member's zim
+# checkout): root does not fetch into it, root shells get their binary from the team
+# install, which that member runs once from the module (README "Team (root) recording").
+_clf_root_hint() {
+  emulate -L zsh
+  zmodload -F zsh/stat b:zstat || return 0
+  local -A st
+  zstat -s -H st -- $1 2>/dev/null && [[ $st[uid] != root ]] || return 0
+  local b=${1//[[:cntrl:]]/}/bin/cinelog pre='run: '
+  [[ -x $b ]] || pre="as ${st[uid]//[[:cntrl:]]/} run cinelog-fetch, then: "
+  print -ru2 -- "cinelog-fetch: root shells are recorded by the team install - ${pre}sudo ${(q-)b} install --team --system-zshrc"
+}
+
 # Creates <sd> for root, refusing any part of it (or of fetch.lock) that is not root-owned and
 # non-writable for others: a planted symlink would otherwise let root create files elsewhere.
 _clf_root_state_ok() {
@@ -385,6 +398,7 @@ _clf_main() {
     if ! _clf_tree_secure $dir 0 || { [[ -e $dir/bin || -h $dir/bin ]] && ! _clf_tree_secure $dir/bin 0 } ||
        ! _clf_file_secure $dir/VERSION 0; then
       _clf_err "refusing to run as root: $dir (or a parent, bin/ or VERSION) is not root-owned or is group/world-writable"
+      _clf_root_hint $dir
       return 1
     fi
   fi

@@ -92,7 +92,7 @@ function finish(res: ServerResponse, offline: boolean): void {
 }
 
 function liveSession(f: FixSession, over: Partial<LiveSession> = {}): LiveSession {
-  return { session: f.session, status: 'recording', reason: null, detail: null, since: null, ...over };
+  return { session: f.session, status: 'recording', reason: null, detail: null, since: null, child_scope: null, child_url: null, ...over };
 }
 
 async function openStream(ctx: MockContext, f: FixSession, req: IncomingMessage, res: ServerResponse): Promise<void> {

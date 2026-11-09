@@ -1,8 +1,6 @@
 //! `GET /api/search` and `GET /api/show` over the M2 query engine (docs/API.md §5.4, §5.5).
 
-use std::collections::HashMap;
-
-use cinelog_index::model::{self as im, AnnotationQuery, Cursor, EntryRef, ExitFilter, SearchFilters, SearchQuery};
+use cinelog_index::model::{self as im, Cursor, EntryRef, ExitFilter, SearchFilters, SearchQuery};
 
 use super::db::{self, IndexDb};
 use super::types::{
@@ -78,18 +76,12 @@ pub(crate) fn search(ctx: &WebContext, p: &SearchParams) -> Result<SearchRespons
     let page = db::searcher(ctx)?.search(&q)?;
     let uuids: Vec<&str> = page.hits.iter().map(|h| h.session_uuid.as_str()).collect();
     let context = IndexDb::open(ctx)?.hit_context(&uuids)?;
-    let tags = hit_tags(ctx, &page.hits)?;
     let hits = page
         .hits
         .iter()
         .map(|h| {
             let (pane, tmux_session, legacy) = context.get(&h.session_uuid).cloned().unwrap_or_default();
-            let tags = h
-                .cmd_seq
-                .and_then(|seq| tags.get(&(h.session_uuid.clone(), seq)))
-                .cloned()
-                .unwrap_or_default();
-            hit(h, &q, pane, tmux_session, legacy, tags)
+            hit(h, &q, pane, tmux_session, legacy)
         })
         .collect();
     Ok(SearchResponse {
@@ -100,44 +92,12 @@ pub(crate) fn search(ctx: &WebContext, p: &SearchParams) -> Result<SearchRespons
     })
 }
 
-/// The tags of the non-deleted command annotations on the hits' commands, sorted and
-/// without duplicates, by `(session, seq)`: one meta.db query per page, for just the
-/// page's commands. Hits are never forgotten commands, so no annotation here is gone
-/// with one.
-fn hit_tags(ctx: &WebContext, hits: &[im::SearchHit]) -> Result<HashMap<(String, u64), Vec<String>>> {
-    let mut commands: Vec<(String, u64)> = hits
-        .iter()
-        .filter_map(|h| Some((h.session_uuid.clone(), h.cmd_seq?)))
-        .collect();
-    commands.sort_unstable();
-    commands.dedup();
-    let mut out: HashMap<(String, u64), Vec<String>> = HashMap::new();
-    if commands.is_empty() || !ctx.db.meta.exists() {
-        return Ok(out);
-    }
-    let meta = cinelog_index::db::open_meta(&ctx.db)?;
-    for a in meta.find_annotations(&AnnotationQuery {
-        commands,
-        ..AnnotationQuery::default()
-    })? {
-        if let Some(seq) = a.cmd_seq {
-            out.entry((a.session_uuid, seq)).or_default().extend(a.tags);
-        }
-    }
-    for tags in out.values_mut() {
-        tags.sort_unstable();
-        tags.dedup();
-    }
-    Ok(out)
-}
-
 fn hit(
     h: &im::SearchHit,
     q: &SearchQuery,
     pane: Option<String>,
     tmux_session: Option<String>,
     legacy: bool,
-    tags: Vec<String>,
 ) -> SearchHit {
     let (id, mut snippet) = match h.kind {
         im::HitKind::Command => (
@@ -174,7 +134,8 @@ fn hit(
         approx: h.approx,
         confidence: h.confidence,
         legacy,
-        tags,
+        // The searcher reads them from meta.db with the page.
+        tags: h.tags.clone(),
     }
 }
 

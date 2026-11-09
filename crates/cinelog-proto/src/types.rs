@@ -909,6 +909,39 @@ pub struct ShellOpts {
     pub title_link: bool,
     /// Session web URL (empty before M3).
     pub url: String,
+    /// What the MOTD says about the web UI besides the URL (PERSONAL only).
+    pub web: WebHint,
+}
+
+/// The state of the personal web UI as the recorder saw it before the shell started
+/// (`web=` in `CINELOG_OPTS`; empty for [`WebHint::None`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebHint {
+    /// Nothing to say: the URL is known, autostart is off, or TEAM scope.
+    #[default]
+    None,
+    /// `cinelog install` never ran: there is no login token yet (`install`).
+    Install,
+    /// No server ran yet; the recorder starts one right after the fork (`starting`).
+    Starting,
+}
+
+impl WebHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Install => "install",
+            Self::Starting => "starting",
+        }
+    }
+
+    fn parse(v: &str) -> Self {
+        match v {
+            "install" => Self::Install,
+            "starting" => Self::Starting,
+            _ => Self::None,
+        }
+    }
 }
 
 impl Default for ShellOpts {
@@ -921,6 +954,7 @@ impl Default for ShellOpts {
             title: true,
             title_link: false,
             url: String::new(),
+            web: WebHint::None,
         }
     }
 }
@@ -930,14 +964,15 @@ impl ShellOpts {
         let b = |v: bool| if v { "1" } else { "0" };
         let url = self.url.replace('%', "%25").replace(',', "%2C").replace('=', "%3D");
         format!(
-            "motd={},banners={},check_free_space={},external_ip={},title={},title_link={},url={}",
+            "motd={},banners={},check_free_space={},external_ip={},title={},title_link={},url={},web={}",
             b(self.motd),
             b(self.banners),
             b(self.check_free_space),
             b(self.external_ip),
             b(self.title),
             b(self.title_link),
-            url
+            url,
+            self.web.as_str()
         )
     }
 
@@ -955,6 +990,7 @@ impl ShellOpts {
                 "title" => o.title = flag,
                 "title_link" => o.title_link = flag,
                 "url" => o.url = v.replace("%3D", "=").replace("%2C", ",").replace("%25", "%"),
+                "web" => o.web = WebHint::parse(v),
                 _ => {}
             }
         }
@@ -1151,18 +1187,22 @@ mod tests {
         let o = ShellOpts {
             motd: false,
             url: "https://h:10000/s/x?cmd=1,2".into(),
+            web: WebHint::Install,
             ..ShellOpts::default()
         };
         let env = o.to_env_value();
         assert!(!env.split(',').any(|p| p.matches('=').count() != 1), "{env}");
         assert_eq!(ShellOpts::parse_env_value(&env), o);
         assert_eq!(
-            ShellOpts::parse_env_value("garbage,motd=0"),
+            ShellOpts::parse_env_value("garbage,motd=0,web=later,future=1"),
             ShellOpts {
                 motd: false,
                 ..ShellOpts::default()
             }
         );
+        // Older recorders send no `web`; the default says nothing.
+        assert!(ShellOpts::default().to_env_value().ends_with(",url=,web="));
+        assert_eq!(ShellOpts::parse_env_value("web=starting").web, WebHint::Starting);
     }
 
     #[test]

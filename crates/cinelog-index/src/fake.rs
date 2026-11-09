@@ -100,6 +100,20 @@ impl State {
         (Some(t), capped)
     }
 
+    /// The tags of the non-deleted annotations on a command, sorted and distinct.
+    fn command_tags(&self, uuid: &str, seq: Option<Seq>) -> Vec<String> {
+        let Some(seq) = seq else { return Vec::new() };
+        let mut tags: Vec<String> = self
+            .annotations
+            .values()
+            .filter(|a| a.deleted_at.is_none() && a.session_uuid == uuid && a.cmd_seq == Some(seq))
+            .flat_map(|a| a.tags.iter().cloned())
+            .collect();
+        tags.sort_unstable();
+        tags.dedup();
+        tags
+    }
+
     fn session_forgotten(&self, uuid: &str) -> bool {
         self.forgotten_applied
             .iter()
@@ -544,6 +558,7 @@ impl Searcher for MemIndex {
                         chunk_kind: None,
                         approx: c.approx,
                         confidence: c.confidence,
+                        tags: Vec::new(),
                     });
                 }
             }
@@ -575,6 +590,7 @@ impl Searcher for MemIndex {
                     chunk_kind: Some(ch.kind),
                     approx: cmd.is_some_and(|c| c.approx),
                     confidence: cmd.and_then(|c| c.confidence),
+                    tags: Vec::new(),
                 });
             }
         }
@@ -593,6 +609,9 @@ impl Searcher for MemIndex {
         let capped = hits.len() > CANDIDATE_CAP || tags_capped;
         let more = hits.len() > q.limit;
         hits.truncate(q.limit);
+        for h in &mut hits {
+            h.tags = st.command_tags(&h.session_uuid, h.cmd_seq);
+        }
         let next = more.then(|| hits.last()).flatten().map(|h| Cursor {
             ts: h.ts,
             kind: h.kind,

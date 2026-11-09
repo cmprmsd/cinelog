@@ -526,6 +526,54 @@ mod tests {
             "{out}"
         );
 
+        // Annotation tags reach --json and --print; deleted and span annotations add none.
+        {
+            let mut meta = store.meta().unwrap();
+            let note = |uuid: &str, seq: Option<u64>, tags: &[&str], deleted: bool| cinelog_index::model::Annotation {
+                uuid: uuid.into(),
+                session_uuid: U1.into(),
+                cmd_seq: seq,
+                t_from: seq.is_none().then_some(0.0),
+                t_to: seq.is_none().then_some(1e9),
+                author: "alice".into(),
+                body: String::new(),
+                tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+                created_at: 1.0,
+                updated_at: 1.0,
+                deleted_at: deleted.then_some(2.0),
+            };
+            meta.put_annotation(&note("a1", Some(2), &["ops", "db"], false))
+                .unwrap();
+            meta.put_annotation(&note("a2", Some(2), &["ops"], false)).unwrap();
+            meta.put_annotation(&note("a3", Some(2), &["old"], true)).unwrap();
+            meta.put_annotation(&note("a4", None, &["span"], false)).unwrap();
+        }
+        let run = |argv: &[&str], ui: list::Ui<'_>| {
+            let Command::Search(a) = parse(&[&["search"], argv].concat()) else {
+                unreachable!()
+            };
+            capture(|o, e| list::search(&a, &store, &env(), ui, o, e)).1
+        };
+        let hits: Vec<serde_json::Value> = run(&["--json", "-a", "needle"], list::Ui::Json)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        for h in &hits {
+            let want = if h["entry"] == format!("{U1}:2") {
+                serde_json::json!(["db", "ops"])
+            } else {
+                serde_json::json!([])
+            };
+            assert_eq!(h["tags"], want, "{h}");
+        }
+        let lines = run(&["--print", "grep"], list::Ui::Plain);
+        assert!(lines.contains("\tgrep needle notes.txt [db,ops]\n"), "{lines:?}");
+        let lines = run(&["--print", "ls"], list::Ui::Plain);
+        assert!(
+            lines.ends_with("\tls -la /tmp\n"),
+            "untagged lines keep their form: {lines:?}"
+        );
+
         // A running indexer holds the writer lock: the reader hides the session at once.
         let held = db::open_writer(&store.paths, &store.index_cfg).unwrap();
         let (c, out, err) = forget(U2);

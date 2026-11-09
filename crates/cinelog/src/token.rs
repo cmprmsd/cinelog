@@ -47,7 +47,11 @@ pub fn run(args: &TokenArgs) -> ExitCode {
         TokenAction::TeamLogin { url, fingerprint } => {
             team_login(&ctx, url.as_deref(), fingerprint.as_deref(), &mut Terminal, &mut out)
         }
-        action => manage(&ctx, action, cinelog_web::now(), &mut out),
+        action => {
+            // The new token is printed with the terminal's recording paused.
+            let mut secret = |out: &mut dyn Write, line: &str| crate::pause::write_unrecorded(&ctx, out, line);
+            manage(&ctx, action, cinelog_web::now(), &mut out, &mut secret)
+        }
     };
     let _ = out.flush();
     match result {
@@ -89,8 +93,12 @@ pub fn ensure_named(file: &Path, name: &str, now: f64) -> Result<Option<NewToken
     })
 }
 
-/// `new`, `list` and `revoke` on this scope's token file.
-fn manage(ctx: &Ctx, action: &TokenAction, now: f64, out: &mut dyn Write) -> Result<u8> {
+/// Writes a line that holds a secret to `out`.
+type SecretWriter<'a> = dyn FnMut(&mut dyn Write, &str) -> io::Result<()> + 'a;
+
+/// `new`, `list` and `revoke` on this scope's token file; `new` writes the token line
+/// through `secret`.
+fn manage(ctx: &Ctx, action: &TokenAction, now: f64, out: &mut dyn Write, secret: &mut SecretWriter<'_>) -> Result<u8> {
     let file = &ctx.paths.auth_file;
     let team = ctx.scope() == Scope::Team;
     match action {
@@ -113,7 +121,10 @@ fn manage(ctx: &Ctx, action: &TokenAction, now: f64, out: &mut dyn Write) -> Res
                     Ok((tf.add(&name, now)?, old))
                 })?
             };
-            writeln!(out, "token for {} (shown once): {}", token.name, token.secret)?;
+            secret(
+                out,
+                &format!("token for {} (shown once): {}\n", token.name, token.secret),
+            )?;
             for principal in replaced {
                 let n = end_sessions(ctx, &principal)
                     .with_context(|| format!("the old token is gone, but its web sessions of {principal} remain"))?;
@@ -1443,7 +1454,9 @@ mod tests {
 
     fn run_action(ctx: &Ctx, action: TokenAction) -> (Result<u8>, String) {
         let mut out = Vec::new();
-        let r = manage(ctx, &action, 1_794_139_200.5, &mut out);
+        let r = manage(ctx, &action, 1_794_139_200.5, &mut out, &mut |out, line| {
+            out.write_all(line.as_bytes())
+        });
         (r, String::from_utf8(out).unwrap())
     }
 

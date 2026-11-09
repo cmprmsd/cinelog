@@ -28,7 +28,7 @@ use crate::error::{Result, WebError};
 use crate::play::body::{Sink, streamed};
 use crate::play::plan::{apply, terminal};
 use crate::play::session::{Loaded, mode_for};
-use crate::play::source::{Events, StartPoint, clamp_size, parse_size, secs_to_us, us_to_secs};
+use crate::play::source::{Events, StartPoint, parse_size, secs_to_us, us_to_secs};
 use crate::play::stream::{LabelMerge, OutEvent, Rewriter, v3_line};
 use crate::play::{CAST_CONTENT_TYPE, cast::header_line};
 use crate::state::AppState;
@@ -142,7 +142,7 @@ fn origin(st: &AppState, s: &Loaded, from_us: u64) -> Result<Origin> {
     Ok(Origin {
         at: StartPoint::ORIGIN,
         start_us: 0,
-        size: clamp_size((h.term.cols, h.term.rows)),
+        size: h.term.size(),
         init: String::new(),
         shown: Vec::new(),
     })
