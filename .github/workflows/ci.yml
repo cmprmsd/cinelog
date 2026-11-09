@@ -161,7 +161,7 @@ jobs:
 
   integration:
     name: integration (zsh, tmux, sudo, screen, fzf)
-    needs: rust
+    needs: [rust, web]
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -204,6 +204,21 @@ jobs:
           sudo chmod 0440 /etc/sudoers.d/cinelog-clpw
           sudo visudo -cf /etc/sudoers.d/cinelog-clpw
           { echo CINELOG_IT_PW_USER=clpw; echo "CINELOG_IT_PW_PASS=$pw"; } >> "$GITHUB_ENV"
+      # I22 checks that /s/<uuid> serves the real SPA, so embed the built web/dist.
+      - if: needs.web.outputs.present == 'true'
+        uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Namespace diagnostics (I17 mounts its own /proc)
+        continue-on-error: true
+        run: |
+          uname -r
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.apparmor_restrict_unprivileged_unconfined 2>&1 || true
+          findmnt -R -o TARGET,FSTYPE,OPTIONS /proc || true
+          ls -l "$(command -v mount)" "$(command -v unshare)"
+          unshare -rmpf sh -c 'mount -t proc proc /proc && echo "proc mount in userns: ok"' 2>&1 || true
+          unshare -rmpf --mount-proc sh -c 'echo "--mount-proc: ok"' 2>&1 || true
       # The harness uses these binaries instead of building its own (tests/it/src/binary.rs).
       - name: Build the binaries under test
         run: |
