@@ -126,9 +126,9 @@ fn script(layout: &Layout, work: &Path, inner: &[String]) -> String {
     let devpts = "mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts || exit 92\n\
                   mount --bind /dev/pts/ptmx /dev/ptmx || exit 93\n";
     let mut s = format!(
-        // Older util-linux (2.39, Ubuntu 24.04) can start the shell before newuidmap has
-        // written the maps; mount(8) then still sees an unmapped uid ("must be superuser").
-        "n=0; while [ \"$(id -u)\" != 0 ]; do n=$((n+1)); [ $n -gt 500 ] && {{ id >&2; exit 90; }}; sleep 0.01; done\n\
+        // Wait for both maps (written from outside, see `run`): mount(8) refuses an unmapped
+        // uid, and a nested `unshare -U` fails with EPERM while the gid is still unmapped.
+        "n=0; while [ \"$(id -u):$(id -g)\" != 0:0 ]; do n=$((n+1)); [ $n -gt 500 ] && {{ id >&2; exit 90; }}; sleep 0.01; done\n\
          mount -t proc -o {proc} proc /proc || {{ id >&2; exit 91; }}\n\
          unshare -U --map-user={uid} --map-group={gid} sleep 3600 & anchor=$!\n\
          n=0; while [ \"$(readlink /proc/$anchor/ns/user)\" = \"$(readlink /proc/self/ns/user)\" ]; do\n\
