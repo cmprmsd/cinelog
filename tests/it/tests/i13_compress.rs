@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use cinelog_it::index::{IndexDb, STORAGE_COLUMNS};
 use cinelog_it::synth::{CorpusSpec, Rng, SynthCast, corpus};
-use cinelog_it::util::{now_us, set_times, sha256_file};
+use cinelog_it::util::{assert_same_hits, now_us, set_times, sha256_file};
 use cinelog_it::{Need, Sandbox, SandboxOptions, Serve, need, scaled, wait_until};
 
 const DAY_US: u64 = 86_400_000_000;
@@ -69,12 +69,14 @@ fn write_legacy(logs: &Path) -> Vec<PathBuf> {
 }
 
 /// `(entry, kind, typed, snippet)` of every hit of `cinelog search --json -a <term>`.
-fn search(sb: &Sandbox, term: &str) -> Vec<String> {
-    sb.search_json(&["-a", term])
-        .unwrap()
+/// The hits for `term` and whether the scan was cut short (see `search_json_full`).
+fn search(sb: &Sandbox, term: &str) -> (Vec<String>, bool) {
+    let (v, partial) = sb.search_json_full(&["-a", term]).unwrap();
+    let hits = v
         .iter()
         .map(|h| format!("{} {} {} {}", h["entry"], h["kind"], h["typed"], h["snippet"]))
-        .collect()
+        .collect();
+    (hits, partial)
 }
 
 fn show(sb: &Sandbox, entry: &str) -> String {
@@ -231,8 +233,8 @@ fn i13_compress_now_keeps_search_slices_and_legacy_intact() {
         "fresh-cast",
         "git status",
     ];
-    let searches: Vec<Vec<String>> = terms.iter().map(|t| search(&sb, t)).collect();
-    assert!(searches.iter().all(|s| !s.is_empty()), "{searches:?}");
+    let searches: Vec<(Vec<String>, bool)> = terms.iter().map(|t| search(&sb, t)).collect();
+    assert!(searches.iter().all(|(s, _)| !s.is_empty()), "{searches:?}");
     let entries: Vec<String> = aged
         .iter()
         .flat_map(|(_, c)| {
@@ -299,8 +301,15 @@ fn i13_compress_now_keeps_search_slices_and_legacy_intact() {
     }
     let frames_compressed = db.dump(&[]).unwrap().tables["zst_frames"].clone();
     drop(db);
-    for (t, s) in terms.iter().zip(&searches) {
-        assert_eq!(&search(&sb, t), s, "search {t:?} after compression");
+    for (t, (want, want_partial)) in terms.iter().zip(&searches) {
+        let (got, partial) = search(&sb, t);
+        assert_same_hits(
+            &format!("search {t:?} after compression"),
+            &got,
+            partial,
+            want,
+            *want_partial,
+        );
     }
     for (e, s) in entries.iter().zip(&shows) {
         // `show` names the cast, which is now the `.cast.zst`.
@@ -331,8 +340,15 @@ fn i13_compress_now_keeps_search_slices_and_legacy_intact() {
         frames_compressed,
         "the rebuilt frame table equals the compressor's"
     );
-    for (t, s) in terms.iter().zip(&searches) {
-        assert_eq!(&search(&sb, t), s, "search {t:?} after the rebuild");
+    for (t, (want, want_partial)) in terms.iter().zip(&searches) {
+        let (got, partial) = search(&sb, t);
+        assert_same_hits(
+            &format!("search {t:?} after the rebuild"),
+            &got,
+            partial,
+            want,
+            *want_partial,
+        );
     }
     let legacy_after: Vec<_> = legacy.iter().map(|p| stamp(p)).collect();
     assert_eq!(legacy_after, legacy_before, "legacy casts untouched by the rebuild");

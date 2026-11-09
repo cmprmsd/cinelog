@@ -302,6 +302,31 @@ pub fn open_noatime(path: &Path) -> Result<std::fs::File> {
     .with_context(|| format!("opening {}", path.display()))
 }
 
+/// Asserts that two search results agree. A partial one (see
+/// [`crate::Sandbox::search_json_full`]) holds the newest hits only, so when either side is
+/// partial the shorter must be a non-empty prefix of the longer; otherwise they are equal.
+pub fn assert_same_hits<T: PartialEq + std::fmt::Debug>(
+    label: &str,
+    got: &[T],
+    got_partial: bool,
+    want: &[T],
+    want_partial: bool,
+) {
+    if !got_partial && !want_partial {
+        assert_eq!(got, want, "{label}");
+        return;
+    }
+    let (short, long) = if got.len() <= want.len() {
+        (got, want)
+    } else {
+        (want, got)
+    };
+    assert!(
+        !short.is_empty() && long.starts_with(short),
+        "{label} (partial scan): {got:?} vs {want:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

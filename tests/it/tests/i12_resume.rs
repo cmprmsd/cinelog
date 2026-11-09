@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use cinelog_it::index::{Dump, IndexDb, fts_integrity, remove_index};
 use cinelog_it::synth::{CorpusSpec, corpus};
-use cinelog_it::util::now_us;
-use cinelog_it::{CliOutput, Need, Sandbox, Serve, need, scaled, wait_until};
+use cinelog_it::util::{assert_same_hits, now_us};
+use cinelog_it::{Need, Sandbox, Serve, need, scaled, wait_until};
 
 /// Large enough that a debug build needs a few seconds, with one cast (about 10 MB) ten
 /// times the others, so it commits checkpoints inside the cast (every 4 MiB of input). The
@@ -186,13 +186,14 @@ fn i12_serve_killed_during_backfill_resumes_to_the_one_shot_result() {
     fts_integrity(&c.db, &c.sb.work).unwrap();
     // Search answers the same on the resumed index and on a rebuilt one.
     let terms = ["end of c0k1", "c3k7", "frame 2 of", "größe"];
-    let resumed: Vec<Vec<String>> = terms.iter().map(|t| search(&c, t)).collect();
-    assert!(resumed.iter().all(|h| !h.is_empty()), "{resumed:?}");
+    let resumed: Vec<(Vec<String>, bool)> = terms.iter().map(|t| search(&c, t)).collect();
+    assert!(resumed.iter().all(|(h, _)| !h.is_empty()), "{resumed:?}");
     let out = c.sb.cinelog(&["index", "--rebuild"]).unwrap().expect_ok().unwrap();
     assert!(out.stdout.contains("indexed "), "{out}");
     assert_same("index --rebuild", &dump(&c), &want);
-    for (t, before) in terms.iter().zip(&resumed) {
-        assert_eq!(&search(&c, t), before, "search {t:?}");
+    for (t, (before, was_partial)) in terms.iter().zip(&resumed) {
+        let (now, partial) = search(&c, t);
+        assert_same_hits(&format!("search {t:?}"), &now, partial, before, *was_partial);
     }
 }
 
@@ -247,20 +248,14 @@ fn i12_index_once_killed_midway_resumes_to_the_one_shot_result() {
 }
 
 /// `(entry, kind, ts)` of every hit, in result order.
-fn hits(out: &CliOutput) -> Vec<String> {
-    out.json_lines()
-        .unwrap()
-        .iter()
+fn hits(v: &[serde_json::Value]) -> Vec<String> {
+    v.iter()
         .map(|h| format!("{} {} {}", h["entry"], h["kind"], h["ts"]))
         .collect()
 }
 
-fn search(c: &Corpus, term: &str) -> Vec<String> {
-    hits(
-        &c.sb
-            .cinelog(&["search", "--json", "-a", term])
-            .unwrap()
-            .expect(&[0, 1])
-            .unwrap(),
-    )
+/// The hits for `term` and whether the scan was cut short (see `search_json_full`).
+fn search(c: &Corpus, term: &str) -> (Vec<String>, bool) {
+    let (v, partial) = c.sb.search_json_full(&["-a", term]).unwrap();
+    (hits(&v), partial)
 }

@@ -147,6 +147,28 @@ impl Sandbox {
         out.expect(&[0, 1])?.json_lines()
     }
 
+    /// Like [`Self::search_json`], plus whether the CLI flagged the result as partial: a term
+    /// the trigram index cannot serve (short, or split by cased non-ASCII letters) is scanned
+    /// newest first under a fixed time budget, which a loaded machine can exhaust. Retries a
+    /// partial result a few times before returning it.
+    pub fn search_json_full(&self, args: &[&str]) -> Result<(Vec<Value>, bool)> {
+        let mut v = vec!["search", "--json"];
+        v.extend_from_slice(args);
+        let mut tries = 0;
+        loop {
+            let out = self.cinelog(&v)?;
+            if out.is_stub() {
+                bail!("{out}\nsearch is still a stand-in");
+            }
+            let out = out.expect(&[0, 1])?;
+            let partial = out.stderr.contains("may be partial");
+            tries += 1;
+            if !partial || tries == 5 {
+                return Ok((out.json_lines()?, partial));
+            }
+        }
+    }
+
     /// Polls `cinelog search --json <args>` until a hit satisfies `pred`; returns it and
     /// how long that took.
     pub fn wait_hit(
