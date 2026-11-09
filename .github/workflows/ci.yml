@@ -219,6 +219,12 @@ jobs:
           ls -l "$(command -v mount)" "$(command -v unshare)"
           unshare -rmpf sh -c 'mount -t proc proc /proc && echo "proc mount in userns: ok"' 2>&1 || true
           unshare -rmpf --mount-proc sh -c 'echo "--mount-proc: ok"' 2>&1 || true
+          unshare --version
+          sub=$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subuid)
+          subg=$(awk -F: -v u="$(id -un)" '$1==u{print $2; exit}' /etc/subgid)
+          echo "subuid=$sub subgid=$subg"
+          unshare --map-users=0:$(id -u):1 --map-users=1:$sub:1 --map-groups=0:$(id -g):1 --map-groups=1:$subg:1 -mpf \
+            sh -c 'id; cat /proc/self/uid_map; mount -t proc -o hidepid=invisible proc /proc && echo "I17-style mount: ok"' 2>&1 || true
       # The harness uses these binaries instead of building its own (tests/it/src/binary.rs).
       - name: Build the binaries under test
         run: |

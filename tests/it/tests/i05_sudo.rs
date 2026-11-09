@@ -40,6 +40,9 @@ fn elevated_session(
         .team_cast(sb.user(), &child, cast_timeout(), |c| c.cmd(line).is_some())
         .unwrap();
     a.pane.type_line("exit").unwrap();
+    // Wait until the user shell is back (its `done` for the elevating command): lines typed
+    // while root's shell is still exiting are read and dropped by it.
+    wait_after(a, "done", nested.index, |_| true);
     (cast, nested)
 }
 
