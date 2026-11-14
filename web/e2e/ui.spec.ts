@@ -8,11 +8,20 @@ test.describe('shell', () => {
     await expect(live).toContainText('alice@lab1');
     const tree = page.getByTestId('session-tree');
     await expect(tree.getByText('lab1', { exact: true })).toBeVisible();
-    await tree.getByText('work', { exact: true }).click();
-    await expect(tree.getByText('%1')).toBeVisible();
+    // The tmux session with the live pane is open: windows by index and name, and a window
+    // with one pane has no pane line.
+    const work = tree.getByTestId('tree-tmux-session');
+    await expect(work).toHaveAttribute('open', '');
+    await expect(work.locator('> summary')).toContainText('work');
+    await expect(work.getByText('0 shell', { exact: true })).toBeVisible();
+    await expect(tree.getByText('%1')).toHaveCount(0);
     // The nested sudo session sits under its parent.
     const parent = tree.locator(`li:has(> a[href="/s/${FIX.needle}"])`);
-    await expect(parent.locator(`a[href="/s/${FIX.nested}"]`)).toBeVisible();
+    const nested = parent.locator(`a[href="/s/${FIX.nested}"]`);
+    await expect(nested).toBeVisible();
+    await expect(nested).toHaveAttribute('data-nested', 'true');
+    await expect(nested).toContainText('root');
+    await expect(nested.locator('.badge')).toHaveText('sudo');
     // A live session opens the live view.
     await live.getByRole('link').first().click();
     await expect(page).toHaveURL(new RegExp(`/live/${FIX.live}$`));

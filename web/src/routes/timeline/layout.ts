@@ -10,6 +10,7 @@ import type {
   TimelineBlock,
   TimelineMark,
   TimelineRow,
+  TimelineRowGroup,
   TimelineSession,
 } from '../../lib/api/types';
 import { fmtDuration, fmtTs, oneLine } from '../../lib/format';
@@ -17,6 +18,8 @@ import { nestedLink } from '../../lib/markers';
 import type { TimeScale } from './scale';
 
 export const LANE_H = 24;
+/** Header of a row group (a tmux session, or the shells outside tmux). */
+export const GROUP_H = 20;
 export const ROW_H = 26;
 /** Blocks are inset this much from the row edges, nested shells a bit more per level. */
 const PAD = 4;
@@ -35,11 +38,24 @@ export function blockClass(b: Pick<TimelineBlock, 'exit'>): BlockClass {
 
 export interface RowGeom {
   row: TimelineRow;
-  /** Index among all rows of the response. */
+  /** Index among the drawn rows. */
   index: number;
   lane: number;
   y: number;
   live: boolean;
+}
+
+/** The header of the rows of one tmux session (or of the shells outside tmux) in a lane. */
+export interface GroupGeom {
+  /** Unique in the layout: the lane and the group (`collapsed` holds these). */
+  id: string;
+  group: TimelineRowGroup;
+  lane: number;
+  y: number;
+  /** Rows of the group, nested ones included, drawn or not. */
+  count: number;
+  live: boolean;
+  collapsed: boolean;
 }
 
 export interface LaneGeom {
@@ -47,11 +63,15 @@ export interface LaneGeom {
   label: string;
   y: number;
   rows: RowGeom[];
+  /** Group headers and rows, top to bottom. */
+  items: ({ kind: 'group'; group: GroupGeom } | { kind: 'row'; row: RowGeom })[];
 }
 
 export interface Layout {
   lanes: LaneGeom[];
+  /** The drawn rows (those of a collapsed group are left out). */
   rows: RowGeom[];
+  groups: GroupGeom[];
   height: number;
   /** Row index by row key (annotations). */
   rowByKey: Map<string, number>;
@@ -59,26 +79,57 @@ export interface Layout {
   rowBySession: Map<string, number>;
 }
 
-export function layout(tl: Timeline): Layout {
+export function groupId(laneKey: string, groupKey: string): string {
+  return `${laneKey}\u0000${groupKey}`;
+}
+
+/** Key of the group of the panes of the tmux session a paused shell attached to. */
+export function attachedGroupKey(host: string, m: TimelineMark): string | null {
+  return m.tmux ? `tmux:${host}/${m.tmux.server}/${m.tmux.session_id}` : null;
+}
+
+/**
+ * Lanes, group headers and rows from top to bottom. A lane gets group headers when it has
+ * a tmux session (a lane of shells only stays flat); the rows of the groups in `collapsed`
+ * ([`GroupGeom.id`]) are not drawn.
+ */
+export function layout(tl: Timeline, collapsed: ReadonlySet<string> = new Set()): Layout {
   const lanes: LaneGeom[] = [];
   const rows: RowGeom[] = [];
+  const groups: GroupGeom[] = [];
   const rowByKey = new Map<string, number>();
   const rowBySession = new Map<string, number>();
   let y = 0;
   tl.lanes.forEach((lane, li) => {
-    const g: LaneGeom = { key: lane.key, label: lane.label, y, rows: [] };
+    const g: LaneGeom = { key: lane.key, label: lane.label, y, rows: [], items: [] };
     y += LANE_H;
+    const grouped = lane.rows.some((r) => r.group?.kind === 'tmux');
+    let open: GroupGeom | null = null;
     for (const row of lane.rows) {
-      const r: RowGeom = { row, index: rows.length, lane: li, y, live: row.sessions.some((s) => s.state === 'live') };
+      const live = row.sessions.some((s) => s.state === 'live');
+      if (grouped && row.group && open?.group.key !== row.group.key) {
+        const id = groupId(lane.key, row.group.key);
+        open = { id, group: row.group, lane: li, y, count: 0, live: false, collapsed: collapsed.has(id) };
+        groups.push(open);
+        g.items.push({ kind: 'group', group: open });
+        y += GROUP_H;
+      }
+      if (open) {
+        open.count += 1;
+        open.live ||= live;
+        if (open.collapsed) continue;
+      }
+      const r: RowGeom = { row, index: rows.length, lane: li, y, live };
       rowByKey.set(row.key, r.index);
       for (const s of row.sessions) rowBySession.set(s.uuid, r.index);
       rows.push(r);
       g.rows.push(r);
+      g.items.push({ kind: 'row', row: r });
       y += ROW_H;
     }
     lanes.push(g);
   });
-  return { lanes, rows, height: y, rowByKey, rowBySession };
+  return { lanes, rows, groups, height: y, rowByKey, rowBySession };
 }
 
 /** A command by identity; indices into a response do not survive a refresh. */
@@ -212,6 +263,7 @@ export interface MarkGeom {
 export function markLabel(m: TimelineMark): string {
   switch (m.kind) {
     case 'pause': {
+      if (m.tmux) return `in tmux session ${oneLine(m.tmux.session ?? m.tmux.session_id)}: recorded in its panes, paused here`;
       const why = [m.reason, m.detail].filter(Boolean).join(': ');
       return why ? `recording paused (${oneLine(why)})` : 'recording paused';
     }

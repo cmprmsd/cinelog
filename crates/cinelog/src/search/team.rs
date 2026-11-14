@@ -368,6 +368,7 @@ fn summary(s: wire::Session, url: PathBuf) -> SessionSummary {
             window: s.tmux.window,
             window_name: s.tmux.window_name,
             pane: s.tmux.pane,
+            pane_index: s.tmux.pane_index,
         },
         legacy: s.legacy,
         hidden: s.hidden,

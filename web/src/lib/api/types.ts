@@ -71,7 +71,26 @@ window: string | null, window_name: string | null,
 /**
  * Pane id (`%7`).
  */
-pane: string | null, };
+pane: string | null, 
+/**
+ * Index of the pane in its window, as tmux shows it (`null` when no `ctx` marker
+ * reported one, or from a server before 1.1).
+ */
+pane_index: string | null, };
+
+export type TmuxAttach = { 
+/**
+ * [`TmuxLocation::server`] of the pane recordings of that server.
+ */
+server: string, 
+/**
+ * `$3`.
+ */
+session_id: string, 
+/**
+ * Session name when the client attached.
+ */
+session: string | null, };
 
 export type Session = { uuid: string, host: string, scope: Scope, user: string, euid: number | null, sudo_user: string | null, claimed_user: string | null, 
 /**
@@ -202,9 +221,30 @@ export type TreeTmuxServer = {
 /**
  * `<server_pid>:<server_starttime>`.
  */
-server: string, sessions: Array<TreeTmuxSession>, };
+server: string, 
+/**
+ * Start of its oldest session in the response (tells servers of one host apart).
+ */
+first_at: number, 
+/**
+ * A pane recording of it is live.
+ */
+live: boolean, sessions: Array<TreeTmuxSession>, };
 
 export type TreeTmuxSession = { session_id: string | null, name: string | null, 
+/**
+ * A pane recording of it is live.
+ */
+live: boolean, 
+/**
+ * Sessions in its panes, nested ones included.
+ */
+recordings: number, 
+/**
+ * Shells in the response whose tmux client attached to it, newest first; they are
+ * also listed where they belong (their own pane or shell group).
+ */
+attached_from: Array<TreeAttachedShell>, 
 /**
  * By window index.
  */
@@ -212,7 +252,15 @@ windows: Array<TreeWindow>, };
 
 export type TreeWindow = { window: string | null, name: string | null, panes: Array<TreePane>, };
 
-export type TreePane = { pane: string | null, 
+export type TreePane = { 
+/**
+ * Pane id (`%7`).
+ */
+pane: string | null, 
+/**
+ * Its index in the window, from the newest session that knows it.
+ */
+index: string | null, 
 /**
  * Newest first.
  */
@@ -224,7 +272,21 @@ export type TreeShellGroup = { holder_comm: string | null,
  */
 sessions: Array<TreeNode>, };
 
+export type TreeAttachedShell = { uuid: string, user: string, state: SessionState, started_at: number, holder_comm: string | null, tty: string | null, 
+/**
+ * Set when that shell is itself a tmux pane (tmux inside tmux).
+ */
+tmux: TmuxLocation, };
+
 export type TreeNode = { uuid: string, user: string, state: SessionState, started_at: number, ended_at: number | null, legacy: boolean, hidden: boolean, commands: number, 
+/**
+ * Whose `sudo` it is (TEAM root shells); labels a nested child.
+ */
+sudo_user: string | null, 
+/**
+ * tmux sessions its tmux client attached to, oldest first, each once.
+ */
+attached: Array<TmuxAttach>, 
 /**
  * Oldest first.
  */
@@ -499,6 +561,18 @@ export type BusEvent = { "type": "hello", "data": BusHello } | { "type": "sessio
 
 export type TimelineGroup = "user" | "pane";
 
+export type TimelineRowGroupKind = "tmux" | "shells";
+
+export type TimelineRowGroup = { 
+/**
+ * `tmux:<host>/<tmux server>/<session id>` or `shells:<host>`.
+ */
+key: string, kind: TimelineRowGroupKind, 
+/**
+ * The tmux session name (latest; else its id), or `shells`.
+ */
+label: string, host: string, };
+
 export type Timeline = { from: number, to: number, group: TimelineGroup, 
 /**
  * By label.
@@ -532,9 +606,15 @@ export type TimelineLane = {
 /**
  * `user:<name>` (group `user`) or the row key of the pane (group `pane`).
  */
-key: string, label: string, 
+key: string, 
 /**
- * By first activity in the window.
+ * The person, or `<tmux session> › <pane label>` (the shell's label outside tmux).
+ */
+label: string, 
+/**
+ * Group `user`: by [`TimelineRow::group`] (groups by first activity in the window, the
+ * panes of a tmux session by window and pane index). Group `pane`: by first activity.
+ * A nested row follows its parent.
  */
 rows: Array<TimelineRow>, };
 
@@ -546,7 +626,8 @@ export type TimelineRow = {
  */
 key: string, 
 /**
- * `<tmux session>:<window>.<pane>` or `<holder_comm> <tty>`; with group `pane` the person.
+ * `<window> <window name> · <pane index>` or `<holder_comm> <tty>`; a nested row
+ * `<user>` or `<user> (sudo)`; with group `pane` the person.
  */
 label: string, host: string, 
 /**
@@ -554,7 +635,22 @@ label: string, host: string,
  */
 user: string, tmux: TmuxLocation, holder_comm: string | null, tty: string | null, 
 /**
- * Sessions drawn in this row (nested sessions in their parent's row), oldest first.
+ * The sub-group of the lane this row belongs to (group `user`): its tmux session, or
+ * the shells outside tmux of its host. Rows of one group follow each other. `null`
+ * with group `pane`.
+ */
+group: TimelineRowGroup | null, 
+/**
+ * Key of the row this one is nested in (a `sudo` shell inside it); such a row directly
+ * follows its parent and the parent's other nested rows.
+ */
+parent: string | null, 
+/**
+ * Nesting depth: 0, or the parent's plus one.
+ */
+depth: number, 
+/**
+ * Sessions drawn in this row, oldest first.
  */
 sessions: Array<TimelineSession>, 
 /**
@@ -612,7 +708,13 @@ child_scope: Scope | null,
  * `nested`: the child's session URL as its recorder reported it (`url` of the marker;
  * only when that server ran).
  */
-child_url: string | null, };
+child_url: string | null, 
+/**
+ * `pause` with reason `multiplexer`: the tmux session the client was attached to, when
+ * the recorder found it. Its panes are the rows of the group
+ * `tmux:<host>/<server>/<session_id>`.
+ */
+tmux: TmuxAttach | null, };
 
 export type DensityBin = { 
 /**

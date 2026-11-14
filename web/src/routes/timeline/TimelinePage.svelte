@@ -218,6 +218,7 @@
     <span><i class="sw unknown"></i>unknown</span>
     <span><i class="sw approx"></i>approximate</span>
     <span><i class="sw pause"></i>paused</span>
+    <span title="The shell ran a tmux client: paused here, recorded in the panes of that tmux session"><i class="sw in-tmux"></i>in tmux</span>
     <span><i class="sw skip"></i>unrecorded command</span>
     <span><i class="sw nested"></i>nested session</span>
     <span><i class="sw gap"></i>output dropped</span>
@@ -352,6 +353,10 @@
   }
   .sw.approx {
     background: repeating-linear-gradient(45deg, var(--ok) 0 3px, var(--bg-elev) 3px 5px);
+  }
+  .sw.in-tmux {
+    background: color-mix(in srgb, var(--pause) 12%, transparent);
+    border: 1px dashed var(--pause);
   }
   .sw.pause {
     background: repeating-linear-gradient(-45deg, var(--pause) 0 1.5px, transparent 1.5px 5px);

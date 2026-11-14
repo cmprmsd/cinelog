@@ -248,6 +248,7 @@ fn markers_ctx_stats_and_clock() {
     let s = &mem.sessions()[0];
     assert_eq!(s.tmux.session.as_deref(), Some("work"));
     assert_eq!(s.tmux.window_name.as_deref(), Some("vim"));
+    assert_eq!(s.tmux.pane_index.as_deref(), Some("0"));
     assert_eq!((s.counters.bad_markers, s.counters.lossy_bytes), (4, 2));
     assert_eq!(s.exit_status, Some(130));
     // The clock stepped by +1 h at t=2: later times follow the new anchor.

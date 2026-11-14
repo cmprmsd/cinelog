@@ -13,7 +13,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{IndexError, Result};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 pub const META_SCHEMA_VERSION: u32 = 1;
 
 pub const INDEX_SCHEMA: &str = include_str!("schema.sql");
@@ -28,8 +28,11 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// index.db upgrades (none yet: version 1 is the first release).
-pub const INDEX_MIGRATIONS: &[Migration] = &[];
+/// index.db upgrades.
+pub const INDEX_MIGRATIONS: &[Migration] = &[Migration {
+    to: 2,
+    sql: include_str!("migrations/index/0002_tmux_pane_index.sql"),
+}];
 /// meta.db upgrades (none yet).
 pub const META_MIGRATIONS: &[Migration] = &[];
 
@@ -307,8 +310,36 @@ mod tests {
     fn released_schema(kind: DbKind, version: u32) -> &'static str {
         match (kind, version) {
             (_, v) if v == kind.version() => kind.schema(),
+            (DbKind::Index, 1) => include_str!("migrations/index/v1.sql"),
             _ => panic!("add the released schema of {kind:?} v{version} under migrations/ for this test"),
         }
+    }
+
+    /// v2 fills `tmux_pane_index` of the sessions already indexed from their last `ctx` marker.
+    #[test]
+    fn v2_backfills_the_pane_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(released_schema(DbKind::Index, 1)).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO sessions(id, uuid, host, scope, user, tmux_pane, cast_path, started_at, state) VALUES
+                 (1, 'a', 'h', 'personal', 'u', '%3', '/a', 0, 'ended'),
+                 (2, 'b', 'h', 'personal', 'u', '%4', '/b', 0, 'ended'),
+                 (3, 'c', 'h', 'personal', 'u', NULL, '/c', 0, 'ended');
+               INSERT INTO markers(session_id, t, ts, kind, data_json) VALUES
+                 (1, 1, 1, 'ctx', '{"pane_index":"0","pane_id":"%3"}'),
+                 (1, 2, 2, 'ctx', '{"pane_index":"2","pane_id":"%3"}'),
+                 (1, 3, 3, 'pause', '{"pane_index":"9"}'),
+                 (2, 1, 1, 'ctx', 'not json'),
+                 (3, 1, 1, 'ctx', '{"pane_index":"5"}');"#,
+        )
+        .unwrap();
+        migrate(&conn, DbKind::Index, Path::new("x")).unwrap();
+        let mut st = conn
+            .prepare("SELECT tmux_pane_index FROM sessions ORDER BY id")
+            .unwrap();
+        let got: Vec<Option<String>> = st.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(got, [Some("2".to_owned()), None, None]);
     }
 
     #[test]

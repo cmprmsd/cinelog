@@ -45,7 +45,7 @@ CREATE TABLE sessions(
   state TEXT NOT NULL CHECK(state IN('live','ended','crashed','degraded','error')),
   bad_lines INT NOT NULL DEFAULT 0,
   bad_markers INT NOT NULL DEFAULT 0,
-  lossy_bytes INT NOT NULL DEFAULT 0);
+  lossy_bytes INT NOT NULL DEFAULT 0, tmux_pane_index TEXT);
 CREATE INDEX sessions_started ON sessions(started_at);
 CREATE INDEX sessions_tree ON sessions(host, tmux_server, tmux_session_id, tmux_pane);
 CREATE INDEX sessions_state ON sessions(state);

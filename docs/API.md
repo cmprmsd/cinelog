@@ -205,7 +205,11 @@ immutable`; everything else `no-cache`, with an `ETag`.
 `shells` grouped by `holder_comm` (`null` group last: unknown holders, legacy casts).
 Hosts by name; servers and tmux sessions by most recent activity; windows by index; sessions
 newest first. A session whose `parent_uuid` is in the same response appears only under its
-parent's `children`. Filters: `from`/`to` (sessions active in the window: started before
+parent's `children`. Since 1.1: a server has `first_at` (start of its oldest session in the
+response) and `live`; a tmux session `live`, `recordings` (sessions in its panes, nested
+ones included) and `attached_from` (the shells in the response whose tmux client attached
+to it, PROTOCOL.md §4.4); a pane its `index` in the window; a node `sudo_user` and
+`attached` (the tmux sessions its client attached to: `server`, `session_id`, `session`). Filters: `from`/`to` (sessions active in the window: started before
 `to`, not ended before `from`), `live`, `hidden`.
 
 ### 5.4 Search
@@ -471,20 +475,32 @@ expired session signs out; while `status !== 'open'` callers fall back to pollin
 - **Grouping:** the *person* of a session is `sudo_user`, else `claimed_user`, else `user`
   (TEAM root shells belong to the member). `group=user` (default): one lane per person
   (`key` `user:<name>`, by label), one row per pane (`pane:<host>/<tmux server>/<pane>`,
-  label `<tmux session>:<window>.<pane>`) or non-tmux shell (`tty:<host>/<tty>`, else
-  `session:<uuid>`; label `<holder_comm> <tty>`), rows by first activity. `group=pane`: one
-  lane per pane or shell (key as the row key above), one row per person in it
-  (`<lane key>|user:<name>`). With `group=user`, a pane or tty key used by more than one
-  person in the response becomes `<key>|user:<name>` for each of them (keeps
-  `TimelineRow.key` unique, e.g. a reused `/dev/pts/N`). Nested sessions (`parent_uuid` in the response) are drawn in
-  their parent's row; `TimelineRow.sessions` lists every session of the row.
+  label `<window> <window name> · <pane index>`; the pane id stands in for an index no
+  `ctx` marker reported) or non-tmux shell (`tty:<host>/<tty>`, else `session:<uuid>`;
+  label `<holder_comm> <tty>`). `group=pane`: one lane per pane or shell (key as the row
+  key above, label `<tmux session> › <pane label>`), one row per person in it
+  (`<lane key>|user:<name>`), rows by first activity. With `group=user`, a pane or tty key
+  used by more than one person in the response becomes `<key>|user:<name>` for each of
+  them (keeps `TimelineRow.key` unique, e.g. a reused `/dev/pts/N`).
+- **Row groups** (`group=user`, since 1.1): `TimelineRow.group` is the tmux session of a
+  pane (`key` `tmux:<host>/<tmux server>/<session id>`, `label` its latest name) or the
+  shells outside tmux of its host (`shells:<host>`). The rows of a group follow each
+  other: groups by first activity, the panes of a tmux session by window index and pane
+  index, shells by first activity. `null` with `group=pane`.
+- **Nested sessions** (`parent_uuid` in the response; since 1.1 no longer drawn in their
+  parent's row): one row per user they run as, directly below the parent's row and in its
+  lane and group: `key` `<parent key>/nested:<user>`, `parent` the parent's key, `depth`
+  the parent's plus one, `label` `<user>` or `<user> (sudo)`. A session is in exactly one
+  row's `sessions`.
 - **Blocks:** one `TimelineBlock` per command overlapping the window, by `ts_start`;
   `typed` is the first line cut to 200 characters; `ts_end: null` means running (draw to
   now) or never closed (draw to the session end). Forgotten commands are left out.
   Colours (client): exit 0 green, non-zero red, unknown grey, `approx` hatched.
 - **Marks** (always sent, also when aggregated): `pause` spans from `pause`/`resume`
   markers (`reason`, `detail` from the marker; without a `resume`, `ts_end` is `null` while
-  live, else the session end), `skip` points (leading-space commands), `nested` points
+  live, else the session end; with reason `multiplexer`, `tmux` = the tmux session the
+  client attached to, from the follow-up `multiplexer` marker of PROTOCOL.md §4.4: its
+  panes are the rows of the group `tmux:<host>/<tmux.server>/<tmux.session_id>`), `skip` points (leading-space commands), `nested` points
   (`reason` = mode, `detail` = user, `child` = the nested session, `null` when that one is
   forgotten; with a `child`, `child_scope` = its scope and `child_url` = the session URL
   its recorder reported, from the marker's `scope` and `url`), `gap` spans (dropped output; `ts..ts_end` is `marker.t - (to_t - from_t)` ..

@@ -17,6 +17,9 @@ import {
   hitMark,
   layout,
   locateBlock,
+  GROUP_H,
+  groupId,
+  attachedGroupKey,
   markGeoms,
   markLabel,
   markLink,
@@ -44,9 +47,12 @@ function row(key: string, blocks: TimelineBlock[], over: Partial<TimelineRow> = 
     label: key,
     host: 'h1',
     user: 'alice',
-    tmux: { server: null, session_id: null, session: null, window: null, window_name: null, pane: null },
+    tmux: { server: null, session_id: null, session: null, window: null, window_name: null, pane: null, pane_index: null },
     holder_comm: null,
     tty: null,
+    group: null,
+    parent: null,
+    depth: 0,
     sessions: [session()],
     blocks,
     marks: [],
@@ -85,6 +91,70 @@ describe('layout', () => {
     expect(rowAt(lay, lay.height + 5)).toBe(-1);
   });
 
+  it('heads the rows of a tmux session and leaves out those of a collapsed one', () => {
+    const tmux = { key: 'tmux:h1/1:2/$0', kind: 'tmux' as const, label: 'ops', host: 'h1' };
+    const shells = { key: 'shells:h1', kind: 'shells' as const, label: 'shells', host: 'h1' };
+    const live = [session({ uuid: 'n', state: 'live' })];
+    const tl = timeline([
+      [
+        row('sh', [], { group: shells }),
+        row('p1', [], { group: tmux }),
+        row('p1/nested:root', [], { group: tmux, parent: 'p1', depth: 1, sessions: live }),
+        row('p2', [], { group: tmux }),
+      ],
+      // A lane without a tmux session stays flat.
+      [row('other', [], { group: shells })],
+    ]);
+    const lay = layout(tl);
+    expect(lay.groups.map((g) => [g.group.label, g.count, g.live, g.y])).toEqual([
+      ['shells', 1, false, LANE_H],
+      ['ops', 3, true, LANE_H + GROUP_H + ROW_H],
+    ]);
+    expect(lay.lanes[0]!.items.map((i) => (i.kind === 'group' ? `[${i.group.group.label}]` : i.row.row.key))).toEqual([
+      '[shells]',
+      'sh',
+      '[ops]',
+      'p1',
+      'p1/nested:root',
+      'p2',
+    ]);
+    expect(lay.rows.map((r) => r.y)).toEqual([
+      LANE_H + GROUP_H,
+      LANE_H + 2 * GROUP_H + ROW_H,
+      LANE_H + 2 * GROUP_H + 2 * ROW_H,
+      LANE_H + 2 * GROUP_H + 3 * ROW_H,
+      2 * LANE_H + 2 * GROUP_H + 4 * ROW_H,
+    ]);
+    expect(lay.lanes[1]!.items.map((i) => i.kind)).toEqual(['row']);
+
+    const ops = lay.groups[1]!;
+    expect(ops.id).toBe(groupId('user:0', tmux.key));
+    const folded = layout(tl, new Set([ops.id]));
+    expect(folded.rows.map((r) => r.row.key)).toEqual(['sh', 'other']);
+    expect(folded.groups[1]).toMatchObject({ collapsed: true, count: 3, live: true });
+    expect(folded.rowBySession.has('n')).toBe(false);
+    expect(folded.height).toBe(lay.height - 3 * ROW_H);
+  });
+
+  it('names the group a tmux pause points to', () => {
+    const pause: TimelineMark = {
+      session: S,
+      kind: 'pause',
+      ts: 1,
+      ts_end: 2,
+      reason: 'multiplexer',
+      detail: 'tmux: client',
+      child: null,
+      child_scope: null,
+      child_url: null,
+      tmux: { server: '1:2', session_id: '$0', session: 'ops' },
+    };
+    expect(attachedGroupKey('h1', pause)).toBe('tmux:h1/1:2/$0');
+    expect(attachedGroupKey('h1', { ...pause, tmux: null })).toBeNull();
+    expect(markLabel(pause)).toBe('in tmux session ops: recorded in its panes, paused here');
+    expect(markLabel({ ...pause, tmux: { ...pause.tmux!, session: null } })).toContain('session $0');
+  });
+
   it('colours by exit', () => {
     expect(blockClass({ exit: 0 })).toBe('ok');
     expect(blockClass({ exit: 2 })).toBe('fail');
@@ -109,7 +179,7 @@ describe('layout', () => {
     expect(sessionEnd(undefined, 900)).toBeNull();
     const r = row('a', [block(1, 100, null)], {
       sessions: [degraded],
-      marks: [{ session: S, kind: 'pause', ts: 300, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null }],
+      marks: [{ session: S, kind: 'pause', ts: 300, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null, tmux: null }],
     });
     const xs = blockXs(r, scale, sessions, 900);
     const [pause] = markGeoms(r, scale, sessions, 900);
@@ -211,6 +281,7 @@ describe('hit testing', () => {
       child: null,
       child_scope: null,
       child_url: null,
+      tmux: null,
     });
     const r2 = row('m', [], { marks: [mark('pause', 100, 400), mark('skip', 200), mark('pause', 900, null)] });
     const geoms = markGeoms(r2, scale, new Map([[S, session({ ended_at: 950 })]]), 1000);
@@ -235,6 +306,7 @@ describe('marks, annotations and density', () => {
       child,
       child_scope,
       child_url,
+      tmux: null,
     });
     // Same scope (or unknown): in-app.
     expect(markLink(nested('personal'), 'personal', 'box.lan')).toEqual({ child, external: null });
@@ -261,6 +333,7 @@ describe('marks, annotations and density', () => {
       child: null,
       child_scope: null,
       child_url: null,
+      tmux: null,
     });
     expect(markLabel(m('pause', 'multiplexer', 'tmux: client'))).toBe('recording paused (multiplexer: tmux: client)');
     expect(markLabel(m('pause', null, null))).toBe('recording paused');

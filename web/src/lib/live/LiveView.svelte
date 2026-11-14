@@ -22,6 +22,7 @@
   import { playerTheme, prefs } from '../prefs.svelte';
   import { sessionHref } from '../route';
   import { router } from '../router.svelte';
+  import { whereLabel } from '../tmux';
   import {
     badgeFor,
     childLiveHref,
@@ -251,11 +252,7 @@
 
   $effect(() => useKeys({ 'toggle-fit': () => prefs.toggleFit() }));
 
-  const where = (session: Session) => {
-    const t = session.tmux;
-    if (t.pane) return `tmux ${t.session ?? t.session_id ?? '?'}:${t.window ?? '?'}${t.window_name ? ` (${t.window_name})` : ''} ${t.pane}`;
-    return session.holder_comm ?? session.tty ?? '';
-  };
+  const where = (session: Session) => (session.tmux.pane ? `tmux ${whereLabel(session)}` : whereLabel(session));
 </script>
 
 <section class="live" aria-label="Live session" data-testid="live-view" data-stream={view.stream}>

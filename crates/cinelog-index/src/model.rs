@@ -218,7 +218,10 @@ pub struct TmuxLocation {
     pub session: Option<String>,
     pub window: Option<String>,
     pub window_name: Option<String>,
+    /// Pane id (`%7`).
     pub pane: Option<String>,
+    /// Index of the pane in its window, as tmux shows it.
+    pub pane_index: Option<String>,
 }
 
 impl TmuxLocation {
@@ -237,6 +240,7 @@ impl TmuxLocation {
         set(&mut self.window, &ctx.window_index);
         set(&mut self.window_name, &ctx.window_name);
         set(&mut self.pane, &ctx.pane_id);
+        set(&mut self.pane_index, &ctx.pane_index);
     }
 }
 

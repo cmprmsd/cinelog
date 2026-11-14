@@ -233,16 +233,16 @@ fn upsert_session(tx: &Transaction<'_>, s: &SessionMeta) -> Result<i64> {
             "INSERT INTO sessions(uuid, host, scope, user, euid, sudo_user, claimed_user, attribution, login_via, tty,
                holder_comm, tmux_server, tmux_session_id, tmux_session, tmux_window, tmux_window_name, tmux_pane,
                parent_uuid, cast_path, parts, compressed, cast_bytes, started_at, ended_at, exit_status, tz, cols, rows,
-               term, legacy, hidden, state, bad_lines, bad_markers, lossy_bytes)
+               term, legacy, hidden, state, bad_lines, bad_markers, lossy_bytes, tmux_pane_index)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-               ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35)
+               ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)
              ON CONFLICT(uuid) DO UPDATE SET host = excluded.host, scope = excluded.scope, user = excluded.user,
                euid = excluded.euid, sudo_user = excluded.sudo_user, claimed_user = excluded.claimed_user,
                attribution = excluded.attribution, login_via = excluded.login_via, tty = excluded.tty,
                holder_comm = excluded.holder_comm, tmux_server = excluded.tmux_server,
                tmux_session_id = excluded.tmux_session_id, tmux_session = excluded.tmux_session,
                tmux_window = excluded.tmux_window, tmux_window_name = excluded.tmux_window_name,
-               tmux_pane = excluded.tmux_pane, parent_uuid = excluded.parent_uuid, cast_path = excluded.cast_path,
+               tmux_pane = excluded.tmux_pane, tmux_pane_index = excluded.tmux_pane_index, parent_uuid = excluded.parent_uuid, cast_path = excluded.cast_path,
                parts = excluded.parts, compressed = excluded.compressed, cast_bytes = excluded.cast_bytes,
                started_at = excluded.started_at, ended_at = excluded.ended_at, exit_status = excluded.exit_status,
                tz = excluded.tz, cols = excluded.cols, rows = excluded.rows, term = excluded.term,
@@ -287,6 +287,7 @@ fn upsert_session(tx: &Transaction<'_>, s: &SessionMeta) -> Result<i64> {
                 U64(s.counters.bad_lines),
                 U64(s.counters.bad_markers),
                 U64(s.counters.lossy_bytes),
+                s.tmux.pane_index,
             ],
             |r| r.get(0),
         )?;
@@ -358,7 +359,7 @@ fn entomb(tx: &Transaction<'_>, sid: i64) -> Result<bool> {
     tx.prepare_cached(
         "UPDATE sessions SET user = '', euid = NULL, sudo_user = NULL, claimed_user = NULL, attribution = ?2,
            login_via = NULL, tty = NULL, holder_comm = NULL, tmux_server = NULL, tmux_session_id = NULL,
-           tmux_session = NULL, tmux_window = NULL, tmux_window_name = NULL, tmux_pane = NULL, parent_uuid = NULL,
+           tmux_session = NULL, tmux_window = NULL, tmux_window_name = NULL, tmux_pane = NULL, tmux_pane_index = NULL, parent_uuid = NULL,
            exit_status = NULL, tz = NULL, term = NULL, hidden = 1, bad_lines = 0, bad_markers = 0, lossy_bytes = 0
          WHERE id = ?1",
     )?

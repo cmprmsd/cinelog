@@ -74,7 +74,8 @@ const SESSION_COLS: &str = "s.id, s.uuid, s.host, s.scope, s.user, s.euid, s.sud
     s.ended_at, s.exit_status, s.tz, s.cols, s.rows, s.term, s.legacy, s.hidden, s.state,
     (SELECT count(*) FROM commands c WHERE c.session_id = s.id),
     coalesce((SELECT i.t FROM index_state i WHERE i.session_id = s.id),
-             (SELECT max(g.t_end) FROM segments g WHERE g.session_id = s.id))";
+             (SELECT max(g.t_end) FROM segments g WHERE g.session_id = s.id)),
+    s.tmux_pane_index";
 
 fn session_from_row(r: &Row<'_>) -> rusqlite::Result<SessionRow> {
     let scope: String = r.get(3)?;
@@ -105,6 +106,7 @@ fn session_from_row(r: &Row<'_>) -> rusqlite::Result<SessionRow> {
             window: r.get(15)?,
             window_name: r.get(16)?,
             pane: r.get(17)?,
+            pane_index: r.get(35)?,
         },
         parent_uuid: r.get(18)?,
         parts: r.get::<_, Option<u32>>(20)?.unwrap_or(1),
@@ -424,6 +426,35 @@ impl IndexDb {
     }
 
     /// All commands of a session in `t_start` order.
+    /// The tmux sessions the tmux clients of the given sessions attached to (follow-up
+    /// `multiplexer` markers), oldest first and each once. Sessions without one are left
+    /// out. One query.
+    pub fn tmux_attaches(&self, session_ids: &[i64]) -> DbResult<HashMap<i64, Vec<t::TmuxAttach>>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT m.session_id, m.data_json FROM markers m
+             WHERE m.kind = 'multiplexer' AND m.session_id IN (SELECT value FROM json_each(?1))
+             ORDER BY m.session_id, m.t, m.id",
+        )?;
+        let rows = st.query_map([serde_json::to_string(session_ids)?], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out: HashMap<i64, Vec<t::TmuxAttach>> = HashMap::new();
+        for row in rows {
+            let (id, json) = row?;
+            let attach = match serde_json::from_str(&json) {
+                Ok(serde_json::Value::Object(o)) => t::TmuxAttach::of_marker(&o),
+                _ => None,
+            };
+            if let Some(a) = attach {
+                let list = out.entry(id).or_default();
+                if !list.contains(&a) {
+                    list.push(a);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn commands(&self, session_id: i64) -> DbResult<Vec<im::Command>> {
         let mut st = self.conn.prepare_cached(
             "SELECT seq, parent_seq, depth, shell_pid, t_start, t_end, ts_start, ts_end, exit, pipestatus, cwd, user,

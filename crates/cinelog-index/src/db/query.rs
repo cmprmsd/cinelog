@@ -434,7 +434,7 @@ fn command_from_row(r: &Row<'_>) -> rusqlite::Result<(i64, Command)> {
 const SUMMARY_SQL: &str =
     "SELECT s.id, s.uuid, s.host, s.user, s.scope, s.state, s.started_at, s.ended_at, s.cast_path,
     s.tmux_server, s.tmux_session_id, s.tmux_session, s.tmux_window, s.tmux_window_name, s.tmux_pane, s.legacy,
-    s.hidden, (SELECT count(*) FROM commands WHERE session_id = s.id)
+    s.hidden, (SELECT count(*) FROM commands WHERE session_id = s.id), s.tmux_pane_index
     FROM sessions s WHERE s.uuid = ?1 AND s.attribution IS NOT ?2";
 
 fn summary_from_row(r: &Row<'_>) -> rusqlite::Result<(i64, SessionSummary)> {
@@ -456,6 +456,7 @@ fn summary_from_row(r: &Row<'_>) -> rusqlite::Result<(i64, SessionSummary)> {
                 window: r.get(12)?,
                 window_name: r.get(13)?,
                 pane: r.get(14)?,
+                pane_index: r.get(18)?,
             },
             legacy: r.get(15)?,
             hidden: r.get(16)?,
