@@ -511,9 +511,7 @@ impl State {
                 let rows = term.size().1;
                 self.alt.row_t.resize(rows, None);
                 for r in dirty.drain(..) {
-                    for i in r.start.min(rows)..r.end.min(rows) {
-                        self.alt.row_t[i] = now;
-                    }
+                    self.alt.row_t[r.start.min(rows)..r.end.min(rows)].fill(now);
                 }
             }
             ScreenKind::Primary => {
