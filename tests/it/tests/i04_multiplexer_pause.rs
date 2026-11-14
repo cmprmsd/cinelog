@@ -130,12 +130,15 @@ fn i4_exec_tmux_pauses_until_the_recording_ends() {
     let s = setup();
     let tag = unique_id();
     let shell = s.outer.cast().unwrap().shell_pid().expect("shell_pid");
+    // The short-lived client of `new-session -d` in the setup can leave a pause of its own:
+    // only one after this point is the exec'd client's.
+    let start = last_index(&s.outer);
     s.outer
         .pane
         .type_line(&format!("exec {} attach -t I", Sandbox::tmux_cmd(&s.inner)))
         .unwrap();
     // `exec` keeps the pgrp and changes the leader's comm: still detected.
-    let pause = wait_pause(&s.outer, 0);
+    let pause = wait_pause(&s.outer, start);
     let typed = type_through_client(&s, &tag);
     let (tty, _) = wait_until("the exec'd client", cast_timeout(), || {
         s.inner.clients().ok()?.into_iter().find(|(_, pid)| *pid == shell)
