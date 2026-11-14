@@ -706,13 +706,34 @@ pub struct NestedLink {
     pub extra: Extra,
 }
 
-/// `multiplexer`: the multiplexer client that caused a `pause{reason:multiplexer}`.
+/// The tmux session a client is attached to; `(server_pid, server_start)` is the server
+/// instance of [`TmuxIdentity`], so pane recordings of that session can be found.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MuxTarget {
+    #[serde(default)]
+    pub server_pid: u32,
+    #[serde(default)]
+    pub server_start: u64,
+    /// `$3`.
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub session_name: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `multiplexer`: the multiplexer client that caused a `pause{reason:multiplexer}`. Written
+/// before the `pause`, and once more with `tmux` when the session it attached to is known.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiplexerInfo {
     pub comm: String,
     pub pid: u32,
     #[serde(default)]
     pub pgrp: u32,
+    /// Where a tmux client is attached (only in the follow-up marker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<MuxTarget>,
     #[serde(flatten)]
     pub extra: Extra,
 }

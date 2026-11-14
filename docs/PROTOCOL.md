@@ -210,7 +210,8 @@ A `done` is matched to the most recent open `cmd` with the same `(sh, n)` and ca
 ### 4.3 While paused
 
 Markers are still parsed (so the recorder can resume and link), but nothing except `r`
-(resize) events, `pause`/`resume`/`nested`/`clock` markers and the `x` exit event is written.
+(resize) events, `pause`/`resume`/`nested`/`multiplexer`/`clock` markers and the `x` exit
+event is written.
 No `o` and no `i` events are recorded while paused; passthrough to the terminal continues.
 A session-nonce marker (`hello`/`cmd`/`done`/`skip`) that arrives during a multiplexer or
 nested pause makes the recorder check the foreground at once, so the `done` after
@@ -224,6 +225,15 @@ nested pause makes the recorder check the foreground at once, so the `done` afte
 - A member or descendant whose comm is in `record.pause_on_multiplexer` (default
   `tmux: client`, `screen`, `zellij`) pauses with reason `multiplexer`, preceded by a
   `multiplexer` marker naming the client.
+- **Attached session (tmux, since 1.1).** After such a pause the recorder asks the client's
+  own server which session the client is attached to (`list-clients`, with the client's
+  binary and the socket of its command line and environment; tried 0.3 s, 1.2 s and 3.7 s
+  after the pause, each query limited to 1 s) and writes a second `multiplexer` marker with
+  `tmux`. `(server_pid, server_start)` equals the `tmux` identity in the `session` marker of
+  that server's pane recordings, which links the paused shell to them. Only a client of the
+  recorder's own uid is asked, so root's recorder never connects to a user's server (and
+  `sudo tmux attach` in a user's shell stays unlinked). A later `switch-client` is not
+  followed.
 - **Resume** on `nested-end`, on `user-resume`, or when the foreground pgrp returns to the
   shell with no multiplexer left (a crashed inner process cannot leave the recorder paused).
   If an alternate screen (`?1049h`, `?1047h`, `?47h`) was entered without the matching
@@ -321,7 +331,7 @@ halves arrive more than 1 s apart, or one interleaved with other bytes.
 | `pause` | pause starts | `reason` (`multiplexer`/`nested`/`user`), `detail` |
 | `resume` | pause ends | `reason` (`nested-end`/`foreground`/`user`), `alt_fixup` |
 | `nested` | corroborated `nested-start` | `child_uuid`, `scope`, `user`, `sudo_user`, `url`, `pid`, `starttime`, `mode` (`pause`/`record`) |
-| `multiplexer` | before `pause{multiplexer}` | `comm`, `pid`, `pgrp` |
+| `multiplexer` | before `pause{multiplexer}`; once more during the pause when a tmux client's session is known (§4.4) | `comm`, `pid`, `pgrp`; the second one also `tmux` (object: `server_pid`, `server_start`, `session_id`, `session_name`) |
 | `ctx` | pane recorders: at start and on change (checked every 30 s) | `session_name`, `window_index`, `window_name`, `pane_index`, `pane_id` |
 | `gap` | after the writer queue overflowed | `dropped_bytes`, `from_t`, `to_t` (cast seconds) |
 | `rotate` | last event of a part | `part` (the ending part), `next` (file name), `reason` (`size`/`age`/`resume`) |

@@ -6,7 +6,7 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,7 @@ use crate::input::InputRules;
 use crate::mirror::{self, ArgvArea};
 use crate::pty::{self, ChildSpec, HostOut, RawGuard, Winsize};
 use crate::reg::RegistryHandle;
-use crate::tmux::TmuxClient;
+use crate::tmux::{self, TmuxClient};
 use crate::writer::{CastFactory, HeaderInfo, Writer, WriterConfig, WriterShared};
 
 /// Drain cap per master read cycle (16 KiB beat 256 KiB in the spike).
@@ -37,6 +37,12 @@ const FG_POLL_FAST: Duration = Duration::from_millis(20);
 const FG_RESCAN_US: u64 = 1_000_000;
 const MIRROR_RECHECK_US: u64 = 1_000_000;
 const CTX_INTERVAL: Duration = Duration::from_secs(30);
+/// When a tmux client's session is asked for after its pause (it attaches shortly after).
+const MUX_LINK_DELAYS: [Duration; 3] = [
+    Duration::from_millis(300),
+    Duration::from_millis(900),
+    Duration::from_millis(2500),
+];
 const REAP_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_PENDING_INPUT: usize = 1 << 20;
 
@@ -505,8 +511,27 @@ fn spawn_ctx(client: TmuxClient, control: Arc<Mutex<Control>>) -> (crossbeam_cha
     (stop, h)
 }
 
+/// Asks, off the main thread, which tmux session the client `pid` attached to and records
+/// it (`multiplexer` follow-up marker). Holds no strong reference: it never delays the exit.
+fn spawn_mux_link(pid: u32, control: Weak<Mutex<Control>>, detector: Arc<dyn Detector + Send + Sync>) {
+    let euid = nix::unistd::geteuid().as_raw();
+    let _ = std::thread::Builder::new().name("cinelog-mux".into()).spawn(move || {
+        for delay in MUX_LINK_DELAYS {
+            std::thread::sleep(delay);
+            if let Some(target) = tmux::attached_session(pid, euid, |p| detector.starttime(p)) {
+                if let Some(control) = control.upgrade() {
+                    lock(&control).on_mux_target(pid, target);
+                }
+                return;
+            }
+        }
+    });
+}
+
 #[derive(Debug, Default)]
 struct FgCache {
+    /// The tmux client whose session was already asked for.
+    linked: Option<u32>,
     pgrp: Option<u32>,
     last_scan: u64,
     relay: bool,
@@ -519,7 +544,7 @@ struct MainLoop<'a> {
     master: &'a OwnedFd,
     child: u32,
     shell_pgrp: u32,
-    control: &'a Mutex<Control>,
+    control: &'a Arc<Mutex<Control>>,
     flags: &'a Flags,
     detector: Arc<dyn Detector + Send + Sync>,
     record: &'a RecordConfig,
@@ -662,6 +687,15 @@ impl MainLoop<'_> {
                     && pg != self.shell_pgrp
                     && self.detector.relay_in_foreground(pg, &self.record.relays);
                 let applied = lock(self.control).on_foreground(&fg, generation);
+                match &fg {
+                    Foreground::Multiplexer { pid, comm, .. } if comm.starts_with("tmux") => {
+                        if applied && self.fg.linked != Some(*pid) {
+                            self.fg.linked = Some(*pid);
+                            spawn_mux_link(*pid, Arc::downgrade(self.control), Arc::clone(&self.detector));
+                        }
+                    }
+                    _ => self.fg.linked = None,
+                }
                 // A dropped reading is retaken on the next tick.
                 self.fg.pgrp = applied.then_some(pg);
                 self.fg.last_scan = now;

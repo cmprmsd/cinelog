@@ -100,6 +100,22 @@ fn i4_tmux_attach_pauses_and_resumes() {
         .unwrap();
     let pause = wait_pause(&s.outer, start);
     let typed = type_through_client(&s, &tag);
+    // The follow-up marker names the session the client attached to, and its server is the
+    // one the pane recording names: that is how the two recordings are linked.
+    let link = s
+        .outer
+        .wait_cast("multiplexer{tmux}", scaled(10.0), |c| {
+            c.markers_of("multiplexer")
+                .into_iter()
+                .find(|m| m.index > pause.index && m.get("tmux").is_some())
+        })
+        .unwrap();
+    let target = &link.json["tmux"];
+    assert_eq!(target["session_name"], "I", "{}", link.json);
+    let pane_tmux = s.shared.cast().unwrap().session().expect("session marker").json["tmux"].clone();
+    for key in ["server_pid", "server_start", "session_id"] {
+        assert_eq!(target[key], pane_tmux[key], "{key}: {} vs {pane_tmux}", link.json);
+    }
     s.inner.run(&["detach-client", "-s", "I"]).unwrap();
     let resume = wait_resume(&s.outer, pause.index);
     assert_eq!(resume.str("reason"), Some("foreground"), "{}", resume.json);
