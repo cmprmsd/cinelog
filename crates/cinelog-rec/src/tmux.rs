@@ -485,6 +485,8 @@ mod tests {
         }
         let mut script = Command::new("script")
             .args(["-qfc", &format!("tmux -L {label} attach"), "/dev/null"])
+            // A client needs a terminal type to attach; a CI runner has none set.
+            .env("TERM", "xterm")
             .env_remove("TMUX")
             .env_remove("TMUX_TMPDIR")
             .stdin(Stdio::piped())
