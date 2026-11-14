@@ -2,11 +2,12 @@
   import { onMount } from 'svelte';
   import { api, errorText, isAbort } from '../api/client';
   import { bus } from '../api/events.svelte';
-  import type { BusEvent, LiveSession, Session, Status, Tree, TreeParams } from '../api/types';
+  import type { BusEvent, LiveSession, Session, Status, Tree, TreeNode, TreeParams, TreeTmuxSession } from '../api/types';
   import { fmtBytes, fmtTs } from '../format';
   import { prefs } from '../prefs.svelte';
   import { liveHref } from '../route';
   import { router } from '../router.svelte';
+  import { paneIndexLabel, shellLabel, whereLabel, windowLabel } from '../tmux';
   import TreeNodes from './TreeNodes.svelte';
 
   let { current }: { current: string | null } = $props();
@@ -111,8 +112,27 @@
 
   const isOpen = (key: string, fallback: boolean) => open[key] ?? fallback;
   const toggle = (key: string, e: Event) => (open[key] = (e.currentTarget as HTMLDetailsElement).open);
-  const where = (s: Session) =>
-    s.tmux.pane ? `${s.tmux.session ?? '?'}:${s.tmux.window ?? '?'} ${s.tmux.pane}` : (s.holder_comm ?? s.tty ?? '');
+
+  const holds = (nodes: TreeNode[], uuid: string): boolean => nodes.some((n) => n.uuid === uuid || holds(n.children, uuid));
+  /** A tmux session starts open while it is live or holds the open session. */
+  const startsOpen = (ts: TreeTmuxSession) =>
+    ts.live || (current !== null && ts.windows.some((w) => w.panes.some((p) => holds(p.sessions, current))));
+  const serverKey = (host: string, server: string) => `h:${host}/t:${server}`;
+  const sessionKey = (host: string, server: string, id: string) => `${serverKey(host, server)}/s:${id}`;
+
+  /** Opens the tmux session a shell attached to and scrolls to it. */
+  function reveal(host: string, server: string, id: string, e: Event): void {
+    e.preventDefault();
+    open[`h:${host}`] = true;
+    open[serverKey(host, server)] = true;
+    const key = sessionKey(host, server, id);
+    open[key] = true;
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-tree-key="${CSS.escape(key)}"]`);
+      el?.scrollIntoView({ block: 'nearest' });
+      (el?.querySelector('summary') as HTMLElement | null)?.focus();
+    });
+  }
 </script>
 
 <nav class="sidebar" aria-label="Sessions">
@@ -128,7 +148,7 @@
             <a href={liveHref(s.uuid)} onclick={router.link} class:current={current === s.uuid} data-status={l.status}>
               <span class="live-dot" class:paused={l.status !== 'recording'} aria-hidden="true"></span>
               <span class="who">{s.user}@{s.host}</span>
-              <span class="muted where">{where(s)}</span>
+              <span class="muted where">{whereLabel(s)}</span>
               {#if l.status !== 'recording'}
                 <span class="badge" title={[l.reason, l.detail].filter(Boolean).join(': ')}>{l.status}</span>
               {/if}
@@ -163,23 +183,44 @@
             <summary class="host">{h.host}</summary>
             {#if isOpen(hk, true)}
               {#each h.tmux_servers as srv (srv.server)}
-                {@const sk = `${hk}/t:${srv.server}`}
+                {@const sk = serverKey(h.host, srv.server)}
                 <details open={isOpen(sk, true)} ontoggle={(e) => toggle(sk, e)} class="lvl">
-                  <summary>tmux <span class="muted mono">{srv.server.split(':')[0]}</span></summary>
+                  <summary title={`tmux server, pid ${srv.server.split(':')[0]}`}>
+                    <span class="kind">tmux</span>
+                    {#if srv.live}<span class="live-dot" aria-label="live"></span>
+                    {:else}<span class="muted since">since {fmtTs(srv.first_at, prefs.utc).slice(5, 16)}</span>{/if}
+                  </summary>
                   {#if isOpen(sk, true)}
                     {#each srv.sessions as ts, i (ts.session_id ?? i)}
-                      {@const tk = `${sk}/s:${ts.session_id ?? i}`}
-                      <details open={isOpen(tk, false)} ontoggle={(e) => toggle(tk, e)} class="lvl">
-                        <summary>{ts.name ?? ts.session_id ?? 'session'}</summary>
-                        {#if isOpen(tk, false)}
+                      {@const tk = sessionKey(h.host, srv.server, ts.session_id ?? String(i))}
+                      {@const shown = isOpen(tk, startsOpen(ts))}
+                      <details open={shown} ontoggle={(e) => toggle(tk, e)} class="lvl" data-tree-key={tk} data-testid="tree-tmux-session">
+                        <summary>
+                          <span class="name">{ts.name ?? ts.session_id ?? 'session'}</span>
+                          {#if ts.live}<span class="live-dot" aria-label="live"></span>{/if}
+                          <span class="muted count">({ts.recordings})</span>
+                        </summary>
+                        {#if shown}
+                          {#each ts.attached_from as a (a.uuid)}
+                            <a class="lvl attached" href={`/s/${a.uuid}`} onclick={router.link} title="Attached from this shell: it ran the tmux client, and its own recording paused meanwhile" data-testid="tree-attached-from">
+                              <span aria-hidden="true">⇤</span>
+                              <span class="muted">from</span>
+                              <span class="from">{a.tmux.pane ? whereLabel(a) : shellLabel(a) || a.user}</span>
+                            </a>
+                          {/each}
                           {#each ts.windows as w, wi (w.window ?? wi)}
                             {@const wk = `${tk}/w:${w.window ?? wi}`}
                             <details open={isOpen(wk, true)} ontoggle={(e) => toggle(wk, e)} class="lvl">
-                              <summary>{w.window ?? '?'}{#if w.name}: {w.name}{/if}</summary>
+                              <summary class="window" title={w.panes.length === 1 && w.panes[0]!.pane ? `one pane, ${w.panes[0]!.pane}` : undefined}>
+                                {windowLabel(w.window, w.name)}
+                              </summary>
                               {#each w.panes as p, pi (p.pane ?? pi)}
                                 <div class="lvl pane">
-                                  <span class="muted mono">{p.pane ?? 'pane'}</span>
-                                  <TreeNodes nodes={p.sessions} {current} />
+                                  <!-- A window with one pane needs no pane line. -->
+                                  {#if w.panes.length > 1}
+                                    <span class="muted pane-name" title={p.pane ? `pane ${p.pane}` : undefined}>pane {paneIndexLabel(p.index, p.pane)}</span>
+                                  {/if}
+                                  <TreeNodes nodes={p.sessions} {current} onattached={(a, e) => reveal(h.host, a.server, a.session_id, e)} />
                                 </div>
                               {/each}
                             </details>
@@ -195,7 +236,7 @@
                 <details open={isOpen(gk, false)} ontoggle={(e) => toggle(gk, e)} class="lvl">
                   <summary>shells: {g.holder_comm ?? 'other'} <span class="muted">({g.sessions.length})</span></summary>
                   {#if isOpen(gk, false)}
-                    <TreeNodes nodes={g.sessions} {current} />
+                    <TreeNodes nodes={g.sessions} {current} onattached={(a, e) => reveal(h.host, a.server, a.session_id, e)} />
                   {/if}
                 </details>
               {/each}
@@ -296,6 +337,42 @@
   }
   .host {
     font-weight: 600;
+  }
+  summary .live-dot {
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 0.2rem;
+  }
+  .kind,
+  .window {
+    color: var(--fg);
+  }
+  .name {
+    font-weight: 600;
+  }
+  .since,
+  .count,
+  .pane-name {
+    font-size: 0.85em;
+  }
+  .attached {
+    display: flex;
+    gap: 0.3rem;
+    align-items: baseline;
+    padding: 0.1rem 0.3rem;
+    border-radius: 4px;
+    color: var(--fg);
+    text-decoration: none;
+    font-size: 0.85em;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .attached:hover {
+    background: var(--bg-hover);
+  }
+  .attached .from {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .lvl {
     margin-left: 0.7rem;

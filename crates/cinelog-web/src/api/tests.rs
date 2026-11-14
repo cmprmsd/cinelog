@@ -179,7 +179,7 @@ async fn search_show_status_import() {
     );
 
     let s = kit.json("/status").await;
-    assert_eq!(s["schema_version"], 1);
+    assert_eq!(s["schema_version"], cinelog_index::schema::INDEX_SCHEMA_VERSION);
     assert_eq!(s["commands"], 5);
     assert_eq!(s["sessions"]["ended"], 3);
     assert_eq!(s["fingerprint"], "AB:CD");

@@ -24,6 +24,8 @@ struct State {
     commands: BTreeMap<(String, Seq), (i64, Command)>,
     outputs: Vec<(i64, String, Chunk)>,
     markers: Vec<(String, MarkerRow)>,
+    /// (session, minute) → (inputs, out_bytes).
+    activity: BTreeMap<(String, i64), (u64, u64)>,
     segments: BTreeMap<(String, u32), Segment>,
     checkpoints: BTreeMap<String, (Checkpoint, f64)>,
     frames: BTreeMap<(String, u32), Vec<ZstFrameRow>>,
@@ -49,6 +51,7 @@ impl State {
         self.commands.retain(|(u, _), _| u != uuid);
         self.outputs.retain(|(_, u, _)| u != uuid);
         self.markers.retain(|(u, _)| u != uuid);
+        self.activity.retain(|(u, _), _| u != uuid);
         self.segments.retain(|(u, _), _| u != uuid);
         self.checkpoints.remove(uuid);
         self.frames.retain(|(u, _), _| u != uuid);
@@ -231,6 +234,20 @@ impl MemIndex {
             .collect()
     }
 
+    /// Activity of a session, by minute.
+    pub fn activity(&self, uuid: &str) -> Vec<ActivityBin> {
+        self.st()
+            .activity
+            .iter()
+            .filter(|((u, _), _)| u == uuid)
+            .map(|((_, minute), (inputs, out_bytes))| ActivityBin {
+                minute: *minute,
+                inputs: *inputs,
+                out_bytes: *out_bytes,
+            })
+            .collect()
+    }
+
     pub fn markers(&self, uuid: &str) -> Vec<MarkerRow> {
         self.st()
             .markers
@@ -332,6 +349,11 @@ impl IndexWriter for MemIndex {
         }
         for m in &b.markers {
             st.markers.push((uuid.clone(), m.clone()));
+        }
+        for a in &b.activity {
+            let e = st.activity.entry((uuid.clone(), a.minute)).or_default();
+            e.0 += a.inputs;
+            e.1 += a.out_bytes;
         }
         for s in &b.segments {
             st.segments.insert((uuid.clone(), s.seq), s.clone());

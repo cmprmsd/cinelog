@@ -42,10 +42,10 @@ export const FIX = {
   ...(JSON.parse(globalThis.process?.env.CINELOG_E2E_FIX ?? '{}') as Record<string, string>),
 } as const;
 
-const NO_TMUX: TmuxLocation = { server: null, session_id: null, session: null, window: null, window_name: null, pane: null };
+const NO_TMUX: TmuxLocation = { server: null, session_id: null, session: null, window: null, window_name: null, pane: null, pane_index: null };
 
 function tmux(pane: string, window: string, windowName: string): TmuxLocation {
-  return { server: '4242:991', session_id: '$0', session: 'work', window, window_name: windowName, pane };
+  return { server: '4242:991', session_id: '$0', session: 'work', window, window_name: windowName, pane, pane_index: '0' };
 }
 
 function session(uuid: string, startedAt: number, over: Partial<Session>): Session {

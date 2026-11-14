@@ -19,6 +19,7 @@
   import FitToggle from './FitToggle.svelte';
   import Player from './Player.svelte';
   import Rail from './Rail.svelte';
+  import { whereLabel } from '../tmux';
 
   interface Props {
     uuid: string;
@@ -245,11 +246,7 @@
     keys = [...keys, keyLabel(data)].slice(-40);
   }
 
-  const location_ = (d: SessionDetail) => {
-    const t = d.session.tmux;
-    if (t.pane) return `tmux ${t.session ?? t.session_id ?? '?'}:${t.window ?? '?'}${t.window_name ? ` (${t.window_name})` : ''} ${t.pane}`;
-    return d.session.holder_comm ?? d.session.tty ?? '';
-  };
+  const location_ = (d: SessionDetail) => (d.session.tmux.pane ? `tmux ${whereLabel(d.session)}` : whereLabel(d.session));
 </script>
 
 <section class="session" aria-label="Session" data-testid="session-view" data-uuid={uuid}>

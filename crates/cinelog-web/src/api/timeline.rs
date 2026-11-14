@@ -20,9 +20,11 @@ use serde_json::Value;
 
 use super::db::{DbResult, Forgets, IndexDb, SessionFilter, SessionRow, blocking};
 use super::extract::ApiQuery;
+use super::tree::window_key;
 use super::types::{
-    DensityBin, Scope, Session, SessionState, TimeSpan, Timeline, TimelineAnnotation, TimelineBlock, TimelineGroup,
-    TimelineLane, TimelineMark, TimelineMarkKind, TimelineParams, TimelineRow, TimelineSession,
+    DensityBin, Scope, Session, SessionState, TimeSpan, Timeline, TimelineActivity, TimelineAnnotation, TimelineBlock,
+    TimelineGroup, TimelineLane, TimelineMark, TimelineMarkKind, TimelineParams, TimelineRow, TimelineRowGroup,
+    TimelineRowGroupKind, TimelineSession, TmuxAttach,
 };
 use crate::error::{Result, WebError};
 use crate::play::source::{secs_to_us, us_to_secs};
@@ -43,7 +45,7 @@ const POINT_PAD: f64 = 60.0;
 /// Characters of `typed` sent as hover text.
 pub(crate) const TYPED_MAX: usize = 200;
 /// Marker kinds the timeline reads (the rest is playback's business).
-const MARKER_KINDS: &str = "'pause', 'resume', 'skip', 'nested', 'gap', 'clock'";
+const MARKER_KINDS: &str = "'pause', 'resume', 'skip', 'nested', 'multiplexer', 'gap', 'clock'";
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/timeline", get(timeline))
@@ -109,24 +111,85 @@ fn person(s: &Session) -> &str {
     set(&s.sudo_user).or_else(|| set(&s.claimed_user)).unwrap_or(&s.user)
 }
 
-/// Where a session is drawn: its tmux pane, else its terminal, else itself (key, label).
-fn slot(s: &Session) -> (String, String) {
-    let t = &s.tmux;
-    if let Some(pane) = t.pane.as_deref().filter(|p| !p.is_empty()) {
-        let server = t.server.as_deref().unwrap_or("-");
-        let label = match (t.session.as_deref(), t.window.as_deref()) {
-            (None, None) => pane.to_owned(),
-            (session, window) => format!("{}:{}.{pane}", session.unwrap_or("?"), window.unwrap_or("?")),
-        };
-        return (format!("pane:{}/{server}/{pane}", s.host), label);
+/// Order of a pane in its tmux session: window index, then pane index.
+type PaneOrder = ((u8, u64, String), (u8, u64, String));
+
+/// Where a session is drawn: its tmux pane, else its terminal, else itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Slot {
+    /// Row key (group `user`) and lane key (group `pane`).
+    key: String,
+    /// Within its group: `<window> <window name> · <pane index>`, or `<holder_comm> <tty>`.
+    label: String,
+    group: TimelineRowGroup,
+    /// `None` outside tmux (those rows go by first activity).
+    order: Option<PaneOrder>,
+}
+
+impl Slot {
+    /// The label on its own (lane of group `pane`): a pane with its tmux session.
+    fn path(&self) -> String {
+        match self.group.kind {
+            TimelineRowGroupKind::Tmux => format!("{} › {}", self.group.label, self.label),
+            TimelineRowGroupKind::Shells => self.label.clone(),
+        }
     }
-    let holder = s.holder_comm.as_deref().filter(|h| !h.is_empty()).unwrap_or("shell");
-    match s.tty.as_deref().filter(|t| !t.is_empty()) {
+}
+
+fn slot(s: &Session) -> Slot {
+    fn set(v: &Option<String>) -> Option<&str> {
+        v.as_deref().filter(|v| !v.is_empty())
+    }
+    let t = &s.tmux;
+    if let Some(pane) = set(&t.pane) {
+        let server = t.server.as_deref().unwrap_or("-");
+        let pane_label = set(&t.pane_index).unwrap_or(pane);
+        let label = match (set(&t.window), set(&t.window_name)) {
+            (Some(w), Some(name)) => format!("{w} {name} · {pane_label}"),
+            (Some(w), None) => format!("{w} · {pane_label}"),
+            (None, _) => pane_label.to_owned(),
+        };
+        return Slot {
+            key: format!("pane:{}/{server}/{pane}", s.host),
+            label,
+            group: TimelineRowGroup {
+                key: format!("tmux:{}/{server}/{}", s.host, set(&t.session_id).unwrap_or("-")),
+                kind: TimelineRowGroupKind::Tmux,
+                label: set(&t.session).or(set(&t.session_id)).unwrap_or("tmux").to_owned(),
+                host: s.host.clone(),
+            },
+            order: Some((
+                window_key(set(&t.window)),
+                window_key(set(&t.pane_index).or(Some(pane))),
+            )),
+        };
+    }
+    let holder = set(&s.holder_comm).unwrap_or("shell");
+    let (key, label) = match set(&s.tty) {
         Some(tty) => (
             format!("tty:{}/{tty}", s.host),
             format!("{holder} {}", tty.strip_prefix("/dev/").unwrap_or(tty)),
         ),
         None => (format!("session:{}", s.uuid), format!("{holder} {}", short(&s.uuid))),
+    };
+    Slot {
+        key,
+        label,
+        group: TimelineRowGroup {
+            key: format!("shells:{}", s.host),
+            kind: TimelineRowGroupKind::Shells,
+            label: "shells".to_owned(),
+            host: s.host.clone(),
+        },
+        order: None,
+    }
+}
+
+/// Label of the row of a nested session: who it runs as.
+fn nested_label(s: &Session) -> String {
+    match s.sudo_user.as_deref().filter(|u| !u.is_empty()) {
+        Some(_) => format!("{} (sudo)", s.user),
+        None => s.user.clone(),
     }
 }
 
@@ -170,7 +233,7 @@ struct Sess {
     end: f64,
     /// Cast seconds → ts, from the session start and its `clock` markers.
     clock: ClockMap,
-    /// The session whose row this one is drawn in (itself, or its outermost parent).
+    /// Its outermost parent in the window (itself when it has none): whose lane it is in.
     root: usize,
 }
 
@@ -205,17 +268,17 @@ impl Sess {
     }
 }
 
-/// Index of the outermost ancestor of `i` that is in the window (cycle-safe).
-fn root_of(sessions: &[Sess], by_uuid: &HashMap<String, usize>, i: usize) -> usize {
-    let mut cur = i;
+/// `i` and its ancestors that are in the window, outermost last (cycle-safe).
+fn chain_of(sessions: &[Sess], by_uuid: &HashMap<String, usize>, i: usize) -> Vec<usize> {
+    let mut chain = vec![i];
     let mut seen = HashSet::from([i]);
-    while let Some(p) = sessions[cur].row.session.parent_uuid.as_deref()
+    while let Some(p) = sessions[chain[chain.len() - 1]].row.session.parent_uuid.as_deref()
         && let Some(&pi) = by_uuid.get(p)
         && seen.insert(pi)
     {
-        cur = pi;
+        chain.push(pi);
     }
-    cur
+    chain
 }
 
 /// What a session has forgotten, for the per-command check.
@@ -377,6 +440,7 @@ fn mark(session: &str, kind: TimelineMarkKind, ts: f64, ts_end: Option<f64>) -> 
         child: None,
         child_scope: None,
         child_url: None,
+        tmux: None,
     }
 }
 
@@ -398,6 +462,14 @@ fn marker_marks(s: &Sess, list: &[im::MarkerRow], forgets: &Forgets) -> Vec<Time
                 if let Some(mut p) = paused.take() {
                     p.ts_end = Some(m.ts.max(p.ts));
                     out.push(p);
+                }
+            }
+            // The follow-up marker of a tmux client (written during its pause).
+            "multiplexer" => {
+                if let Some(p) = paused.as_mut().filter(|p| p.reason.as_deref() == Some("multiplexer"))
+                    && let Some(attach) = TmuxAttach::of_marker(&d)
+                {
+                    p.tmux = Some(attach);
                 }
             }
             "skip" => out.push(mark(uuid, TimelineMarkKind::Skip, m.ts, None)),
@@ -481,15 +553,20 @@ fn mark_busy(m: &TimelineMark, open_end: f64) -> (f64, f64) {
 // ------------------------------------------------------------------ rows
 
 struct RowAcc {
+    /// Slot key of the root row it belongs to.
     slot: String,
     person: String,
-    /// Sessions of the row, roots and nested ones.
+    /// The row it is nested in.
+    parent: Option<usize>,
+    depth: u32,
     sessions: Vec<usize>,
-    /// Newest root session (labels and row metadata).
+    /// Newest session (labels and row metadata).
     newest: usize,
     first: f64,
     blocks: Vec<Block>,
     marks: Vec<TimelineMark>,
+    /// Activity bin index → (inputs, output bytes).
+    activity: BTreeMap<u64, (u64, u64)>,
 }
 
 /// `ended_at` is where the timeline draws the session to: a non-live session the index never
@@ -557,8 +634,9 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
         .enumerate()
         .map(|(i, s)| (s.uuid().to_owned(), i))
         .collect();
-    for i in 0..found.len() {
-        found[i].root = root_of(&found, &by_uuid, i);
+    let chains: Vec<Vec<usize>> = (0..found.len()).map(|i| chain_of(&found, &by_uuid, i)).collect();
+    for (i, chain) in chains.iter().enumerate() {
+        found[i].root = chain[chain.len() - 1];
     }
     let wanted = |s: &Sess| {
         p.user
@@ -566,35 +644,58 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
             .is_none_or(|u| person(&found[s.root].row.session) == u)
     };
     let keep: Vec<usize> = (0..found.len()).filter(|&i| wanted(&found[i])).collect();
+    let slots: Vec<Slot> = found.iter().map(|s| slot(&s.row.session)).collect();
 
-    // Rows by (slot, person) of the root session.
+    // A root session is drawn in the row of its (slot, person); a nested one in a row of
+    // its own below its parent's, one per user it runs as.
     let mut rows: Vec<RowAcc> = Vec::new();
-    let mut row_of_root: HashMap<usize, usize> = HashMap::new();
-    let mut row_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut root_rows: HashMap<(String, String), usize> = HashMap::new();
+    let mut nested_rows: HashMap<(usize, String), usize> = HashMap::new();
     let mut row_of_sess: HashMap<usize, usize> = HashMap::new();
     for &i in &keep {
+        let chain = &chains[i];
         let root = found[i].root;
-        let r = *row_of_root.entry(root).or_insert_with(|| {
-            let s = &found[root].row.session;
-            let key = (slot(s).0, person(s).to_owned());
-            *row_index.entry(key.clone()).or_insert_with(|| {
-                rows.push(RowAcc {
-                    slot: key.0,
-                    person: key.1,
-                    sessions: Vec::new(),
-                    newest: root,
-                    first: f64::INFINITY,
-                    blocks: Vec::new(),
-                    marks: Vec::new(),
-                });
-                rows.len() - 1
-            })
+        let root_key = (slots[root].key.clone(), person(&found[root].row.session).to_owned());
+        let mut r = *root_rows.entry(root_key.clone()).or_insert_with(|| {
+            rows.push(RowAcc {
+                slot: root_key.0.clone(),
+                person: root_key.1.clone(),
+                parent: None,
+                depth: 0,
+                sessions: Vec::new(),
+                newest: root,
+                first: f64::INFINITY,
+                blocks: Vec::new(),
+                marks: Vec::new(),
+                activity: BTreeMap::new(),
+            });
+            rows.len() - 1
         });
+        for &d in chain.iter().rev().skip(1) {
+            let depth = rows[r].depth + 1;
+            r = *nested_rows
+                .entry((r, found[d].row.session.user.clone()))
+                .or_insert_with(|| {
+                    rows.push(RowAcc {
+                        slot: root_key.0.clone(),
+                        person: root_key.1.clone(),
+                        parent: Some(r),
+                        depth,
+                        sessions: Vec::new(),
+                        newest: d,
+                        first: f64::INFINITY,
+                        blocks: Vec::new(),
+                        marks: Vec::new(),
+                        activity: BTreeMap::new(),
+                    });
+                    rows.len() - 1
+                });
+        }
         let acc = &mut rows[r];
         acc.sessions.push(i);
         acc.first = acc.first.min(found[i].row.session.started_at.max(w.from));
-        if i == root && found[root].row.session.started_at >= found[acc.newest].row.session.started_at {
-            acc.newest = root;
+        if acc.sessions.len() == 1 || found[i].row.session.started_at >= found[acc.newest].row.session.started_at {
+            acc.newest = i;
         }
         row_of_sess.insert(i, r);
     }
@@ -633,55 +734,169 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
         acc.blocks.extend(blocks);
     }
 
+    // Terminal activity of the kept sessions, in bins of the window.
+    let activity_bin = w.bin_secs();
+    let ids: Vec<i64> = keep.iter().map(|&i| found[i].row.id).collect();
+    let (first_minute, last_minute) = ((w.from / 60.0).floor() as i64, (w.to / 60.0).floor() as i64);
+    let mut by_id = db.activity(&ids, first_minute, last_minute)?;
+    for &i in &keep {
+        let acc = &mut rows[row_of_sess[&i]];
+        for (minute, inputs, out_bytes) in by_id.remove(&found[i].row.id).unwrap_or_default() {
+            let at = (minute as f64 * 60.0).clamp(w.from, w.to);
+            let e = acc
+                .activity
+                .entry(((at - w.from) / activity_bin).floor() as u64)
+                .or_default();
+            e.0 += inputs;
+            e.1 += out_bytes;
+        }
+    }
+
     let idle = idle_spans(busy, w);
     let aggregated = total > AGGREGATE_ABOVE;
     let bin = aggregated.then(|| w.bin_secs());
 
-    // Final row keys: in group `user` a slot shared by several people gets the person too.
-    let mut people_of_slot: HashMap<String, HashSet<&str>> = HashMap::new();
-    for r in &rows {
+    // Final row keys: in group `user` a slot shared by several people gets the person too;
+    // a nested row extends its parent's key (parents come first in `rows`).
+    let mut people_of_slot: HashMap<&str, HashSet<&str>> = HashMap::new();
+    // The newest root session of a slot names it.
+    let mut slot_of: HashMap<&str, (f64, &Slot)> = HashMap::new();
+    for r in rows.iter().filter(|r| r.parent.is_none()) {
         people_of_slot
-            .entry(r.slot.clone())
+            .entry(r.slot.as_str())
             .or_default()
-            .insert(person(&found[r.newest].row.session));
-    }
-    let mut slot_label: HashMap<String, (f64, String)> = HashMap::new();
-    for r in &rows {
+            .insert(r.person.as_str());
         let s = &found[r.newest].row.session;
-        let e = slot_label
-            .entry(r.slot.clone())
-            .or_insert((f64::NEG_INFINITY, String::new()));
+        let e = slot_of
+            .entry(r.slot.as_str())
+            .or_insert((f64::NEG_INFINITY, &slots[r.newest]));
         if s.started_at >= e.0 {
-            *e = (s.started_at, slot(s).1);
+            *e = (s.started_at, &slots[r.newest]);
         }
     }
-    let row_keys: Vec<String> = rows
-        .iter()
-        .map(|r| match group {
-            TimelineGroup::User if people_of_slot[r.slot.as_str()].len() == 1 => r.slot.clone(),
-            _ => format!("{}|user:{}", r.slot, r.person),
-        })
-        .collect();
+    // The newest of those names the group (a renamed tmux session).
+    let mut group_label: HashMap<&str, (f64, &str)> = HashMap::new();
+    for (at, slot) in slot_of.values() {
+        let e = group_label
+            .entry(slot.group.key.as_str())
+            .or_insert((f64::NEG_INFINITY, ""));
+        if *at >= e.0 {
+            *e = (*at, slot.group.label.as_str());
+        }
+    }
+    let mut row_keys: Vec<String> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        row_keys.push(match (r.parent, group) {
+            (Some(parent), _) => format!("{}/nested:{}", row_keys[parent], found[r.newest].row.session.user),
+            (None, TimelineGroup::User) if people_of_slot[r.slot.as_str()].len() == 1 => r.slot.clone(),
+            (None, _) => format!("{}|user:{}", r.slot, r.person),
+        });
+    }
 
     let annotations = annotations(st, &db, &found, &keep, &row_of_sess, &row_keys, &known, &forgets)?;
     drop(snap);
 
-    let mut lanes: BTreeMap<String, TimelineLane> = BTreeMap::new();
-    let mut ordered: Vec<(usize, RowAcc)> = rows.into_iter().enumerate().collect();
-    ordered.sort_by(|(ka, a), (kb, b)| {
-        a.first
-            .total_cmp(&b.first)
-            .then_with(|| row_keys[*ka].cmp(&row_keys[*kb]))
-    });
-    for (k, mut r) in ordered {
-        let (lane_key, lane_label, row_label) = match group {
-            TimelineGroup::User => (
-                format!("user:{}", r.person),
-                r.person.clone(),
-                slot_label[r.slot.as_str()].1.clone(),
-            ),
-            TimelineGroup::Pane => (r.slot.clone(), slot_label[r.slot.as_str()].1.clone(), r.person.clone()),
+    // Row order. Group `user`: the tmux sessions and the shells of a person by first
+    // activity, the panes of a tmux session by window and pane index. Group `pane`: the
+    // people of a pane by first activity. A nested row follows its parent.
+    let mut nested_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut group_first: HashMap<(&str, &str), f64> = HashMap::new();
+    for (k, r) in rows.iter().enumerate() {
+        match r.parent {
+            Some(parent) => nested_of.entry(parent).or_default().push(k),
+            None => {
+                let key = (r.person.as_str(), slot_of[r.slot.as_str()].1.group.key.as_str());
+                let e = group_first.entry(key).or_insert(f64::INFINITY);
+                *e = e.min(r.first);
+            }
+        }
+    }
+    let by_first = |a: &usize, b: &usize| {
+        rows[*a]
+            .first
+            .total_cmp(&rows[*b].first)
+            .then_with(|| row_keys[*a].cmp(&row_keys[*b]))
+    };
+    for list in nested_of.values_mut() {
+        list.sort_by(by_first);
+    }
+    let mut roots: Vec<usize> = (0..rows.len()).filter(|&k| rows[k].parent.is_none()).collect();
+    roots.sort_by(|a, b| {
+        let in_group = |k: &usize| {
+            let slot = slot_of[rows[*k].slot.as_str()].1;
+            let key = slot.group.key.as_str();
+            (group_first[&(rows[*k].person.as_str(), key)], key, slot.order.clone())
         };
+        match group {
+            TimelineGroup::User => {
+                let (fa, ka, oa) = in_group(a);
+                let (fb, kb, ob) = in_group(b);
+                fa.total_cmp(&fb)
+                    .then_with(|| ka.cmp(kb))
+                    .then_with(|| oa.is_none().cmp(&ob.is_none()))
+                    .then_with(|| oa.cmp(&ob))
+                    .then_with(|| by_first(a, b))
+            }
+            TimelineGroup::Pane => by_first(a, b),
+        }
+    });
+    let mut order: Vec<usize> = Vec::with_capacity(rows.len());
+    let mut stack: Vec<usize> = roots.into_iter().rev().collect();
+    while let Some(k) = stack.pop() {
+        order.push(k);
+        stack.extend(nested_of.get(&k).into_iter().flatten().rev());
+    }
+
+    struct Placed {
+        lane: (String, String),
+        label: String,
+        group: Option<TimelineRowGroup>,
+        parent: Option<String>,
+    }
+    let placed: Vec<Placed> = rows
+        .iter()
+        .map(|r| {
+            let slot = slot_of[r.slot.as_str()].1;
+            let label = match (r.parent, group) {
+                (Some(_), _) => nested_label(&found[r.newest].row.session),
+                (None, TimelineGroup::User) => slot.label.clone(),
+                (None, TimelineGroup::Pane) => r.person.clone(),
+            };
+            let (lane, row_group) = match group {
+                TimelineGroup::User => (
+                    (format!("user:{}", r.person), r.person.clone()),
+                    Some(TimelineRowGroup {
+                        label: group_label[slot.group.key.as_str()].1.to_owned(),
+                        ..slot.group.clone()
+                    }),
+                ),
+                TimelineGroup::Pane => {
+                    let named = TimelineRowGroup {
+                        label: group_label[slot.group.key.as_str()].1.to_owned(),
+                        ..slot.group.clone()
+                    };
+                    let path = Slot {
+                        group: named,
+                        ..slot.clone()
+                    }
+                    .path();
+                    ((r.slot.clone(), path), None)
+                }
+            };
+            Placed {
+                lane,
+                label,
+                group: row_group,
+                parent: r.parent.map(|p| row_keys[p].clone()),
+            }
+        })
+        .collect();
+
+    let mut lanes: BTreeMap<String, TimelineLane> = BTreeMap::new();
+    let mut taken: Vec<Option<RowAcc>> = rows.into_iter().map(Some).collect();
+    for k in order {
+        let Some(mut r) = taken[k].take() else { continue };
+        let at = &placed[k];
         r.blocks.sort_by(|a, b| {
             a.block
                 .ts_start
@@ -697,12 +912,15 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
         let density = bin.map_or_else(Vec::new, |bin| density(&r.blocks, w, bin));
         let row = TimelineRow {
             key: row_keys[k].clone(),
-            label: row_label,
+            label: at.label.clone(),
             host: newest.host.clone(),
             user: r.person,
             tmux: newest.tmux.clone(),
             holder_comm: newest.holder_comm.clone(),
             tty: newest.tty.clone(),
+            group: at.group.clone(),
+            parent: at.parent.clone(),
+            depth: r.depth,
             sessions: r.sessions.iter().map(|&i| timeline_session(&found[i])).collect(),
             blocks: if aggregated {
                 Vec::new()
@@ -711,7 +929,17 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
             },
             marks: r.marks,
             density,
+            activity: r
+                .activity
+                .iter()
+                .map(|(&i, &(inputs, out_bytes))| TimelineActivity {
+                    ts: w.from + i as f64 * activity_bin,
+                    inputs,
+                    out_bytes,
+                })
+                .collect(),
         };
+        let (lane_key, lane_label) = at.lane.clone();
         lanes
             .entry(format!("{lane_label}\u{0}{lane_key}"))
             .or_insert_with(|| TimelineLane {
@@ -733,6 +961,7 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
         commands: total,
         aggregated,
         bin_secs: bin,
+        activity_bin_secs: activity_bin,
     })
 }
 
@@ -805,7 +1034,7 @@ mod tests {
 
     use axum::http::StatusCode;
     use cinelog_index::model::ForgetTarget;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::api::testkit::{Cast, Kit, Meta, START_US, uuid};
@@ -962,21 +1191,65 @@ mod tests {
         assert_eq!(person(&sudo), "alice");
         assert_eq!(person(&session(|s| s.sudo_user = Some(String::new()))), "root");
 
-        assert_eq!(slot(&root), ("tty:h1//dev/pts/4".into(), "sshd-session pts/4".into()));
+        let shown = |s: &Session| {
+            let x = slot(s);
+            (x.key.clone(), x.label.clone(), x.group.key.clone(), x.path())
+        };
+        let shell = |key: &str, label: &str| {
+            (
+                key.to_owned(),
+                label.to_owned(),
+                "shells:h1".to_owned(),
+                label.to_owned(),
+            )
+        };
+        assert_eq!(shown(&root), shell("tty:h1//dev/pts/4", "sshd-session pts/4"));
+        assert_eq!(slot(&root).group.label, "shells");
         let bare = session(|s| {
             s.tty = None;
             s.holder_comm = None;
         });
-        assert_eq!(slot(&bare), (format!("session:{}", uuid(9)), "shell 0193a1b2".into()));
-        let pane = session(|s| {
-            s.tmux.server = Some("42:7".into());
-            s.tmux.session = Some("work".into());
-            s.tmux.window = Some("2".into());
-            s.tmux.pane = Some("%5".into());
+        assert_eq!(shown(&bare), shell(&format!("session:{}", uuid(9)), "shell 0193a1b2"));
+        let pane = |over: fn(&mut Session)| {
+            session(|s| {
+                s.tmux.server = Some("42:7".into());
+                s.tmux.session_id = Some("$1".into());
+                s.tmux.session = Some("work".into());
+                s.tmux.window = Some("2".into());
+                s.tmux.pane = Some("%5".into());
+                over(s);
+            })
+        };
+        let tmux = |label: &str| {
+            (
+                "pane:h1/42:7/%5".to_owned(),
+                label.to_owned(),
+                "tmux:h1/42:7/$1".to_owned(),
+                format!("work › {label}"),
+            )
+        };
+        // Without a `ctx` marker that knows the pane index, the pane id stands in.
+        assert_eq!(shown(&pane(|_| {})), tmux("2 · %5"));
+        let named = pane(|s| {
+            s.tmux.window_name = Some("vim".into());
+            s.tmux.pane_index = Some("1".into());
         });
-        assert_eq!(slot(&pane), ("pane:h1/42:7/%5".into(), "work:2.%5".into()));
-        let anon = session(|s| s.tmux.pane = Some("%5".into()));
-        assert_eq!(slot(&anon), ("pane:h1/-/%5".into(), "%5".into()));
+        assert_eq!(shown(&named), tmux("2 vim · 1"));
+        assert!(
+            slot(&named).order < slot(&pane(|s| s.tmux.window = Some("10".into()))).order,
+            "numeric"
+        );
+        let anon = slot(&session(|s| s.tmux.pane = Some("%5".into())));
+        assert_eq!((anon.key.as_str(), anon.label.as_str()), ("pane:h1/-/%5", "%5"));
+        assert_eq!(
+            (anon.group.key.as_str(), anon.group.label.as_str()),
+            ("tmux:h1/-/-", "tmux")
+        );
+
+        let mut nested = session(|_| {});
+        assert_eq!(nested_label(&nested), "root");
+        nested.sudo_user = Some("alice".into());
+        assert_eq!(nested_label(&nested), "root (sudo)");
     }
 
     #[test]
@@ -1095,41 +1368,64 @@ mod tests {
         assert_eq!(bob["key"], "tty:testhost//dev/pts/3");
         assert_eq!(bob["label"], "terminator pts/3");
         assert_eq!(bob["user"], "bob");
+        assert_eq!(
+            bob["group"],
+            json!({"key": "shells:testhost", "kind": "shells", "label": "shells", "host": "testhost"})
+        );
+        assert_eq!((&bob["parent"], &bob["depth"]), (&Value::Null, &json!(0)));
 
         let rows = lanes[1]["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 1, "the nested session is drawn in its parent's row");
+        assert_eq!(
+            rows.len(),
+            2,
+            "the nested session has a row of its own below its parent's"
+        );
         let row = &rows[0];
         let key = row["key"].as_str().unwrap();
         assert!(key.starts_with("pane:testhost/") && key.ends_with("/%3"), "{key}");
         assert_eq!(row["user"], "u");
         assert_eq!(row["tmux"]["pane"], "%3");
-        let sessions: Vec<&str> = row["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| s["uuid"].as_str().unwrap())
-            .collect();
-        assert_eq!(sessions, [uuid(1), uuid(3)]);
-        assert_eq!(row["sessions"][1]["parent_uuid"], uuid(1));
+        assert_eq!(row["group"]["kind"], "tmux");
+        let group = row["group"]["key"].as_str().unwrap();
+        assert!(group.starts_with("tmux:testhost/") && group.ends_with("/$1"), "{group}");
+        let sessions = |row: &Value| -> Vec<String> {
+            row["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["uuid"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(sessions(row), [uuid(1)]);
+        let nested = &rows[1];
+        assert_eq!(nested["key"], format!("{key}/nested:u"));
+        assert_eq!(nested["parent"], key);
+        assert_eq!(nested["depth"], 1);
+        assert_eq!(nested["label"], "u");
+        assert_eq!(nested["user"], "u", "still in its person's lane");
+        assert_eq!(nested["group"], row["group"], "and in its parent's group");
+        assert_eq!(sessions(nested), [uuid(3)]);
+        assert_eq!(nested["sessions"][0]["parent_uuid"], uuid(1));
 
+        let ids = |row: &Value| -> Vec<(String, u64)> {
+            row["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| (b["session"].as_str().unwrap().to_owned(), b["seq"].as_u64().unwrap()))
+                .collect()
+        };
+        assert_eq!(ids(row), [(uuid(1), 1), (uuid(1), 2), (uuid(1), 3)], "by ts_start");
+        assert_eq!(ids(nested), [(uuid(3), 1)]);
         let blocks = row["blocks"].as_array().unwrap();
-        let ids: Vec<(String, u64)> = blocks
-            .iter()
-            .map(|b| (b["session"].as_str().unwrap().to_owned(), b["seq"].as_u64().unwrap()))
-            .collect();
-        assert_eq!(
-            ids,
-            [(uuid(1), 1), (uuid(3), 1), (uuid(1), 2), (uuid(1), 3)],
-            "by ts_start"
-        );
         assert_eq!(blocks[0]["typed"], "ls -la");
         assert_eq!(blocks[0]["exit"], 0);
         assert_eq!(blocks[0]["cwd"], "/tmp");
         assert!(close(&blocks[0]["ts_start"], START + 1.0 + 1.01));
-        assert_eq!(blocks[2]["typed"], "printf 'a", "first line only");
-        assert_eq!(blocks[2]["exit"], 1);
+        assert_eq!(blocks[1]["typed"], "printf 'a", "first line only");
+        assert_eq!(blocks[1]["exit"], 1);
         assert!(
-            close(&blocks[3]["ts_start"], START + 1.0 + 30.01 + 100.0),
+            close(&blocks[2]["ts_start"], START + 1.0 + 30.01 + 100.0),
             "clock step applied"
         );
 
@@ -1156,6 +1452,161 @@ mod tests {
         assert_eq!(idle.len(), 1);
         assert!(close(&idle[0]["to"], START + 3600.0));
         assert!(idle[0]["from"].as_f64().unwrap() < START + 200.0);
+    }
+
+    /// A shell that attaches to the tmux session `ops`, whose two panes are recorded: the
+    /// panes form one group in tmux order, and the shell's pause names that group.
+    #[tokio::test]
+    async fn tmux_sessions_group_their_panes_and_link_the_attaching_shell() {
+        let kit = Kit::new(8);
+        let dir = kit.dir.path();
+        let ctx = |window: u32, name: &str, pane: u32, id: &str| {
+            m(
+                "ctx",
+                &format!(
+                    r#","session_name":"ops","window_index":"{window}","window_name":"{name}","pane_index":"{pane}","pane_id":"{id}""#
+                ),
+            )
+        };
+        let shell_meta = Meta {
+            pane: "",
+            holder: Some("sshd-session"),
+            ..Meta::default()
+        };
+        let mut shell = Cast::new(dir, 1, 80, 24, &shell_meta);
+        shell.m(1.0, &m("multiplexer", r#","comm":"tmux: client","pid":77,"pgrp":77"#));
+        shell.m(1.0, &m("pause", r#","reason":"multiplexer","detail":"tmux: client""#));
+        let target = r#""tmux":{"server_pid":42,"server_start":7,"session_id":"$1","session_name":"ops"}"#;
+        shell.m(
+            1.4,
+            &m(
+                "multiplexer",
+                &format!(r#","comm":"tmux: client","pid":77,"pgrp":77,{target}"#),
+            ),
+        );
+        shell.m(50.0, &m("resume", r#","reason":"foreground""#));
+        shell.exit(60.0);
+        // The pane of window 10 starts first, the one of window 2 later.
+        let mut late = Cast::new(
+            dir,
+            2,
+            80,
+            24,
+            &Meta {
+                pane: "%9",
+                ..Meta::default()
+            },
+        );
+        late.m(0.1, &ctx(10, "logs", 0, "%9"));
+        let t = late.command(1.0, 1, "tail -f log", &[], 0);
+        late.o(500.0, "new line\n");
+        late.exit((t + 0.5).max(501.0));
+        let mut early = Cast::new(
+            dir,
+            3,
+            80,
+            24,
+            &Meta {
+                pane: "%4",
+                ..Meta::default()
+            },
+        );
+        early.m(0.1, &ctx(2, "build", 1, "%4"));
+        let t = early.command(1.0, 1, "make", &[], 0);
+        early
+            .ev(240.0, cinelog_cast::EventCode::Input, "a")
+            .ev(247.0, cinelog_cast::EventCode::Input, "b")
+            .ev(400.0, cinelog_cast::EventCode::Input, "c");
+        early.exit((t + 0.5).max(401.0));
+        for p in [&shell.path, &late.path, &early.path] {
+            kit.index(p, None);
+        }
+
+        let tl = kit.json(&window_uri("")).await;
+        let rows = tl["lanes"][0]["rows"].as_array().unwrap();
+        let labels: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r["group"]["label"].as_str().unwrap(), r["label"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("shells", "sshd-session pts/3"),
+                ("ops", "2 build · 1"),
+                ("ops", "10 logs · 0")
+            ],
+            "groups by first activity, panes by window index"
+        );
+        assert_eq!(rows[1]["group"]["key"], "tmux:testhost/42:7/$1");
+        assert_eq!(rows[1]["tmux"]["pane_index"], "1");
+        let pause = &rows[0]["marks"][0];
+        assert_eq!(
+            (&pause["kind"], &pause["reason"]),
+            (&json!("pause"), &json!("multiplexer"))
+        );
+        assert_eq!(
+            pause["tmux"],
+            json!({"server": "42:7", "session_id": "$1", "session": "ops"}),
+            "the pause names the group of the panes"
+        );
+        let by_pane = kit.json(&window_uri("&group=pane")).await;
+        let lanes: Vec<&str> = by_pane["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(lanes, ["ops › 10 logs · 0", "ops › 2 build · 1", "sshd-session pts/3"]);
+
+        // Typing in the ssh session inside the pane `build` and output in `logs`, without a
+        // command boundary of their own: counted per minute, by row.
+        assert_eq!(tl["activity_bin_secs"], 60.0);
+        let activity = |row: &Value| -> Vec<(f64, u64, u64)> {
+            row["activity"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    (
+                        a["ts"].as_f64().unwrap(),
+                        a["inputs"].as_u64().unwrap(),
+                        a["out_bytes"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let from = START - 60.0;
+        let build = activity(&rows[1]);
+        assert_eq!(build.iter().map(|a| a.1).sum::<u64>(), 3, "{build:?}");
+        assert!(
+            build.iter().all(|a| (a.0 - from) % 60.0 == 0.0),
+            "bins of the window: {build:?}"
+        );
+        // Typed at +243 s and +250 s: one stored minute, in the window's bin it starts in.
+        let typed = build.iter().find(|a| a.1 == 2).expect("both keystrokes in one bin").0;
+        assert!(typed <= START + 243.0 && typed > START + 243.0 - 120.0, "{typed}");
+        let logs = activity(&rows[2]);
+        assert_eq!(logs.iter().map(|a| a.1).sum::<u64>(), 0);
+        assert!(logs.iter().map(|a| a.2).sum::<u64>() >= 9, "{logs:?}");
+
+        let tree = kit.json("/tree").await;
+        let host = &tree["hosts"][0];
+        let server = &host["tmux_servers"][0];
+        assert_eq!(server["server"], "42:7");
+        assert!(close(&server["first_at"], START + 2.0));
+        assert_eq!(server["live"], false);
+        let ops = &server["sessions"][0];
+        assert_eq!((&ops["name"], &ops["recordings"]), (&json!("ops"), &json!(2)));
+        assert_eq!(ops["attached_from"][0]["uuid"], uuid(1));
+        assert_eq!(ops["attached_from"][0]["holder_comm"], "sshd-session");
+        let windows = ops["windows"].as_array().unwrap();
+        assert_eq!(windows[0]["panes"][0]["index"], "1");
+        assert_eq!(windows[1]["panes"][0]["pane"], "%9");
+        let shell = &host["shells"][0]["sessions"][0];
+        assert_eq!(
+            shell["attached"],
+            json!([{"server": "42:7", "session_id": "$1", "session": "ops"}])
+        );
     }
 
     #[tokio::test]
@@ -1223,14 +1674,14 @@ mod tests {
         assert_eq!(s["uuid"], uuid(1));
         assert_eq!(s["state"], "degraded");
         let end = s["ended_at"].as_f64().expect("the drawn end is sent");
-        let open = &row["blocks"][3];
+        let open = &row["blocks"][2];
         assert_eq!(open["ts_end"], Value::Null);
         let start = open["ts_start"].as_f64().unwrap();
         assert!(end > start, "{end} after {start}");
         // The break starts where the client draws the open command to.
         assert!(close(&tl["idle"][0]["from"], end), "{} vs {end}", tl["idle"][0]["from"]);
         // Sessions that did end keep their own `ended_at`; nothing is invented for live ones.
-        assert!(row["sessions"][1]["ended_at"].is_f64());
+        assert!(tl["lanes"][1]["rows"][1]["sessions"][0]["ended_at"].is_f64());
     }
 
     #[tokio::test]
@@ -1245,11 +1696,18 @@ mod tests {
             .iter()
             .find(|l| l["key"].as_str().unwrap().starts_with("pane:"))
             .unwrap();
-        assert_eq!(pane["label"], "%3");
+        assert_eq!(
+            pane["label"], "$1 › %3",
+            "no ctx marker: the ids stand in for the names"
+        );
         let row = &pane["rows"][0];
         assert_eq!(row["key"], format!("{}|user:u", pane["key"].as_str().unwrap()));
         assert_eq!(row["label"], "u");
-        assert_eq!(row["blocks"].as_array().unwrap().len(), 4);
+        assert_eq!(row["group"], Value::Null, "the lane is the pane already");
+        assert_eq!(row["blocks"].as_array().unwrap().len(), 3);
+        let nested = &pane["rows"][1];
+        assert_eq!(nested["parent"], row["key"]);
+        assert_eq!(nested["blocks"].as_array().unwrap().len(), 1);
 
         let only_bob = kit.json(&window_uri("&user=bob")).await;
         let keys: Vec<&str> = only_bob["lanes"]
@@ -1308,13 +1766,14 @@ mod tests {
             let lanes = tl["lanes"].as_array().unwrap();
             assert_eq!(lanes.len(), 1, "bob's only session is forgotten");
             let row = &lanes[0]["rows"][0];
-            let seqs: Vec<(String, u64)> = row["blocks"]
+            let seqs: Vec<(String, u64)> = lanes[0]["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
+                .flat_map(|r| r["blocks"].as_array().unwrap())
                 .map(|b| (b["session"].as_str().unwrap().to_owned(), b["seq"].as_u64().unwrap()))
                 .collect();
-            assert_eq!(seqs, [(uuid(1), 1), (uuid(3), 1), (uuid(1), 3)], "purged={purged}");
+            assert_eq!(seqs, [(uuid(1), 1), (uuid(1), 3), (uuid(3), 1)], "purged={purged}");
             let forgotten: Vec<&Value> = row["marks"]
                 .as_array()
                 .unwrap()
@@ -1392,7 +1851,11 @@ mod tests {
         );
         assert_eq!(list[0]["row"], "tty:testhost//dev/pts/3");
         let nested = &list[1];
-        assert_eq!(nested["row"], row_u, "the nested session's row is its parent's");
+        assert_eq!(
+            nested["row"],
+            format!("{row_u}/nested:u"),
+            "the nested session's own row"
+        );
         assert_eq!(nested["cmd_seq"], 1);
         assert_eq!(nested["color"], Value::Null);
         assert!(nested["ts_to"].as_f64().unwrap() > nested["ts_from"].as_f64().unwrap());

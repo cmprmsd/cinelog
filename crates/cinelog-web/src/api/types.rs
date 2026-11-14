@@ -225,6 +225,39 @@ pub struct TmuxLocation {
     pub window_name: Option<String>,
     /// Pane id (`%7`).
     pub pane: Option<String>,
+    /// Index of the pane in its window, as tmux shows it (`null` when no `ctx` marker
+    /// reported one, or from a server before 1.1).
+    #[serde(default)]
+    pub pane_index: Option<String>,
+}
+
+/// The tmux session a shell's tmux client attached to (the follow-up `multiplexer` marker,
+/// PROTOCOL.md §4.4); its panes are recorded on their own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+pub struct TmuxAttach {
+    /// [`TmuxLocation::server`] of the pane recordings of that server.
+    pub server: String,
+    /// `$3`.
+    pub session_id: String,
+    /// Session name when the client attached.
+    pub session: Option<String>,
+}
+
+impl TmuxAttach {
+    /// From the payload of a `multiplexer` marker; `None` without a usable `tmux` object.
+    pub fn of_marker(data: &serde_json::Map<String, serde_json::Value>) -> Option<Self> {
+        let t = data.get("tmux")?.as_object()?;
+        let text = |k: &str| t.get(k)?.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        let pid = t.get("server_pid")?.as_u64().filter(|&p| p > 0)?;
+        Some(Self {
+            server: format!(
+                "{pid}:{}",
+                t.get("server_start").and_then(serde_json::Value::as_u64).unwrap_or(0)
+            ),
+            session_id: text("session_id")?,
+            session: text("session_name"),
+        })
+    }
 }
 
 /// One recorded session (a cast, with all its rotation parts).
@@ -400,6 +433,10 @@ pub struct TreeHost {
 pub struct TreeTmuxServer {
     /// `<server_pid>:<server_starttime>`.
     pub server: String,
+    /// Start of its oldest session in the response (tells servers of one host apart).
+    pub first_at: Seconds,
+    /// A pane recording of it is live.
+    pub live: bool,
     pub sessions: Vec<TreeTmuxSession>,
 }
 
@@ -407,8 +444,28 @@ pub struct TreeTmuxServer {
 pub struct TreeTmuxSession {
     pub session_id: Option<String>,
     pub name: Option<String>,
+    /// A pane recording of it is live.
+    pub live: bool,
+    /// Sessions in its panes, nested ones included.
+    pub recordings: u32,
+    /// Shells in the response whose tmux client attached to it, newest first; they are
+    /// also listed where they belong (their own pane or shell group).
+    pub attached_from: Vec<TreeAttachedShell>,
     /// By window index.
     pub windows: Vec<TreeWindow>,
+}
+
+/// A shell that ran the tmux client of a [`TreeTmuxSession`] (paused meanwhile).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct TreeAttachedShell {
+    pub uuid: String,
+    pub user: String,
+    pub state: SessionState,
+    pub started_at: Seconds,
+    pub holder_comm: Option<String>,
+    pub tty: Option<String>,
+    /// Set when that shell is itself a tmux pane (tmux inside tmux).
+    pub tmux: TmuxLocation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -420,7 +477,10 @@ pub struct TreeWindow {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct TreePane {
+    /// Pane id (`%7`).
     pub pane: Option<String>,
+    /// Its index in the window, from the newest session that knows it.
+    pub index: Option<String>,
     /// Newest first.
     pub sessions: Vec<TreeNode>,
 }
@@ -444,6 +504,10 @@ pub struct TreeNode {
     pub legacy: bool,
     pub hidden: bool,
     pub commands: u64,
+    /// Whose `sudo` it is (TEAM root shells); labels a nested child.
+    pub sudo_user: Option<String>,
+    /// tmux sessions its tmux client attached to, oldest first, each once.
+    pub attached: Vec<TmuxAttach>,
     /// Oldest first.
     pub children: Vec<TreeNode>,
 }
@@ -928,25 +992,33 @@ pub struct Timeline {
     pub aggregated: bool,
     /// Width of a density bin when `aggregated`.
     pub bin_secs: Option<Seconds>,
+    /// Width of a [`TimelineRow::activity`] bin: the smallest of the density bin sizes that
+    /// gives at most 2000 bins over the window (60 s up to about 33 h).
+    pub activity_bin_secs: Seconds,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct TimelineLane {
     /// `user:<name>` (group `user`) or the row key of the pane (group `pane`).
     pub key: String,
+    /// The person, or `<tmux session> › <pane label>` (the shell's label outside tmux).
     pub label: String,
-    /// By first activity in the window.
+    /// Group `user`: by [`TimelineRow::group`] (groups by first activity in the window, the
+    /// panes of a tmux session by window and pane index). Group `pane`: by first activity.
+    /// A nested row follows its parent.
     pub rows: Vec<TimelineRow>,
 }
 
-/// One drawn row: a pane (or non-tmux shell) of one person.
+/// One drawn row: a pane (or non-tmux shell) of one person, or the sessions nested in such
+/// a row that run as one user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct TimelineRow {
     /// Unique within the response. Pane: `pane:<host>/<tmux server>/<pane>`; shell outside
     /// tmux: `tty:<host>/<tty>` (or `session:<uuid>` without a tty); with group `pane` the
     /// lane's row per person is `<pane key>|user:<name>`.
     pub key: String,
-    /// `<tmux session>:<window>.<pane>` or `<holder_comm> <tty>`; with group `pane` the person.
+    /// `<window> <window name> · <pane index>` or `<holder_comm> <tty>`; a nested row
+    /// `<user>` or `<user> (sudo)`; with group `pane` the person.
     pub label: String,
     pub host: String,
     /// The person: `sudo_user`, else `claimed_user`, else `user`.
@@ -954,7 +1026,16 @@ pub struct TimelineRow {
     pub tmux: TmuxLocation,
     pub holder_comm: Option<String>,
     pub tty: Option<String>,
-    /// Sessions drawn in this row (nested sessions in their parent's row), oldest first.
+    /// The sub-group of the lane this row belongs to (group `user`): its tmux session, or
+    /// the shells outside tmux of its host. Rows of one group follow each other. `null`
+    /// with group `pane`.
+    pub group: Option<TimelineRowGroup>,
+    /// Key of the row this one is nested in (a `sudo` shell inside it); such a row directly
+    /// follows its parent and the parent's other nested rows.
+    pub parent: Option<String>,
+    /// Nesting depth: 0, or the parent's plus one.
+    pub depth: u32,
+    /// Sessions drawn in this row, oldest first.
     pub sessions: Vec<TimelineSession>,
     /// By `ts_start`; empty when the response is `aggregated`.
     pub blocks: Vec<TimelineBlock>,
@@ -962,6 +1043,40 @@ pub struct TimelineRow {
     pub marks: Vec<TimelineMark>,
     /// Only when `aggregated`: bins with at least one command, ascending.
     pub density: Vec<DensityBin>,
+    /// Terminal activity of the row's sessions: bins with keystrokes or output, ascending.
+    /// Empty for sessions indexed before 1.1 (until the index is rebuilt) and legacy casts.
+    pub activity: Vec<TimelineActivity>,
+}
+
+/// Keystrokes and output of a row in `[ts, ts + activity_bin_secs)`. Counts only; it shows
+/// life where no command boundaries exist (inside ssh, an editor, a nested shell).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineActivity {
+    pub ts: Seconds,
+    /// Recorded input events (keystrokes; a paste is one). 0 with `record.input = false`
+    /// and for suppressed input (password prompts).
+    pub inputs: u64,
+    pub out_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum TimelineRowGroupKind {
+    /// The panes of one tmux session.
+    Tmux,
+    /// The shells outside tmux of one host.
+    Shells,
+}
+
+/// See [`TimelineRow::group`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TimelineRowGroup {
+    /// `tmux:<host>/<tmux server>/<session id>` or `shells:<host>`.
+    pub key: String,
+    pub kind: TimelineRowGroupKind,
+    /// The tmux session name (latest; else its id), or `shells`.
+    pub label: String,
+    pub host: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1029,6 +1144,10 @@ pub struct TimelineMark {
     /// `nested`: the child's session URL as its recorder reported it (`url` of the marker;
     /// only when that server ran).
     pub child_url: Option<String>,
+    /// `pause` with reason `multiplexer`: the tmux session the client was attached to, when
+    /// the recorder found it. Its panes are the rows of the group
+    /// `tmux:<host>/<server>/<session_id>`.
+    pub tmux: Option<TmuxAttach>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
@@ -1420,6 +1539,7 @@ impl From<&im::TmuxLocation> for TmuxLocation {
             window: t.window.clone(),
             window_name: t.window_name.clone(),
             pane: t.pane.clone(),
+            pane_index: t.pane_index.clone(),
         }
     }
 }
@@ -1871,6 +1991,7 @@ pub fn typescript() -> String {
         LoginRequest::decl(&cfg),
         Me::decl(&cfg),
         TmuxLocation::decl(&cfg),
+        TmuxAttach::decl(&cfg),
         Session::decl(&cfg),
         SessionPage::decl(&cfg),
         SessionRef::decl(&cfg),
@@ -1887,6 +2008,7 @@ pub fn typescript() -> String {
         TreeWindow::decl(&cfg),
         TreePane::decl(&cfg),
         TreeShellGroup::decl(&cfg),
+        TreeAttachedShell::decl(&cfg),
         TreeNode::decl(&cfg),
         SnippetPart::decl(&cfg),
         SearchHit::decl(&cfg),
@@ -1927,6 +2049,9 @@ pub fn typescript() -> String {
         AnnotationEvent::decl(&cfg),
         BusEvent::decl(&cfg),
         TimelineGroup::decl(&cfg),
+        TimelineRowGroupKind::decl(&cfg),
+        TimelineRowGroup::decl(&cfg),
+        TimelineActivity::decl(&cfg),
         Timeline::decl(&cfg),
         TimelineLane::decl(&cfg),
         TimelineRow::decl(&cfg),

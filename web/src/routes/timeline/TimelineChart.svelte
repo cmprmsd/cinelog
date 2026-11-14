@@ -7,13 +7,18 @@
   import { fmtDuration, fmtTs, oneLine } from '../../lib/format';
   import {
     annotationColor,
+    activityRuns,
     annotationGeoms,
+    attachedGroupKey,
     blockAt,
     blockInfo,
     blockRuns,
     blockXs,
     densityBars,
     firstVisible,
+    focusRows,
+    GROUP_H,
+    groupId,
     hitAnnotation,
     hitBlock,
     hitMark,
@@ -27,9 +32,11 @@
     ROW_H,
     rowAt,
     sessionMap,
+    sessionSpans,
     type BlockAt,
     type BlockRef,
     type DensityBar,
+    type GroupGeom,
     type MarkGeom,
     type AnnotationGeom,
   } from './layout';
@@ -60,7 +67,13 @@
   let plot: HTMLDivElement | undefined = $state();
   let renderMs = $state<number | null>(null);
 
-  const lay = $derived(layout(timeline));
+  /** Collapsed row groups ([`GroupGeom.id`]); kept across refreshes of `timeline`. */
+  let collapsed = $state<ReadonlySet<string>>(new Set());
+  /** The group a click on a tmux pause pointed to (highlighted briefly). */
+  let flash = $state<string | null>(null);
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const lay = $derived(layout(timeline, collapsed));
   const sessions = $derived(sessionMap(timeline));
   const scale = $derived(new TimeScale(timeline.from, timeline.to, width, timeline.idle, collapse));
   const axis = $derived(ticks(scale, utc));
@@ -73,6 +86,12 @@
     timeline.aggregated && timeline.bin_secs
       ? lay.rows.map((r) => densityBars(r.row.density, timeline.bin_secs!, scale, peak))
       : lay.rows.map(() => [] as DensityBar[]),
+  );
+  /** The row each person was typing in, per activity bin. */
+  const focus = $derived(focusRows(timeline));
+  // The strip shares the bottom of a row with the density bars, so it is left out when aggregated.
+  const activity = $derived(
+    lay.rows.map((r) => (timeline.aggregated ? [] : activityRuns(r.row, focus.get(r.row.user), timeline.activity_bin_secs, scale))),
   );
   const nowX = $derived(now >= timeline.from && now <= timeline.to ? scale.x(now) : null);
   const blockCount = $derived(lay.rows.reduce((n, r) => n + r.row.blocks.length, 0));
@@ -121,6 +140,34 @@
     }
     return pointer ?? { x: 0, y: 0 };
   });
+
+  function toggleGroup(g: GroupGeom): void {
+    const others = [...collapsed].filter((id) => id !== g.id);
+    collapsed = new Set(g.collapsed ? others : [...others, g.id]);
+  }
+
+  /** The group with the panes of the tmux session a paused shell attached to, in its lane. */
+  function attachedGroup(row: number, m: MarkGeom): GroupGeom | null {
+    const r = lay.rows[row];
+    const key = r ? attachedGroupKey(r.row.host, m.mark) : null;
+    if (!r || !key) return null;
+    const id = groupId(lay.lanes[r.lane]!.key, key);
+    return lay.groups.find((g) => g.id === id) ?? lay.groups.find((g) => g.group.key === key) ?? null;
+  }
+
+  function showGroup(g: GroupGeom): void {
+    if (g.collapsed) toggleGroup(g);
+    flash = g.id;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (flash = null), 1600);
+    const el = plot?.closest('.tl-scroll');
+    if (el instanceof HTMLElement) {
+      const top = g.y + AXIS_H;
+      if (top < el.scrollTop + AXIS_H || top + GROUP_H > el.scrollTop + el.clientHeight) el.scrollTop = Math.max(0, top - AXIS_H - LANE_H);
+    }
+  }
+
+  $effect(() => () => clearTimeout(flashTimer));
 
   function refAt(at: BlockAt): BlockRef | null {
     const b = blockAt(lay, at);
@@ -191,6 +238,9 @@
       // Served by the other scope's server (a TEAM `sudo -i`): a new tab, its own sign-in.
       if (link.external) window.open(link.external, '_blank', 'noopener,noreferrer');
       else if (link.child) onopensession(link.child);
+    } else if (h.kind === 'mark' && h.mark.mark.tmux) {
+      const g = attachedGroup(h.row, h.mark);
+      if (g) showGroup(g);
     } else if (h.kind === 'density' && timeline.bin_secs) {
       const mid = h.bar.bin.ts + timeline.bin_secs / 2;
       const span = Math.max(600, timeline.bin_secs * 12);
@@ -334,18 +384,45 @@
         <div class="lane-label" style:height={`${LANE_H}px`} title={lane.label} data-testid="tl-lane" data-key={lane.key}>
           {lane.label}
         </div>
-        {#each lane.rows as r (r.row.key)}
-          <div
-            class="row-label"
-            style:height={`${ROW_H}px`}
-            title={`${r.row.user}@${r.row.host}${r.row.tty ? ` ${r.row.tty}` : ''}${r.row.holder_comm ? ` (${r.row.holder_comm})` : ''}`}
-            data-testid="tl-row"
-            data-key={r.row.key}
-            data-blocks={r.row.blocks.length}
-          >
-            {#if r.live}<span class="live-dot" aria-label="live"></span>{/if}
-            {r.row.label}
-          </div>
+        {#each lane.items as item (item.kind === 'group' ? item.group.id : item.row.row.key)}
+          {#if item.kind === 'group'}
+            {@const g = item.group}
+            <button
+              type="button"
+              class="group-label"
+              class:flash={flash === g.id}
+              style:height={`${GROUP_H}px`}
+              aria-expanded={!g.collapsed}
+              title={`${g.group.kind === 'tmux' ? `tmux session ${g.group.label}` : 'shells outside tmux'} on ${g.group.host}: ${g.count} ${g.count === 1 ? 'row' : 'rows'}`}
+              data-testid="tl-group"
+              data-key={g.group.key}
+              onclick={() => toggleGroup(g)}
+            >
+              <span class="twist" aria-hidden="true">{g.collapsed ? '▸' : '▾'}</span>
+              {#if g.group.kind === 'tmux'}<span class="kind">tmux</span>{/if}
+              <span class="name">{g.group.label}</span>
+              {#if g.live}<span class="live-dot" aria-label="live"></span>{/if}
+              {#if g.collapsed}<span class="count">{g.count}</span>{/if}
+            </button>
+          {:else}
+            {@const r = item.row}
+            <div
+              class="row-label"
+              class:grouped={r.row.group !== null && lane.items[0]?.kind === 'group'}
+              class:nested={r.row.depth > 0}
+              style:height={`${ROW_H}px`}
+              style:--depth={r.row.depth}
+              title={`${r.row.depth > 0 ? 'nested shell: ' : ''}${r.row.user}@${r.row.host}${r.row.tmux.pane ? ` tmux pane ${r.row.tmux.pane}` : ''}${r.row.tty ? ` ${r.row.tty}` : ''}${r.row.holder_comm ? ` (${r.row.holder_comm})` : ''}`}
+              data-testid="tl-row"
+              data-key={r.row.key}
+              data-depth={r.row.depth}
+              data-blocks={r.row.blocks.length}
+            >
+              {#if r.row.depth > 0}<span class="nest" aria-hidden="true">↳</span>{/if}
+              {#if r.live}<span class="live-dot" aria-label="live"></span>{/if}
+              <span class="row-name">{r.row.label}</span>
+            </div>
+          {/if}
         {/each}
       {/each}
     </div>
@@ -385,13 +462,32 @@
         {#each lay.lanes as lane (lane.key)}
           <rect class="lane-band" x="0" y={lane.y} width={scale.width} height={LANE_H} />
         {/each}
+        {#each lay.groups as g (g.id)}
+          <rect class="group-band" class:flash={flash === g.id} x="0" y={g.y} width={scale.width} height={GROUP_H} />
+        {/each}
 
         {#each lay.rows as r (r.row.key)}
           <g transform={`translate(0 ${r.y})`} data-testid="tl-row-plot" data-key={r.row.key}>
+            {#if r.row.depth > 0}
+              <rect class="nested-row" x="0" y="0" width={scale.width} height={ROW_H - 1} data-testid="tl-nested-row" />
+              {#each sessionSpans(r.row, scale, now) as s, si (si)}
+                <rect class="nested-band" x={s.x} y="0" width={s.w} height={ROW_H - 1} rx="2" data-testid="tl-nested-band" />
+              {/each}
+            {/if}
             <line class="row-line" x1="0" x2={scale.width} y1={ROW_H - 0.5} y2={ROW_H - 0.5} />
             {#each marks[r.index]! as m, mi (mi)}
               {#if !m.point}
-                <rect class={`span ${m.mark.kind}`} x={m.x} y="1" width={m.w} height={ROW_H - 2} data-testid="tl-mark" data-kind={m.mark.kind} />
+                <rect
+                  class={`span ${m.mark.kind}`}
+                  class:tmux={m.mark.tmux !== null}
+                  x={m.x}
+                  y="1"
+                  width={m.w}
+                  height={ROW_H - 2}
+                  data-testid="tl-mark"
+                  data-kind={m.mark.kind}
+                  data-tmux={m.mark.tmux?.session_id}
+                />
               {/if}
             {/each}
             {#each runs[r.index]! as run, ri (ri)}
@@ -399,6 +495,9 @@
               {#if run.approx}
                 <rect class="hatch" x={run.x} y={run.y} width={Math.max(run.w, 1)} height={run.h} />
               {/if}
+            {/each}
+            {#each activity[r.index]! as a, ai (ai)}
+              <rect class={`act ${a.kind}`} x={a.x} y={ROW_H - 4} width={a.w} height="3" data-testid="tl-activity" data-kind={a.kind} />
             {/each}
             {#each bars[r.index]! as bar, bi (bi)}
               <rect class="bar" x={bar.x} y={ROW_H - 3 - bar.h} width={bar.w} height={bar.h} data-testid="tl-density" />
@@ -460,7 +559,8 @@
             <div class="tip-title">{hover.mark.label}</div>
             <div>{hover.mark.point ? fmtTs(hover.mark.mark.ts, utc) : spanText(hover.mark.mark.ts, hover.mark.mark.ts_end)}</div>
             {#if link.external}<div class="muted">click to open it on the {hover.mark.mark.child_scope} server (new tab)</div>
-            {:else if link.child}<div class="muted">click to open it</div>{/if}
+            {:else if link.child}<div class="muted">click to open it</div>
+            {:else if attachedGroup(hover.row, hover.mark)}<div class="muted">click to show its panes</div>{/if}
           {:else if hover.kind === 'annotation'}
             <div class="tip-title">annotation by {oneLine(hover.anno.annotation.author)}</div>
             {#if hover.anno.annotation.tags.length}<div>{hover.anno.annotation.tags.map((t) => `#${oneLine(t)}`).join(' ')}</div>{/if}
@@ -559,8 +659,71 @@
     font-family: var(--mono);
     font-size: 0.85em;
     color: var(--fg-muted);
-    padding-left: 1.1rem;
+    padding-left: calc(1.1rem + var(--depth, 0) * 0.9rem);
     border-bottom: 1px solid var(--border);
+  }
+  /* A nested shell (sudo inside the row above): the whole row is tinted faintly, label
+     included, and shaded stronger from the start to the end of each of its sessions. */
+  .row-label.nested {
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-elev));
+  }
+  .nested-row {
+    fill: var(--accent);
+    fill-opacity: 0.06;
+  }
+  .nested-band {
+    fill: var(--accent);
+    fill-opacity: 0.16;
+  }
+  .row-label.grouped {
+    padding-left: calc(1.9rem + var(--depth, 0) * 0.9rem);
+  }
+  .row-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nest {
+    flex: none;
+    opacity: 0.7;
+  }
+  .group-label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: 100%;
+    padding: 0 0.5rem 0 0.8rem;
+    border: 0;
+    border-radius: 0;
+    background: var(--bg-elev);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.85em;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .group-label:hover {
+    background: var(--bg-hover);
+  }
+  .group-label .twist {
+    flex: none;
+    width: 0.8em;
+    color: var(--fg-muted);
+  }
+  .group-label .kind,
+  .group-label .count {
+    flex: none;
+    color: var(--fg-muted);
+    font-size: 0.9em;
+  }
+  .group-label .name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .group-label.flash {
+    background: var(--accent-soft);
   }
   .live-dot {
     flex: none;
@@ -616,6 +779,31 @@
     fill: url(#tl-pause);
     stroke: var(--pause);
     stroke-opacity: 0.6;
+  }
+  /* Paused for a tmux client whose panes are recorded: quieter than a real pause. */
+  .span.pause.tmux {
+    fill: var(--pause);
+    fill-opacity: 0.12;
+    stroke-dasharray: 3 3;
+    cursor: pointer;
+  }
+  .group-band {
+    fill: var(--bg-elev);
+  }
+  .group-band.flash {
+    fill: var(--accent-soft);
+  }
+  /* Activity strip: where the person typed (their terminal), typing elsewhere, output only. */
+  .act.focus {
+    fill: var(--accent);
+  }
+  .act.typed {
+    fill: var(--accent);
+    opacity: 0.4;
+  }
+  .act.output {
+    fill: var(--fg-muted);
+    opacity: 0.35;
   }
   .span.gap {
     fill: var(--gap);

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cinelog_core::clock::Clock;
 use cinelog_detect::{Foreground, NestedClaim};
 use cinelog_proto::{
-    CastMarker, ClockSync, CmdRecord, DoneRecord, NestedMode, ScannedMarker, TmuxContext, WireMessage,
+    CastMarker, ClockSync, CmdRecord, DoneRecord, MuxTarget, NestedMode, ScannedMarker, TmuxContext, WireMessage,
 };
 
 use crate::events::{EventTx, Msg, Payload};
@@ -328,6 +328,14 @@ impl Control {
         let ms = self.pause.on_foreground(fg, alt);
         self.emit(t, ms);
         true
+    }
+
+    /// The tmux session the client `pid` attached to (resolved off-thread after its pause).
+    pub(crate) fn on_mux_target(&mut self, pid: u32, target: MuxTarget) {
+        if let Some(m) = self.pause.on_mux_target(pid, target) {
+            let t = self.now();
+            self.tx.marker(t, m);
+        }
     }
 
     /// Resizes are recorded even while paused.

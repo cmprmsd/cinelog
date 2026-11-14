@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::db::{Forgets, IndexDb, SessionFilter};
 use super::types::{
-    Session, SessionState, Tree, TreeHost, TreeNode, TreePane, TreeParams, TreeShellGroup, TreeTmuxServer,
-    TreeTmuxSession, TreeWindow,
+    Session, SessionState, TmuxAttach, Tree, TreeAttachedShell, TreeHost, TreeNode, TreePane, TreeParams,
+    TreeShellGroup, TreeTmuxServer, TreeTmuxSession, TreeWindow,
 };
 use crate::error::{Result, WebError};
 use crate::state::WebContext;
@@ -25,13 +25,24 @@ pub(crate) fn tree(ctx: &WebContext, p: &TreeParams, now: f64) -> Result<Tree> {
         exclude: Forgets::load(ctx)?.sessions(),
         ..SessionFilter::default()
     };
-    let sessions: Vec<Session> = IndexDb::open(ctx)?
-        .sessions(&filter, None, None)?
-        .into_iter()
-        .map(|r| r.session)
-        .collect();
-    Ok(build(sessions, now))
+    let db = IndexDb::open(ctx)?;
+    let rows = db.sessions(&filter, None, None)?;
+    // Legacy casts have no recorder markers.
+    let ids: Vec<i64> = rows.iter().filter(|r| !r.session.legacy).map(|r| r.id).collect();
+    let mut by_id = db.tmux_attaches(&ids)?;
+    let mut attaches = Attaches::new();
+    let mut sessions = Vec::with_capacity(rows.len());
+    for r in rows {
+        if let Some(list) = by_id.remove(&r.id) {
+            attaches.insert(r.session.uuid.clone(), list);
+        }
+        sessions.push(r.session);
+    }
+    Ok(build(sessions, &attaches, now))
 }
+
+/// The tmux sessions a session's tmux client attached to, by session uuid.
+pub(crate) type Attaches = HashMap<String, Vec<TmuxAttach>>;
 
 /// When a session was last active: its end, or `now` while live.
 fn activity(s: &Session, now: f64) -> f64 {
@@ -42,8 +53,8 @@ fn activity(s: &Session, now: f64) -> f64 {
     }
 }
 
-/// Window indexes sort numerically; anything else after them, by text.
-fn window_key(w: Option<&str>) -> (u8, u64, String) {
+/// Window and pane indexes sort numerically; anything else after them, by text.
+pub(crate) fn window_key(w: Option<&str>) -> (u8, u64, String) {
     match w {
         Some(s) => match s.parse::<u64>() {
             Ok(n) => (0, n, String::new()),
@@ -54,11 +65,12 @@ fn window_key(w: Option<&str>) -> (u8, u64, String) {
 }
 
 /// Nodes for `roots` (newest first), each with its nested children (oldest first).
-struct Forest {
+struct Forest<'a> {
     children: HashMap<String, Vec<Session>>,
+    attaches: &'a Attaches,
 }
 
-impl Forest {
+impl Forest<'_> {
     fn reach(&self, uuid: &str, reached: &mut HashSet<String>) {
         if !reached.insert(uuid.to_owned()) {
             return;
@@ -85,6 +97,8 @@ impl Forest {
             legacy: s.legacy,
             hidden: s.hidden,
             commands: s.commands,
+            sudo_user: s.sudo_user.clone().filter(|u| !u.is_empty()),
+            attached: self.attaches.get(&s.uuid).cloned().unwrap_or_default(),
             children,
         }
     }
@@ -101,9 +115,16 @@ impl Forest {
     }
 }
 
+/// A node and everything nested in it.
+fn recordings(nodes: &[TreeNode]) -> u32 {
+    nodes.iter().map(|n| 1 + recordings(&n.children)).sum()
+}
+
 #[derive(Default)]
 struct PaneAcc<'a> {
     sessions: Vec<&'a Session>,
+    /// Index of the pane in its window, from the newest session that knows it.
+    index: Option<(f64, String)>,
 }
 
 #[derive(Default)]
@@ -118,12 +139,25 @@ struct TmuxSessionAcc<'a> {
     windows: BTreeMap<(u8, u64, String), (Option<String>, WindowAcc<'a>)>,
     name: Option<(f64, String)>,
     activity: f64,
+    live: bool,
 }
 
-#[derive(Default)]
 struct ServerAcc<'a> {
     sessions: HashMap<Option<String>, TmuxSessionAcc<'a>>,
     activity: f64,
+    first_at: f64,
+    live: bool,
+}
+
+impl Default for ServerAcc<'_> {
+    fn default() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            activity: 0.0,
+            first_at: f64::INFINITY,
+            live: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -140,7 +174,32 @@ fn newer_name(slot: &mut Option<(f64, String)>, at: f64, name: Option<&String>) 
     }
 }
 
-pub(crate) fn build(sessions: Vec<Session>, now: f64) -> Tree {
+fn attached_shell(s: &Session) -> TreeAttachedShell {
+    TreeAttachedShell {
+        uuid: s.uuid.clone(),
+        user: s.user.clone(),
+        state: s.state,
+        started_at: s.started_at,
+        holder_comm: s.holder_comm.clone(),
+        tty: s.tty.clone(),
+        tmux: s.tmux.clone(),
+    }
+}
+
+pub(crate) fn build(sessions: Vec<Session>, attaches: &Attaches, now: f64) -> Tree {
+    // (host, tmux server, tmux session id) → the shells whose client attached to it.
+    let mut clients: HashMap<(&str, &str, &str), Vec<&Session>> = HashMap::new();
+    for s in &sessions {
+        for a in attaches.get(&s.uuid).into_iter().flatten() {
+            clients
+                .entry((s.host.as_str(), a.server.as_str(), a.session_id.as_str()))
+                .or_default()
+                .push(s);
+        }
+    }
+    for list in clients.values_mut() {
+        list.sort_by(|a, b| b.started_at.total_cmp(&a.started_at).then_with(|| b.uuid.cmp(&a.uuid)));
+    }
     let present: HashSet<&str> = sessions.iter().map(|s| s.uuid.as_str()).collect();
     let mut children: HashMap<String, Vec<Session>> = HashMap::new();
     let mut roots = Vec::new();
@@ -155,7 +214,7 @@ pub(crate) fn build(sessions: Vec<Session>, now: f64) -> Tree {
     for kids in children.values_mut() {
         kids.sort_by(|a, b| a.started_at.total_cmp(&b.started_at).then_with(|| a.uuid.cmp(&b.uuid)));
     }
-    let forest = Forest { children };
+    let forest = Forest { children, attaches };
     // Sessions in a parent cycle are reachable from no root: the oldest of each cycle
     // becomes one.
     let mut reached = HashSet::new();
@@ -178,9 +237,13 @@ pub(crate) fn build(sessions: Vec<Session>, now: f64) -> Tree {
         match &s.tmux.server {
             Some(server) => {
                 let srv = host.servers.entry(server.clone()).or_default();
+                let live = s.state == SessionState::Live;
                 srv.activity = srv.activity.max(act);
+                srv.first_at = srv.first_at.min(s.started_at);
+                srv.live |= live;
                 let ts = srv.sessions.entry(s.tmux.session_id.clone()).or_default();
                 ts.activity = ts.activity.max(act);
+                ts.live |= live;
                 newer_name(&mut ts.name, s.started_at, s.tmux.session.as_ref());
                 let key = window_key(s.tmux.window.as_deref());
                 let (_, win) = ts
@@ -188,7 +251,9 @@ pub(crate) fn build(sessions: Vec<Session>, now: f64) -> Tree {
                     .entry(key)
                     .or_insert_with(|| (s.tmux.window.clone(), WindowAcc::default()));
                 newer_name(&mut win.name, s.started_at, s.tmux.window_name.as_ref());
-                win.panes.entry(s.tmux.pane.clone()).or_default().sessions.push(s);
+                let pane = win.panes.entry(s.tmux.pane.clone()).or_default();
+                newer_name(&mut pane.index, s.started_at, s.tmux.pane_index.as_ref());
+                pane.sessions.push(s);
             }
             None => host.shells.entry(s.holder_comm.clone()).or_default().push(s),
         }
@@ -207,31 +272,50 @@ pub(crate) fn build(sessions: Vec<Session>, now: f64) -> Tree {
                 .map(|(server, srv)| {
                     let mut tsessions: Vec<(Option<String>, TmuxSessionAcc<'_>)> = srv.sessions.into_iter().collect();
                     tsessions.sort_by(|a, b| b.1.activity.total_cmp(&a.1.activity).then_with(|| a.0.cmp(&b.0)));
-                    TreeTmuxServer {
-                        server,
-                        sessions: tsessions
-                            .into_iter()
-                            .map(|(session_id, ts)| TreeTmuxSession {
+                    let sessions = tsessions
+                        .into_iter()
+                        .map(|(session_id, ts)| {
+                            let windows: Vec<TreeWindow> = ts
+                                .windows
+                                .into_values()
+                                .map(|(window, w)| TreeWindow {
+                                    window,
+                                    name: w.name.map(|(_, n)| n),
+                                    panes: w
+                                        .panes
+                                        .into_iter()
+                                        .map(|(pane, p)| TreePane {
+                                            pane,
+                                            index: p.index.map(|(_, i)| i),
+                                            sessions: forest.nodes(p.sessions, &mut seen),
+                                        })
+                                        .collect(),
+                                })
+                                .collect();
+                            let attached_from = session_id
+                                .as_deref()
+                                .and_then(|id| clients.get(&(host.as_str(), server.as_str(), id)))
+                                .map(|list| list.iter().map(|s| attached_shell(s)).collect())
+                                .unwrap_or_default();
+                            TreeTmuxSession {
                                 session_id,
                                 name: ts.name.map(|(_, n)| n),
-                                windows: ts
-                                    .windows
-                                    .into_values()
-                                    .map(|(window, w)| TreeWindow {
-                                        window,
-                                        name: w.name.map(|(_, n)| n),
-                                        panes: w
-                                            .panes
-                                            .into_iter()
-                                            .map(|(pane, p)| TreePane {
-                                                pane,
-                                                sessions: forest.nodes(p.sessions, &mut seen),
-                                            })
-                                            .collect(),
-                                    })
-                                    .collect(),
-                            })
-                            .collect(),
+                                live: ts.live,
+                                recordings: windows
+                                    .iter()
+                                    .flat_map(|w| &w.panes)
+                                    .map(|p| recordings(&p.sessions))
+                                    .sum(),
+                                attached_from,
+                                windows,
+                            }
+                        })
+                        .collect();
+                    TreeTmuxServer {
+                        server,
+                        first_at: srv.first_at,
+                        live: srv.live,
+                        sessions,
                     }
                 })
                 .collect();
@@ -300,6 +384,7 @@ mod tests {
             window: Some(window.into()),
             window_name: Some(format!("w{window}")),
             pane: Some(pane.into()),
+            pane_index: None,
         };
         x
     }
@@ -324,7 +409,7 @@ mod tests {
             term,
             orphan,
         ];
-        let tree = build(sessions, 100.0);
+        let tree = build(sessions, &Attaches::new(), 100.0);
         assert_eq!(tree.hosts.len(), 1);
         let h = &tree.hosts[0];
         assert_eq!(h.tmux_servers[0].server, "1:1", "live server is the most recent");
@@ -352,7 +437,7 @@ mod tests {
         a.parent_uuid = Some("b".into());
         let mut b = s("b", 2.0);
         b.parent_uuid = Some("a".into());
-        let tree = build(vec![a, b], 10.0);
+        let tree = build(vec![a, b], &Attaches::new(), 10.0);
         let g = &tree.hosts[0].shells[0];
         assert_eq!(g.sessions.len(), 1, "the oldest of the cycle is the root");
         assert_eq!(g.sessions[0].uuid, "a");

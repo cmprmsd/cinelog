@@ -6,7 +6,8 @@
 - **Data:** `dataset.ts` writes an invented workday as real casts: user `alice` on host
   `build01`, two tmux panes, a `sudo -i` root shell, an ssh login, a running session and an
   old-plugin cast. It contains no real recordings. The casts follow docs/PROTOCOL.md §5
-  (session, cmd/done, pause/resume, skip and nested markers).
+  (session, cmd/done, pause/resume, skip, nested and multiplexer markers; the ssh login
+  attaches to the tmux session of the panes).
 - **Server:** `server.ts` starts a real `cinelog serve` in a throwaway HOME below
   `$CINELOG_E2E_TMP` (default the system temp dir). It indexes the casts once, creates a
   token and registers the live session with a stand-in recorder.

@@ -49,16 +49,91 @@ test.describe('timeline', () => {
     await expect(lanes).toHaveCount(1);
     await expect(lanes.first()).toHaveAttribute('data-key', 'user:alice');
     const rows = page.getByTestId('tl-row');
-    await expect(rows).toHaveCount(4);
-    // The nested sudo session is drawn in its parent's row.
+    await expect(rows).toHaveCount(5);
+    // The panes of the tmux session `work` and the shells outside tmux are two groups.
+    const groups = page.getByTestId('tl-group');
+    await expect(groups).toHaveCount(2);
+    await expect(groups.first()).toHaveAttribute('data-key', 'tmux:lab1/4242:991/$0');
+    await expect(groups.first()).toContainText('work');
+    await expect(groups.last()).toHaveText(/shells/);
+    // A pane is named by its window and its index in it.
     const needle = page.locator(`[data-testid="tl-row"][data-key="${PANE1}"]`);
-    await expect(needle).toHaveText('work:0.%1');
-    await expect(needle).toHaveAttribute('data-blocks', '6');
+    await expect(needle).toHaveText('0 shell · 0');
+    await expect(needle).toHaveAttribute('data-blocks', '5');
+    // The nested sudo session has a row of its own right below its parent's.
+    const nested = page.locator(`[data-testid="tl-row"][data-key="${PANE1}/nested:root"]`);
+    await expect(nested).toContainText('root (sudo)');
+    await expect(nested).toHaveAttribute('data-depth', '1');
+    await expect(nested).toHaveAttribute('data-blocks', '1');
+    await expect(rows.nth(1)).toHaveAttribute('data-key', `${PANE1}/nested:root`);
     await expect(page.locator('[data-testid="tl-row"][data-key="tty:lab1//dev/pts/3"]')).toHaveText('sshd-session pts/3');
     // The live session's row has a live dot; the 10-day-old legacy session is outside.
     await expect(page.locator('[data-testid="tl-row"] .live-dot')).toHaveCount(1);
     await expect(page.locator(`[data-testid="tl-row"][data-key="session:${FIX.legacy}"]`)).toHaveCount(0);
-    await expect(page.getByTestId('tl-summary')).toContainText('in 4 rows');
+    await expect(page.getByTestId('tl-summary')).toContainText('in 5 rows');
+  });
+
+  test('a tmux session folds, and the pause of the shell that attached to it points to its panes', async ({ page }) => {
+    // The ssh login attached to the tmux session `work` for a while.
+    await page.route('**/api/timeline*', async (route) => {
+      const res = await route.fetch();
+      const tl = (await res.json()) as Timeline;
+      const shell = tl.lanes[0]!.rows.find((r) => r.key === 'tty:lab1//dev/pts/3')!;
+      const s = shell.sessions[0]!;
+      shell.marks.push({
+        session: s.uuid,
+        kind: 'pause',
+        ts: tl.from + 2 * 3600,
+        ts_end: tl.from + 3 * 3600,
+        reason: 'multiplexer',
+        detail: 'tmux: client',
+        child: null,
+        child_scope: null,
+        child_url: null,
+        tmux: { server: '4242:991', session_id: '$0', session: 'work' },
+      });
+      // Nothing here is collapsed as idle, so the pause is wide enough to point at.
+      tl.idle = [];
+      // In one hour alice typed mostly in the ssh login and a little in the pane; later the
+      // pane only printed output.
+      const pane = tl.lanes[0]!.rows.find((r) => r.key === PANE1)!;
+      const bin = tl.activity_bin_secs;
+      const at = tl.from + 5 * 3600;
+      shell.activity = [{ ts: at, inputs: 40, out_bytes: 900 }];
+      pane.activity = [
+        { ts: at, inputs: 3, out_bytes: 100 },
+        { ts: at + 10 * bin, inputs: 0, out_bytes: 5000 },
+      ];
+      await route.fulfill({ response: res, json: tl });
+    });
+    await page.goto('/timeline');
+    const work = page.locator('[data-testid="tl-group"][data-key="tmux:lab1/4242:991/$0"]');
+    const rows = page.getByTestId('tl-row');
+    await expect(rows).toHaveCount(5);
+    await expect(work).toHaveAttribute('aria-expanded', 'true');
+    // The activity strip: the terminal alice was in, typing elsewhere, output only.
+    const strip = (key: string) => page.locator(`[data-testid="tl-row-plot"][data-key="${key}"] [data-testid="tl-activity"]`);
+    await expect(strip('tty:lab1//dev/pts/3')).toHaveAttribute('data-kind', 'focus');
+    await expect(strip(PANE1).first()).toHaveAttribute('data-kind', 'typed');
+    await expect(strip(PANE1).last()).toHaveAttribute('data-kind', 'output');
+    // The nested sudo row is tinted as a whole and shaded where its session existed.
+    await expect(page.locator(`[data-testid="tl-row-plot"][data-key="${PANE1}/nested:root"] [data-testid="tl-nested-row"]`)).toHaveCount(1);
+    await expect(page.locator(`[data-testid="tl-row-plot"][data-key="${PANE1}/nested:root"] [data-testid="tl-nested-band"]`)).toHaveCount(1);
+    await work.click();
+    await expect(work).toHaveAttribute('aria-expanded', 'false');
+    await expect(rows).toHaveCount(1);
+    await expect(work).toContainText('4');
+
+    const pause = page.locator('[data-testid="tl-mark"][data-kind="pause"][data-tmux="$0"]');
+    await expect(pause).toHaveCount(1);
+    const at = await centre(pause);
+    await page.mouse.move(at.x, at.y);
+    await expect(tip(page)).toContainText('in tmux session work');
+    await expect(tip(page)).toContainText('click to show its panes');
+    await page.mouse.click(at.x, at.y);
+    await expect(work).toHaveAttribute('aria-expanded', 'true');
+    await expect(work).toHaveClass(/flash/);
+    await expect(rows).toHaveCount(5);
   });
 
   test('groups by pane', async ({ page }) => {
@@ -66,7 +141,8 @@ test.describe('timeline', () => {
     await page.getByRole('radio', { name: 'by pane' }).check();
     await expect(page).toHaveURL(/group=pane/);
     await expect(page.getByTestId('tl-lane')).toHaveCount(4);
-    await expect(page.locator(`[data-testid="tl-lane"][data-key="${PANE1}"]`)).toHaveText('work:0.%1');
+    await expect(page.locator(`[data-testid="tl-lane"][data-key="${PANE1}"]`)).toHaveText('work › 0 shell · 0');
+    await expect(page.getByTestId('tl-group')).toHaveCount(0);
     await expect(page.locator(`[data-testid="tl-row"][data-key="${PANE1}|user:alice"]`)).toHaveText('alice');
     await page.getByRole('radio', { name: 'by person' }).check();
     await expect(page).not.toHaveURL(/group=/);
@@ -100,9 +176,9 @@ test.describe('timeline', () => {
     await page.mouse.click(at.x, at.y);
     await expect(page).toHaveURL(new RegExp(`open=${FIX.needle}&cmd=3`));
     await expect(page.getByTestId('current-command')).toContainText('cat evil.html');
-    // The nested session's command sits between, in the same row.
+    // The nested session's command is in the row below.
     await plot(page).focus();
-    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
     await expect(tip(page)).toContainText('$ id');
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(new RegExp(`open=${FIX.nested}&cmd=1`));
@@ -262,21 +338,25 @@ function week(to: number, per: number, aggregated: boolean): Timeline {
         : [];
       rows.push({
         key: `pane:h/1:2/%${p * 3 + pane}`,
-        label: `work:0.%${p * 3 + pane}`,
+        label: `0 · ${pane}`,
         host: 'h',
         user: `user${p}`,
-        tmux: { server: '1:2', session_id: '$0', session: 'work', window: '0', window_name: null, pane: `%${p * 3 + pane}` },
+        tmux: { server: '1:2', session_id: '$0', session: 'work', window: '0', window_name: null, pane: `%${p * 3 + pane}`, pane_index: String(pane) },
         holder_comm: 'tmux: server',
         tty: '/dev/pts/1',
+        group: { key: 'tmux:h/1:2/$0', kind: 'tmux' as const, label: 'work', host: 'h' },
+        parent: null,
+        depth: 0,
         sessions: [{ uuid: session, user: 'root', state: 'ended' as const, started_at: from, ended_at: to, parent_uuid: null, legacy: false }],
         blocks: aggregated ? [] : blocks,
-        marks: [{ session, kind: 'skip' as const, ts: from + 9 * 3600, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null }],
+        marks: [{ session, kind: 'skip' as const, ts: from + 9 * 3600, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null, tmux: null }],
         density,
+        activity: [],
       });
     }
     lanes.push({ key: `user:user${p}`, label: `user${p}`, rows });
   }
-  return { from, to, group: 'user', lanes, idle: [], annotations: [], commands, aggregated, bin_secs: aggregated ? 900 : null };
+  return { from, to, group: 'user', lanes, idle: [], annotations: [], commands, aggregated, bin_secs: aggregated ? 900 : null, activity_bin_secs: 900 };
 }
 
 test.describe('timeline at scale', () => {

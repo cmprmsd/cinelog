@@ -71,6 +71,7 @@ fn session(env: &Env, uuid: &str) -> SessionMeta {
             window: Some("0".into()),
             window_name: Some("zsh".into()),
             pane: Some("%3".into()),
+            pane_index: Some("1".into()),
         },
         parent_uuid: None,
         cast_path: env.cast(&format!("{uuid}.cast")),

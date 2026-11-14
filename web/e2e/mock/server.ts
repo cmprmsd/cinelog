@@ -298,8 +298,11 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       legacy: s.legacy,
       hidden: s.hidden,
       commands: s.commands,
+      sudo_user: s.sudo_user || null,
+      attached: [],
       children: list.filter((c) => c.parent_uuid === s.uuid).reverse().map(node),
     });
+    const count = (nodes: TreeNode[]): number => nodes.reduce((n, x) => n + 1 + count(x.children), 0);
     const hosts = new Map<string, TreeHost>();
     for (const s of list) {
       if (s.parent_uuid && inResponse.has(s.parent_uuid)) continue;
@@ -308,14 +311,18 @@ export async function startMock(opts: { port?: number; dist?: string } = {}): Pr
       const t = s.tmux;
       if (t.server && t.pane) {
         let srv = h.tmux_servers.find((x) => x.server === t.server);
-        if (!srv) h.tmux_servers.push((srv = { server: t.server, sessions: [] }));
+        if (!srv) h.tmux_servers.push((srv = { server: t.server, first_at: s.started_at, live: false, sessions: [] }));
         let ts = srv.sessions.find((x) => x.session_id === t.session_id);
-        if (!ts) srv.sessions.push((ts = { session_id: t.session_id, name: t.session, windows: [] }));
+        if (!ts) srv.sessions.push((ts = { session_id: t.session_id, name: t.session, live: false, recordings: 0, attached_from: [], windows: [] }));
         let w = ts.windows.find((x) => x.window === t.window);
         if (!w) ts.windows.push((w = { window: t.window, name: t.window_name, panes: [] }));
         let p = w.panes.find((x) => x.pane === t.pane);
-        if (!p) w.panes.push((p = { pane: t.pane, sessions: [] }));
+        if (!p) w.panes.push((p = { pane: t.pane, index: t.pane_index, sessions: [] }));
         p.sessions.push(node(s));
+        srv.first_at = Math.min(srv.first_at, s.started_at);
+        ts.live ||= s.state === 'live';
+        srv.live ||= ts.live;
+        ts.recordings = ts.windows.reduce((n, x) => n + x.panes.reduce((k, y) => k + count(y.sessions), 0), 0);
       } else {
         let g = h.shells.find((x) => x.holder_comm === s.holder_comm);
         if (!g) h.shells.push((g = { holder_comm: s.holder_comm, sessions: [] }));

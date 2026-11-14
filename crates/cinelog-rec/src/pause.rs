@@ -7,8 +7,8 @@
 
 use cinelog_detect::Foreground;
 use cinelog_proto::{
-    CastMarker, Extra, MultiplexerInfo, NestedInfo, NestedLink, NestedMode, PauseInfo, PauseReason, ResumeInfo,
-    ResumeReason,
+    CastMarker, Extra, MultiplexerInfo, MuxTarget, NestedInfo, NestedLink, NestedMode, PauseInfo, PauseReason,
+    ResumeInfo, ResumeReason,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,7 @@ struct ActiveNested {
 struct ActiveMux {
     pid: u32,
     comm: String,
+    pgrp: u32,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +64,19 @@ impl PauseMachine {
         })
     }
 
+    /// The follow-up `multiplexer` marker for the client `pid`, once the tmux session it
+    /// attached to is known; `None` when that client no longer holds the pause.
+    pub(crate) fn on_mux_target(&self, pid: u32, target: MuxTarget) -> Option<CastMarker> {
+        let m = self.mux.as_ref().filter(|m| m.pid == pid && self.interval.is_some())?;
+        Some(CastMarker::Multiplexer(MultiplexerInfo {
+            comm: m.comm.clone(),
+            pid,
+            pgrp: m.pgrp,
+            tmux: Some(target),
+            extra: Extra::new(),
+        }))
+    }
+
     fn any_cause(&self) -> bool {
         self.user.is_some() || self.nested.is_some() || self.mux.is_some()
     }
@@ -98,6 +112,7 @@ impl PauseMachine {
                 let now = ActiveMux {
                     pid: *pid,
                     comm: comm.clone(),
+                    pgrp: *pgrp,
                 };
                 if self.mux.as_ref() != Some(&now) {
                     if self.interval.is_none() {
@@ -105,6 +120,7 @@ impl PauseMachine {
                             comm: comm.clone(),
                             pid: *pid,
                             pgrp: *pgrp,
+                            tmux: None,
                             extra: Extra::new(),
                         }));
                     }
@@ -263,6 +279,30 @@ mod tests {
             (Ev::Fg(Foreground::Shell), &["resume:foreground"]),
             (Ev::Fg(Foreground::Shell), &[]),
         ]);
+    }
+
+    #[test]
+    fn the_attached_session_is_linked_while_that_client_holds_the_pause() {
+        let target = || MuxTarget {
+            server_pid: 7,
+            server_start: 9,
+            session_id: "$1".into(),
+            session_name: "ops".into(),
+            extra: Extra::new(),
+        };
+        let mut m = PauseMachine::default();
+        assert_eq!(m.on_mux_target(10, target()), None, "not paused");
+        m.on_foreground(&mux(10), false);
+        assert_eq!(m.on_mux_target(11, target()), None, "another client");
+        let Some(CastMarker::Multiplexer(info)) = m.on_mux_target(10, target()) else {
+            panic!("a multiplexer marker");
+        };
+        assert_eq!(
+            (info.pid, info.comm.as_str(), info.tmux),
+            (10, "tmux: client", Some(target()))
+        );
+        m.on_foreground(&Foreground::Shell, false);
+        assert_eq!(m.on_mux_target(10, target()), None, "resumed");
     }
 
     #[test]

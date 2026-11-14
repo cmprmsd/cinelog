@@ -25,7 +25,7 @@ export interface DemoCommand {
 
 export interface DemoMarker {
   t: number;
-  k: 'pause' | 'resume' | 'skip' | 'nested';
+  k: 'pause' | 'resume' | 'skip' | 'nested' | 'multiplexer';
   data: Record<string, unknown>;
 }
 
@@ -88,6 +88,9 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
 const round = (t: number) => Math.round(t * 1e6) / 1e6;
+
+/** The one tmux server of the day and its session `ops` (`tmux` of a `multiplexer` marker). */
+const TMUX_SERVER = { server_pid: 2207, server_start: 4410, session_id: '$0', session_name: 'ops' };
 
 function tmux(window: string, windowName: string, pane: string): Tmux {
   return { session: 'ops', window, windowName, pane };
@@ -224,6 +227,14 @@ export function buildDemo(now: number): DemoSession[] {
       { at: 2, dur: 1, typed: 'uptime', cwd: '~', out: [' 11:58:21 up 6 days,  3:44,  2 users,  load average: 0.42, 0.51, 0.47'] },
       { at: 15, dur: 2, typed: 'free -h', cwd: '~', out: ['               total        used        free      shared  buff/cache   available', 'Mem:            62Gi        21Gi        18Gi       1.2Gi        24Gi        41Gi'] },
       { at: 600, dur: 180, typed: 'rsync -a --info=progress2 backups/ nas:/volume1/backups/build01/', cwd: '~', out: ['  9,881,344,512 100%  54.12MB/s    0:02:54 (xfr#212, to-chk=0/1880)'] },
+      { at: 820, dur: 1580, typed: 'tmux attach -t ops', cwd: '~', out: ['[detached (from session ops)]'] },
+    ],
+    // The login attaches to the tmux session of the panes: paused here, recorded there.
+    markers: [
+      { t: 820.2, k: 'multiplexer', data: { comm: 'tmux: client', pid: 51877, pgrp: 51877 } },
+      { t: 820.2, k: 'pause', data: { reason: 'multiplexer', detail: 'tmux: client' } },
+      { t: 820.6, k: 'multiplexer', data: { comm: 'tmux: client', pid: 51877, pgrp: 51877, tmux: TMUX_SERVER } },
+      { t: 2399.8, k: 'resume', data: { reason: 'foreground' } },
     ],
   });
 
@@ -298,7 +309,7 @@ function sessionMarker(s: DemoSession): string {
     attribution: 'ancestor',
     tty: s.tty,
     holder_comm: s.holder,
-    tmux: t ? { socket: '/tmp/tmux-1000/default', server_pid: 2207, server_start: 4410, session_id: '$0', pane: t.pane } : null,
+    tmux: t ? { socket: '/tmp/tmux-1000/default', server_pid: TMUX_SERVER.server_pid, server_start: TMUX_SERVER.server_start, session_id: TMUX_SERVER.session_id, pane: t.pane } : null,
     parent_uuid: s.parent,
     input: true,
     rec_version: '1.0.0',

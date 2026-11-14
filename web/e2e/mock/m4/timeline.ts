@@ -1,6 +1,7 @@
 // Mock of `GET /api/timeline` (work package M4-B; docs/API.md §9.3) over the fixture sessions,
 // with the server's rules: the window (default the last 24 h, at most 31 days), the person of
-// a session, pane and shell rows, nested sessions in their parent's row, blocks, marks from
+// a session, pane and shell rows grouped by tmux session, nested sessions in a row of their
+// own below their parent's, blocks, marks from
 // the markers, idle breaks and aggregation above 20 000 commands. Annotations live in the
 // M4-C mock; specs that need them on the timeline add them with `page.route`.
 
@@ -15,6 +16,7 @@ import type {
   TimelineLane,
   TimelineMark,
   TimelineRow,
+  TimelineRowGroup,
 } from '../../../src/lib/api/types.ts';
 import type { FixSession } from '../fixtures.ts';
 import type { MockContext, MockHandler } from './context.ts';
@@ -45,15 +47,38 @@ export function person(s: Session): string {
   return s.sudo_user || s.claimed_user || s.user;
 }
 
-export function slot(s: Session): { key: string; label: string } {
+export interface Slot {
+  key: string;
+  /** Within its group. */
+  label: string;
+  group: TimelineRowGroup;
+  /** Window and pane index of a pane; `null` outside tmux. */
+  order: [number, number] | null;
+}
+
+const index = (v: string | null): number => (v !== null && /^\d+$/.test(v) ? Number(v) : Infinity);
+
+export function slot(s: Session): Slot {
   const t = s.tmux;
   if (t.pane) {
-    const label = t.session === null && t.window === null ? t.pane : `${t.session ?? '?'}:${t.window ?? '?'}.${t.pane}`;
-    return { key: `pane:${s.host}/${t.server ?? '-'}/${t.pane}`, label };
+    const pane = t.pane_index || t.pane;
+    const label = t.window ? `${[t.window, t.window_name].filter(Boolean).join(' ')} · ${pane}` : pane;
+    return {
+      key: `pane:${s.host}/${t.server ?? '-'}/${t.pane}`,
+      label,
+      group: { key: `tmux:${s.host}/${t.server ?? '-'}/${t.session_id ?? '-'}`, kind: 'tmux', label: t.session || t.session_id || 'tmux', host: s.host },
+      order: [index(t.window), index(t.pane_index)],
+    };
   }
   const holder = s.holder_comm || 'shell';
-  if (s.tty) return { key: `tty:${s.host}/${s.tty}`, label: `${holder} ${s.tty.replace(/^\/dev\//, '')}` };
-  return { key: `session:${s.uuid}`, label: `${holder} ${s.uuid.slice(0, 8)}` };
+  const group: TimelineRowGroup = { key: `shells:${s.host}`, kind: 'shells', label: 'shells', host: s.host };
+  if (s.tty) return { key: `tty:${s.host}/${s.tty}`, label: `${holder} ${s.tty.replace(/^\/dev\//, '')}`, group, order: null };
+  return { key: `session:${s.uuid}`, label: `${holder} ${s.uuid.slice(0, 8)}`, group, order: null };
+}
+
+/** The label of a pane or shell on its own (a lane of group `pane`). */
+export function slotPath(x: Slot): string {
+  return x.group.kind === 'tmux' ? `${x.group.label} › ${x.label}` : x.label;
 }
 
 function sessionEnd(s: Session, now: number): number {
@@ -75,6 +100,7 @@ function marks(f: FixSession, now: number): TimelineMark[] {
     child: null,
     child_scope: null,
     child_url: null,
+    tmux: null,
   });
   const out: TimelineMark[] = [];
   let paused: TimelineMark | null = null;
@@ -89,6 +115,14 @@ function marks(f: FixSession, now: number): TimelineMark[] {
           paused = null;
         }
         break;
+      case 'multiplexer': {
+        // The follow-up marker of a tmux client names the session it attached to.
+        const t = m.data.tmux as { server_pid?: number; server_start?: number; session_id?: string; session_name?: string } | undefined;
+        if (paused?.reason === 'multiplexer' && t?.server_pid && t.session_id) {
+          paused.tmux = { server: `${t.server_pid}:${t.server_start ?? 0}`, session_id: t.session_id, session: t.session_name || null };
+        }
+        break;
+      }
       case 'skip':
         out.push(mark('skip', at(m), null));
         break;
@@ -109,8 +143,13 @@ function marks(f: FixSession, now: number): TimelineMark[] {
 }
 
 interface Acc {
-  slot: string;
+  /** Slot of the root row it belongs to. */
+  slot: Slot;
   person: string;
+  /** The row it is nested in. */
+  parent: Acc | null;
+  depth: number;
+  nested: Acc[];
   newest: Session;
   first: number;
   sessions: Session[];
@@ -143,29 +182,54 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
     .filter((f) => f.session.started_at <= w.to && sessionEnd(f.session, now) >= w.from)
     .sort((a, b) => a.session.started_at - b.session.started_at);
   const byUuid = new Map(found.map((f) => [f.session.uuid, f]));
-  const root = (f: FixSession): FixSession => {
+  /** `f` and its ancestors in the window, outermost last. */
+  const chain = (f: FixSession): FixSession[] => {
     const seen = new Set([f.session.uuid]);
-    let cur = f;
+    const out = [f];
     for (;;) {
+      const cur = out[out.length - 1]!;
       const p = cur.session.parent_uuid ? byUuid.get(cur.session.parent_uuid) : undefined;
-      if (!p || seen.has(p.session.uuid)) return cur;
+      if (!p || seen.has(p.session.uuid)) return out;
       seen.add(p.session.uuid);
-      cur = p;
+      out.push(p);
     }
   };
 
+  // A root session is drawn in the row of its (slot, person); a nested one in a row of its
+  // own below its parent's, one per user it runs as.
   const rows = new Map<string, Acc>();
+  const fresh = (s: Slot, who: string, parent: Acc | null, newest: Session): Acc => ({
+    slot: s,
+    person: who,
+    parent,
+    depth: parent ? parent.depth + 1 : 0,
+    nested: [],
+    newest,
+    first: Infinity,
+    sessions: [],
+    blocks: [],
+    ends: [],
+    marks: [],
+    busy: [],
+  });
   let total = 0;
   for (const f of found) {
-    const r = root(f).session;
+    const up = chain(f).reverse();
+    const r = up[0]!.session;
     if (user && person(r) !== user) continue;
-    const key = `${slot(r).key}\u0000${person(r)}`;
+    let key = `${slot(r).key}\u0000${person(r)}`;
     let acc = rows.get(key);
-    if (!acc) {
-      acc = { slot: slot(r).key, person: person(r), newest: r, first: Infinity, sessions: [], blocks: [], ends: [], marks: [], busy: [] };
-      rows.set(key, acc);
+    if (!acc) rows.set(key, (acc = fresh(slot(r), person(r), null, r)));
+    for (const d of up.slice(1)) {
+      key = `${key}\u0000nested:${d.session.user}`;
+      let below = rows.get(key);
+      if (!below) {
+        rows.set(key, (below = fresh(acc.slot, acc.person, acc, d.session)));
+        acc.nested.push(below);
+      }
+      acc = below;
     }
-    if (r.started_at >= acc.newest.started_at) acc.newest = r;
+    if (acc.sessions.length === 0 || f.session.started_at >= acc.newest.started_at) acc.newest = f.session;
     acc.sessions.push(f.session);
     acc.first = Math.min(acc.first, Math.max(w.from, f.session.started_at));
     const end = sessionEnd(f.session, now);
@@ -202,29 +266,67 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
   const aggregated = total > AGGREGATE_ABOVE;
   const bin = aggregated ? (BIN_SIZES.find((b) => Math.ceil((w.to - w.from) / b) <= 2000) ?? DAY) : null;
 
+  const roots = [...rows.values()].filter((r) => !r.parent);
   const people = new Map<string, Set<string>>();
-  const labels = new Map<string, { at: number; label: string }>();
-  for (const r of rows.values()) {
-    people.set(r.slot, (people.get(r.slot) ?? new Set()).add(r.person));
-    const l = labels.get(r.slot);
-    if (!l || r.newest.started_at >= l.at) labels.set(r.slot, { at: r.newest.started_at, label: slot(r.newest).label });
+  // The newest root session of a slot names it, the newest of those its group.
+  const slots = new Map<string, { at: number; slot: Slot }>();
+  for (const r of roots) {
+    people.set(r.slot.key, (people.get(r.slot.key) ?? new Set()).add(r.person));
+    const l = slots.get(r.slot.key);
+    if (!l || r.newest.started_at >= l.at) slots.set(r.slot.key, { at: r.newest.started_at, slot: slot(r.newest) });
   }
-  const rowKey = (r: Acc) => (group === 'user' && people.get(r.slot)!.size === 1 ? r.slot : `${r.slot}|user:${r.person}`);
+  const groupLabel = new Map<string, { at: number; label: string }>();
+  for (const { at, slot: x } of slots.values()) {
+    const l = groupLabel.get(x.group.key);
+    if (!l || at >= l.at) groupLabel.set(x.group.key, { at, label: x.group.label });
+  }
+  const named = (r: Acc): Slot => {
+    const x = slots.get(r.slot.key)!.slot;
+    return { ...x, group: { ...x.group, label: groupLabel.get(x.group.key)!.label } };
+  };
+  const rowKey = (r: Acc): string => {
+    if (r.parent) return `${rowKey(r.parent)}/nested:${r.newest.user}`;
+    return group === 'user' && people.get(r.slot.key)!.size === 1 ? r.slot.key : `${r.slot.key}|user:${r.person}`;
+  };
+  const byFirst = (a: Acc, b: Acc) => a.first - b.first || (rowKey(a) < rowKey(b) ? -1 : 1);
+  const groupFirst = new Map<string, number>();
+  for (const r of roots) {
+    const k = `${r.person}\u0000${named(r).group.key}`;
+    groupFirst.set(k, Math.min(groupFirst.get(k) ?? Infinity, r.first));
+  }
+  const cmp = (a: number, b: number) => (a === b ? 0 : a < b ? -1 : 1);
+  const inGroup = (a: Acc, b: Acc) => {
+    const [sa, sb] = [named(a), named(b)];
+    const first = cmp(groupFirst.get(`${a.person}\u0000${sa.group.key}`)!, groupFirst.get(`${b.person}\u0000${sb.group.key}`)!);
+    if (first) return first;
+    if (sa.group.key !== sb.group.key) return sa.group.key < sb.group.key ? -1 : 1;
+    if (sa.order && sb.order) return cmp(sa.order[0], sb.order[0]) || cmp(sa.order[1], sb.order[1]) || byFirst(a, b);
+    return byFirst(a, b);
+  };
+  const ordered: Acc[] = [];
+  const place = (r: Acc) => {
+    ordered.push(r);
+    [...r.nested].sort(byFirst).forEach(place);
+  };
+  roots.sort(group === 'user' ? inGroup : byFirst).forEach(place);
 
   const lanes = new Map<string, TimelineLane>();
-  const ordered = [...rows.values()].sort((a, b) => a.first - b.first || (rowKey(a) < rowKey(b) ? -1 : 1));
   for (const r of ordered) {
-    const slotLabel = labels.get(r.slot)!.label;
-    const [laneKey, laneLabel, rowLabel] = group === 'user' ? [`user:${r.person}`, r.person, slotLabel] : [r.slot, slotLabel, r.person];
+    const x = named(r);
+    const label = r.parent ? (r.newest.sudo_user ? `${r.newest.user} (sudo)` : r.newest.user) : group === 'user' ? x.label : r.person;
+    const [laneKey, laneLabel] = group === 'user' ? [`user:${r.person}`, r.person] : [r.slot.key, slotPath(x)];
     const blocks = r.blocks.sort((a, b) => a.ts_start - b.ts_start || a.seq - b.seq);
     const row: TimelineRow = {
       key: rowKey(r),
-      label: rowLabel,
+      label,
       host: r.newest.host,
       user: r.person,
       tmux: r.newest.tmux,
       holder_comm: r.newest.holder_comm,
       tty: r.newest.tty,
+      group: group === 'user' ? x.group : null,
+      parent: r.parent ? rowKey(r.parent) : null,
+      depth: r.depth,
       sessions: r.sessions.map((s) => ({
         uuid: s.uuid,
         user: s.user,
@@ -238,6 +340,8 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
       blocks: aggregated ? [] : blocks,
       marks: r.marks.sort((a, b) => a.ts - b.ts),
       density: bin ? density(blocks, w.from, bin) : [],
+      // The fixtures carry no keystroke or output counts; specs add activity with `page.route`.
+      activity: [],
     };
     const lane = lanes.get(`${laneLabel}\u0000${laneKey}`) ?? { key: laneKey, label: laneLabel, rows: [] };
     lane.rows.push(row);
@@ -254,6 +358,7 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
     commands: total,
     aggregated,
     bin_secs: bin,
+    activity_bin_secs: BIN_SIZES.find((b) => Math.ceil((w.to - w.from) / b) <= 2000) ?? DAY,
   };
 }
 
