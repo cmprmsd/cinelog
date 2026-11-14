@@ -116,7 +116,8 @@ test.describe('timeline', () => {
     await expect(strip('tty:lab1//dev/pts/3')).toHaveAttribute('data-kind', 'focus');
     await expect(strip(PANE1).first()).toHaveAttribute('data-kind', 'typed');
     await expect(strip(PANE1).last()).toHaveAttribute('data-kind', 'output');
-    // The nested sudo row is shaded.
+    // The nested sudo row is tinted as a whole and shaded where its session existed.
+    await expect(page.locator(`[data-testid="tl-row-plot"][data-key="${PANE1}/nested:root"] [data-testid="tl-nested-row"]`)).toHaveCount(1);
     await expect(page.locator(`[data-testid="tl-row-plot"][data-key="${PANE1}/nested:root"] [data-testid="tl-nested-band"]`)).toHaveCount(1);
     await work.click();
     await expect(work).toHaveAttribute('aria-expanded', 'false');

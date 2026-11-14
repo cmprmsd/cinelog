@@ -409,6 +409,7 @@
             <div
               class="row-label"
               class:grouped={r.row.group !== null && lane.items[0]?.kind === 'group'}
+              class:nested={r.row.depth > 0}
               style:height={`${ROW_H}px`}
               style:--depth={r.row.depth}
               title={`${r.row.depth > 0 ? 'nested shell: ' : ''}${r.row.user}@${r.row.host}${r.row.tmux.pane ? ` tmux pane ${r.row.tmux.pane}` : ''}${r.row.tty ? ` ${r.row.tty}` : ''}${r.row.holder_comm ? ` (${r.row.holder_comm})` : ''}`}
@@ -468,6 +469,7 @@
         {#each lay.rows as r (r.row.key)}
           <g transform={`translate(0 ${r.y})`} data-testid="tl-row-plot" data-key={r.row.key}>
             {#if r.row.depth > 0}
+              <rect class="nested-row" x="0" y="0" width={scale.width} height={ROW_H - 1} data-testid="tl-nested-row" />
               {#each sessionSpans(r.row, scale, now) as s, si (si)}
                 <rect class="nested-band" x={s.x} y="0" width={s.w} height={ROW_H - 1} rx="2" data-testid="tl-nested-band" />
               {/each}
@@ -660,10 +662,18 @@
     padding-left: calc(1.1rem + var(--depth, 0) * 0.9rem);
     border-bottom: 1px solid var(--border);
   }
-  /* A nested shell (sudo inside the row above) is shaded from its start to its end. */
+  /* A nested shell (sudo inside the row above): the whole row is tinted faintly, label
+     included, and shaded stronger from the start to the end of each of its sessions. */
+  .row-label.nested {
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-elev));
+  }
+  .nested-row {
+    fill: var(--accent);
+    fill-opacity: 0.06;
+  }
   .nested-band {
     fill: var(--accent);
-    fill-opacity: 0.14;
+    fill-opacity: 0.16;
   }
   .row-label.grouped {
     padding-left: calc(1.9rem + var(--depth, 0) * 0.9rem);
