@@ -13,7 +13,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{IndexError, Result};
 
-pub const INDEX_SCHEMA_VERSION: u32 = 2;
+pub const INDEX_SCHEMA_VERSION: u32 = 3;
 pub const META_SCHEMA_VERSION: u32 = 1;
 
 pub const INDEX_SCHEMA: &str = include_str!("schema.sql");
@@ -29,10 +29,16 @@ pub struct Migration {
 }
 
 /// index.db upgrades.
-pub const INDEX_MIGRATIONS: &[Migration] = &[Migration {
-    to: 2,
-    sql: include_str!("migrations/index/0002_tmux_pane_index.sql"),
-}];
+pub const INDEX_MIGRATIONS: &[Migration] = &[
+    Migration {
+        to: 2,
+        sql: include_str!("migrations/index/0002_tmux_pane_index.sql"),
+    },
+    Migration {
+        to: 3,
+        sql: include_str!("migrations/index/0003_activity.sql"),
+    },
+];
 /// meta.db upgrades (none yet).
 pub const META_MIGRATIONS: &[Migration] = &[];
 
@@ -311,6 +317,7 @@ mod tests {
         match (kind, version) {
             (_, v) if v == kind.version() => kind.schema(),
             (DbKind::Index, 1) => include_str!("migrations/index/v1.sql"),
+            (DbKind::Index, 2) => include_str!("migrations/index/v2.sql"),
             _ => panic!("add the released schema of {kind:?} v{version} under migrations/ for this test"),
         }
     }

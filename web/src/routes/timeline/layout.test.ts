@@ -3,6 +3,7 @@ import type { Timeline, TimelineBlock, TimelineMark, TimelineRow, TimelineSessio
 import {
   LANE_H,
   ROW_H,
+  activityRuns,
   annotationColor,
   annotationGeoms,
   blockAt,
@@ -13,6 +14,7 @@ import {
   blockXs,
   densityBars,
   firstVisible,
+  focusRows,
   hitBlock,
   hitMark,
   layout,
@@ -57,6 +59,7 @@ function row(key: string, blocks: TimelineBlock[], over: Partial<TimelineRow> = 
     blocks,
     marks: [],
     density: [],
+    activity: [],
     ...over,
   };
 }
@@ -72,6 +75,7 @@ function timeline(rows: TimelineRow[][], over: Partial<Timeline> = {}): Timeline
     commands: rows.flat().reduce((n, r) => n + r.blocks.length, 0),
     aggregated: false,
     bin_secs: null,
+    activity_bin_secs: 60,
     ...over,
   };
 }
@@ -153,6 +157,35 @@ describe('layout', () => {
     expect(attachedGroupKey('h1', { ...pause, tmux: null })).toBeNull();
     expect(markLabel(pause)).toBe('in tmux session ops: recorded in its panes, paused here');
     expect(markLabel({ ...pause, tmux: { ...pause.tmux!, session: null } })).toContain('session $0');
+  });
+
+  it('draws activity as typing in the terminal the person was in, typing elsewhere, and output', () => {
+    const bin = (ts: number, inputs: number, out_bytes = 0) => ({ ts, inputs, out_bytes });
+    const a = row('a', [], { activity: [bin(0, 5), bin(60, 2), bin(120, 0, 900), bin(300, 1)] });
+    const b = row('b', [], { activity: [bin(0, 1), bin(60, 2), bin(120, 3)] });
+    const other = row('c', [], { user: 'bob', activity: [bin(0, 1)] });
+    const tl = timeline([[a, b], [other]]);
+    const focus = focusRows(tl);
+    // alice: `a` wins minute 0 and the tie in minute 1; `b` has minute 2. bob is on his own.
+    expect([...focus.get('alice')!].sort((x, y) => x[0] - y[0])).toEqual([
+      [0, 'a'],
+      [60, 'a'],
+      [120, 'b'],
+      [300, 'a'],
+    ]);
+    expect(focus.get('bob')!.get(0)).toBe('c');
+    const runs = (r: TimelineRow) => activityRuns(r, focus.get(r.user), 60, scale).map((x) => [x.kind, x.x, x.w]);
+    // Adjacent bins of one kind are one run; the gap before minute 5 starts a new one.
+    expect(runs(a)).toEqual([
+      ['focus', 0, 120],
+      ['output', 120, 60],
+      ['focus', 300, 60],
+    ]);
+    expect(runs(b)).toEqual([
+      ['typed', 0, 120],
+      ['focus', 120, 60],
+    ]);
+    expect(activityRuns(row('d', [], { activity: [bin(-500, 1), bin(990, 1)] }), undefined, 60, scale)).toEqual([{ kind: 'typed', x: 990, w: 10 }]);
   });
 
   it('colours by exit', () => {

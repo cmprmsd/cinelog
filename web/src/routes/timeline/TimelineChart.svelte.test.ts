@@ -34,6 +34,7 @@ function row(key: string, uuid: string, blocks: TimelineBlock[]): TimelineRow {
     blocks,
     marks: [],
     density: [],
+    activity: [],
   };
 }
 
@@ -48,6 +49,7 @@ function timeline(rows: TimelineRow[]): Timeline {
     commands: rows.reduce((n, r) => n + r.blocks.length, 0),
     aggregated: false,
     bin_secs: null,
+    activity_bin_secs: 60,
   };
 }
 

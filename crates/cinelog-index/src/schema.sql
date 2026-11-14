@@ -156,6 +156,15 @@ CREATE TABLE markers(
   data_json TEXT NOT NULL);
 CREATE INDEX markers_sess ON markers(session_id, t);
 
+-- Terminal activity per session and wall-clock minute (counts only, no content): what the
+-- timeline draws where no command boundaries exist (inside ssh, an editor, a nested shell).
+CREATE TABLE activity(
+  session_id INT NOT NULL REFERENCES sessions ON DELETE CASCADE,
+  minute INT NOT NULL,               -- floor(ts / 60)
+  inputs INT NOT NULL DEFAULT 0,     -- recorded `i` events (keystrokes, pastes)
+  out_bytes INT NOT NULL DEFAULT 0,  -- bytes of `o` events
+  PRIMARY KEY(session_id, minute)) WITHOUT ROWID;
+
 -- Playback segments for the player's segmented format (§7.5).
 CREATE TABLE segments(
   session_id INT NOT NULL REFERENCES sessions ON DELETE CASCADE,

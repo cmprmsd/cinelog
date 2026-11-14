@@ -511,6 +511,16 @@ expired session signs out; while `status !== 'open'` callers fall back to pollin
   opens it there in a new tab (`child_url` when it is an https URL of that very session,
   else the TEAM default port 10000 on this host; a PERSONAL child seen from TEAM without
   `child_url` gets no link).
+- **Activity** (since 1.1): `TimelineRow.activity` holds the bins of `activity_bin_secs`
+  (the smallest of the density bin sizes that gives at most 2000 bins over the window; 60 s
+  up to about 33 h) in which the row's sessions had keystrokes (`inputs`: recorded `i`
+  events, a paste is one) or output (`out_bytes`). Counts only, from the per-minute
+  `activity` table of index.db, so a bin can be off by up to a minute. It shows life where
+  no command boundaries exist: inside `ssh`, an editor or a nested shell. The client draws
+  it as a strip under the row and marks, per person and bin, the row with the most
+  keystrokes as the terminal they were in. Suppressed input (password prompts,
+  `record.input = false`) is not counted. Sessions indexed before 1.1 and legacy casts
+  have none until the index is rebuilt (`cinelog index --rebuild`). Not part of the idle rule below.
 - **Idle:** spans of at least 600 s inside the window in which no block and no mark is drawn
   in any row (`idle`), drawn collapsed as a break mark. Pause, gap and forgotten spans count
   as busy (an open one until the session end, or now while live); skip and nested points

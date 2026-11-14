@@ -22,9 +22,9 @@ use super::db::{DbResult, Forgets, IndexDb, SessionFilter, SessionRow, blocking}
 use super::extract::ApiQuery;
 use super::tree::window_key;
 use super::types::{
-    DensityBin, Scope, Session, SessionState, TimeSpan, Timeline, TimelineAnnotation, TimelineBlock, TimelineGroup,
-    TimelineLane, TimelineMark, TimelineMarkKind, TimelineParams, TimelineRow, TimelineRowGroup, TimelineRowGroupKind,
-    TimelineSession, TmuxAttach,
+    DensityBin, Scope, Session, SessionState, TimeSpan, Timeline, TimelineActivity, TimelineAnnotation, TimelineBlock,
+    TimelineGroup, TimelineLane, TimelineMark, TimelineMarkKind, TimelineParams, TimelineRow, TimelineRowGroup,
+    TimelineRowGroupKind, TimelineSession, TmuxAttach,
 };
 use crate::error::{Result, WebError};
 use crate::play::source::{secs_to_us, us_to_secs};
@@ -565,6 +565,8 @@ struct RowAcc {
     first: f64,
     blocks: Vec<Block>,
     marks: Vec<TimelineMark>,
+    /// Activity bin index → (inputs, output bytes).
+    activity: BTreeMap<u64, (u64, u64)>,
 }
 
 /// `ended_at` is where the timeline draws the session to: a non-live session the index never
@@ -665,6 +667,7 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
                 first: f64::INFINITY,
                 blocks: Vec::new(),
                 marks: Vec::new(),
+                activity: BTreeMap::new(),
             });
             rows.len() - 1
         });
@@ -683,6 +686,7 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
                         first: f64::INFINITY,
                         blocks: Vec::new(),
                         marks: Vec::new(),
+                        activity: BTreeMap::new(),
                     });
                     rows.len() - 1
                 });
@@ -728,6 +732,24 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
             busy.push((b.block.ts_start, b.end));
         }
         acc.blocks.extend(blocks);
+    }
+
+    // Terminal activity of the kept sessions, in bins of the window.
+    let activity_bin = w.bin_secs();
+    let ids: Vec<i64> = keep.iter().map(|&i| found[i].row.id).collect();
+    let (first_minute, last_minute) = ((w.from / 60.0).floor() as i64, (w.to / 60.0).floor() as i64);
+    let mut by_id = db.activity(&ids, first_minute, last_minute)?;
+    for &i in &keep {
+        let acc = &mut rows[row_of_sess[&i]];
+        for (minute, inputs, out_bytes) in by_id.remove(&found[i].row.id).unwrap_or_default() {
+            let at = (minute as f64 * 60.0).clamp(w.from, w.to);
+            let e = acc
+                .activity
+                .entry(((at - w.from) / activity_bin).floor() as u64)
+                .or_default();
+            e.0 += inputs;
+            e.1 += out_bytes;
+        }
     }
 
     let idle = idle_spans(busy, w);
@@ -907,6 +929,15 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
             },
             marks: r.marks,
             density,
+            activity: r
+                .activity
+                .iter()
+                .map(|(&i, &(inputs, out_bytes))| TimelineActivity {
+                    ts: w.from + i as f64 * activity_bin,
+                    inputs,
+                    out_bytes,
+                })
+                .collect(),
         };
         let (lane_key, lane_label) = at.lane.clone();
         lanes
@@ -930,6 +961,7 @@ fn build(st: &AppState, p: &TimelineParams, now: f64) -> Result<Timeline> {
         commands: total,
         aggregated,
         bin_secs: bin,
+        activity_bin_secs: activity_bin,
     })
 }
 
@@ -1467,7 +1499,8 @@ mod tests {
         );
         late.m(0.1, &ctx(10, "logs", 0, "%9"));
         let t = late.command(1.0, 1, "tail -f log", &[], 0);
-        late.exit(t + 0.5);
+        late.o(500.0, "new line\n");
+        late.exit((t + 0.5).max(501.0));
         let mut early = Cast::new(
             dir,
             3,
@@ -1480,7 +1513,11 @@ mod tests {
         );
         early.m(0.1, &ctx(2, "build", 1, "%4"));
         let t = early.command(1.0, 1, "make", &[], 0);
-        early.exit(t + 0.5);
+        early
+            .ev(240.0, cinelog_cast::EventCode::Input, "a")
+            .ev(247.0, cinelog_cast::EventCode::Input, "b")
+            .ev(400.0, cinelog_cast::EventCode::Input, "c");
+        early.exit((t + 0.5).max(401.0));
         for p in [&shell.path, &late.path, &early.path] {
             kit.index(p, None);
         }
@@ -1520,6 +1557,37 @@ mod tests {
             .map(|l| l["label"].as_str().unwrap())
             .collect();
         assert_eq!(lanes, ["ops › 10 logs · 0", "ops › 2 build · 1", "sshd-session pts/3"]);
+
+        // Typing in the ssh session inside the pane `build` and output in `logs`, without a
+        // command boundary of their own: counted per minute, by row.
+        assert_eq!(tl["activity_bin_secs"], 60.0);
+        let activity = |row: &Value| -> Vec<(f64, u64, u64)> {
+            row["activity"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    (
+                        a["ts"].as_f64().unwrap(),
+                        a["inputs"].as_u64().unwrap(),
+                        a["out_bytes"].as_u64().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let from = START - 60.0;
+        let build = activity(&rows[1]);
+        assert_eq!(build.iter().map(|a| a.1).sum::<u64>(), 3, "{build:?}");
+        assert!(
+            build.iter().all(|a| (a.0 - from) % 60.0 == 0.0),
+            "bins of the window: {build:?}"
+        );
+        // Typed at +243 s and +250 s: one stored minute, in the window's bin it starts in.
+        let typed = build.iter().find(|a| a.1 == 2).expect("both keystrokes in one bin").0;
+        assert!(typed <= START + 243.0 && typed > START + 243.0 - 120.0, "{typed}");
+        let logs = activity(&rows[2]);
+        assert_eq!(logs.iter().map(|a| a.1).sum::<u64>(), 0);
+        assert!(logs.iter().map(|a| a.2).sum::<u64>() >= 9, "{logs:?}");
 
         let tree = kit.json("/tree").await;
         let host = &tree["hosts"][0];

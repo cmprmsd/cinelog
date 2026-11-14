@@ -992,6 +992,9 @@ pub struct Timeline {
     pub aggregated: bool,
     /// Width of a density bin when `aggregated`.
     pub bin_secs: Option<Seconds>,
+    /// Width of a [`TimelineRow::activity`] bin: the smallest of the density bin sizes that
+    /// gives at most 2000 bins over the window (60 s up to about 33 h).
+    pub activity_bin_secs: Seconds,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1040,6 +1043,20 @@ pub struct TimelineRow {
     pub marks: Vec<TimelineMark>,
     /// Only when `aggregated`: bins with at least one command, ascending.
     pub density: Vec<DensityBin>,
+    /// Terminal activity of the row's sessions: bins with keystrokes or output, ascending.
+    /// Empty for sessions indexed before 1.1 (until the index is rebuilt) and legacy casts.
+    pub activity: Vec<TimelineActivity>,
+}
+
+/// Keystrokes and output of a row in `[ts, ts + activity_bin_secs)`. Counts only; it shows
+/// life where no command boundaries exist (inside ssh, an editor, a nested shell).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineActivity {
+    pub ts: Seconds,
+    /// Recorded input events (keystrokes; a paste is one). 0 with `record.input = false`
+    /// and for suppressed input (password prompts).
+    pub inputs: u64,
+    pub out_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -2034,6 +2051,7 @@ pub fn typescript() -> String {
         TimelineGroup::decl(&cfg),
         TimelineRowGroupKind::decl(&cfg),
         TimelineRowGroup::decl(&cfg),
+        TimelineActivity::decl(&cfg),
         Timeline::decl(&cfg),
         TimelineLane::decl(&cfg),
         TimelineRow::decl(&cfg),

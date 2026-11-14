@@ -340,6 +340,8 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
       blocks: aggregated ? [] : blocks,
       marks: r.marks.sort((a, b) => a.ts - b.ts),
       density: bin ? density(blocks, w.from, bin) : [],
+      // The fixtures carry no keystroke or output counts; specs add activity with `page.route`.
+      activity: [],
     };
     const lane = lanes.get(`${laneLabel}\u0000${laneKey}`) ?? { key: laneKey, label: laneLabel, rows: [] };
     lane.rows.push(row);
@@ -356,6 +358,7 @@ export function timeline(ctx: MockContext, sp: URLSearchParams, now: number): Ti
     commands: total,
     aggregated,
     bin_secs: bin,
+    activity_bin_secs: BIN_SIZES.find((b) => Math.ceil((w.to - w.from) / b) <= 2000) ?? DAY,
   };
 }
 

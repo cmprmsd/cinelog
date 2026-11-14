@@ -573,6 +573,13 @@ key: string, kind: TimelineRowGroupKind,
  */
 label: string, host: string, };
 
+export type TimelineActivity = { ts: number, 
+/**
+ * Recorded input events (keystrokes; a paste is one). 0 with `record.input = false`
+ * and for suppressed input (password prompts).
+ */
+inputs: number, out_bytes: number, };
+
 export type Timeline = { from: number, to: number, group: TimelineGroup, 
 /**
  * By label.
@@ -600,7 +607,12 @@ aggregated: boolean,
 /**
  * Width of a density bin when `aggregated`.
  */
-bin_secs: number | null, };
+bin_secs: number | null, 
+/**
+ * Width of a [`TimelineRow::activity`] bin: the smallest of the density bin sizes that
+ * gives at most 2000 bins over the window (60 s up to about 33 h).
+ */
+activity_bin_secs: number, };
 
 export type TimelineLane = { 
 /**
@@ -664,7 +676,12 @@ marks: Array<TimelineMark>,
 /**
  * Only when `aggregated`: bins with at least one command, ascending.
  */
-density: Array<DensityBin>, };
+density: Array<DensityBin>, 
+/**
+ * Terminal activity of the row's sessions: bins with keystrokes or output, ascending.
+ * Empty for sessions indexed before 1.1 (until the index is rebuilt) and legacy casts.
+ */
+activity: Array<TimelineActivity>, };
 
 export type TimelineSession = { uuid: string, user: string, state: SessionState, started_at: number, 
 /**

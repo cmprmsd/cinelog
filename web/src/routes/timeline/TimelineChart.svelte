@@ -7,6 +7,7 @@
   import { fmtDuration, fmtTs, oneLine } from '../../lib/format';
   import {
     annotationColor,
+    activityRuns,
     annotationGeoms,
     attachedGroupKey,
     blockAt,
@@ -15,6 +16,7 @@
     blockXs,
     densityBars,
     firstVisible,
+    focusRows,
     GROUP_H,
     groupId,
     hitAnnotation,
@@ -83,6 +85,12 @@
     timeline.aggregated && timeline.bin_secs
       ? lay.rows.map((r) => densityBars(r.row.density, timeline.bin_secs!, scale, peak))
       : lay.rows.map(() => [] as DensityBar[]),
+  );
+  /** The row each person was typing in, per activity bin. */
+  const focus = $derived(focusRows(timeline));
+  // The strip shares the bottom of a row with the density bars, so it is left out when aggregated.
+  const activity = $derived(
+    lay.rows.map((r) => (timeline.aggregated ? [] : activityRuns(r.row, focus.get(r.row.user), timeline.activity_bin_secs, scale))),
   );
   const nowX = $derived(now >= timeline.from && now <= timeline.to ? scale.x(now) : null);
   const blockCount = $derived(lay.rows.reduce((n, r) => n + r.row.blocks.length, 0));
@@ -400,6 +408,7 @@
             <div
               class="row-label"
               class:grouped={r.row.group !== null && lane.items[0]?.kind === 'group'}
+              class:nested={r.row.depth > 0}
               style:height={`${ROW_H}px`}
               style:--depth={r.row.depth}
               title={`${r.row.depth > 0 ? 'nested shell: ' : ''}${r.row.user}@${r.row.host}${r.row.tmux.pane ? ` tmux pane ${r.row.tmux.pane}` : ''}${r.row.tty ? ` ${r.row.tty}` : ''}${r.row.holder_comm ? ` (${r.row.holder_comm})` : ''}`}
@@ -458,6 +467,7 @@
 
         {#each lay.rows as r (r.row.key)}
           <g transform={`translate(0 ${r.y})`} data-testid="tl-row-plot" data-key={r.row.key}>
+            {#if r.row.depth > 0}<rect class="nested-band" x="0" y="0" width={scale.width} height={ROW_H - 1} data-testid="tl-nested-band" />{/if}
             <line class="row-line" x1="0" x2={scale.width} y1={ROW_H - 0.5} y2={ROW_H - 0.5} />
             {#each marks[r.index]! as m, mi (mi)}
               {#if !m.point}
@@ -479,6 +489,9 @@
               {#if run.approx}
                 <rect class="hatch" x={run.x} y={run.y} width={Math.max(run.w, 1)} height={run.h} />
               {/if}
+            {/each}
+            {#each activity[r.index]! as a, ai (ai)}
+              <rect class={`act ${a.kind}`} x={a.x} y={ROW_H - 4} width={a.w} height="3" data-testid="tl-activity" data-kind={a.kind} />
             {/each}
             {#each bars[r.index]! as bar, bi (bi)}
               <rect class="bar" x={bar.x} y={ROW_H - 3 - bar.h} width={bar.w} height={bar.h} data-testid="tl-density" />
@@ -643,6 +656,14 @@
     padding-left: calc(1.1rem + var(--depth, 0) * 0.9rem);
     border-bottom: 1px solid var(--border);
   }
+  /* A nested shell (sudo inside the row above) is shaded, label and plot. */
+  .row-label.nested {
+    background: color-mix(in srgb, var(--accent) 9%, var(--bg-elev));
+  }
+  .nested-band {
+    fill: var(--accent);
+    fill-opacity: 0.09;
+  }
   .row-label.grouped {
     padding-left: calc(1.9rem + var(--depth, 0) * 0.9rem);
   }
@@ -760,6 +781,18 @@
   }
   .group-band.flash {
     fill: var(--accent-soft);
+  }
+  /* Activity strip: where the person typed (their terminal), typing elsewhere, output only. */
+  .act.focus {
+    fill: var(--accent);
+  }
+  .act.typed {
+    fill: var(--accent);
+    opacity: 0.4;
+  }
+  .act.output {
+    fill: var(--fg-muted);
+    opacity: 0.35;
   }
   .span.gap {
     fill: var(--gap);

@@ -311,6 +311,59 @@ export function markGeoms(
   return out;
 }
 
+// ------------------------------------------------------------------ activity
+
+/**
+ * How a stretch of a row's activity strip is drawn: `focus` where the person typed and this
+ * row had most of their keystrokes (the terminal they were in), `typed` for keystrokes in
+ * another of their rows at the same time, `output` for output without keystrokes.
+ */
+export type ActivityKind = 'focus' | 'typed' | 'output';
+
+export interface ActivityRun {
+  kind: ActivityKind;
+  x: number;
+  w: number;
+}
+
+/**
+ * Per person, the row they were typing in during each activity bin (bin `ts` → row key):
+ * the one with the most keystrokes, the earlier row of the response on a tie.
+ */
+export function focusRows(tl: Timeline): Map<string, Map<number, string>> {
+  const best = new Map<string, Map<number, { key: string; inputs: number }>>();
+  for (const lane of tl.lanes) {
+    for (const row of lane.rows) {
+      let mine = best.get(row.user);
+      if (!mine) best.set(row.user, (mine = new Map()));
+      for (const a of row.activity) {
+        if (a.inputs > (mine.get(a.ts)?.inputs ?? 0)) mine.set(a.ts, { key: row.key, inputs: a.inputs });
+      }
+    }
+  }
+  const out = new Map<string, Map<number, string>>();
+  for (const [user, bins] of best) out.set(user, new Map([...bins].map(([ts, b]) => [ts, b.key])));
+  return out;
+}
+
+/** The activity strip of a row: adjacent bins of one kind merged, clipped to `[0, width]`. */
+export function activityRuns(row: TimelineRow, focus: ReadonlyMap<number, string> | undefined, binSecs: number, scale: TimeScale): ActivityRun[] {
+  const out: ActivityRun[] = [];
+  let last: { kind: ActivityKind; end: number } | null = null;
+  for (const a of row.activity) {
+    const kind: ActivityKind | null = a.inputs > 0 ? (focus?.get(a.ts) === row.key ? 'focus' : 'typed') : a.out_bytes > 0 ? 'output' : null;
+    if (!kind) continue;
+    const x0 = Math.max(0, scale.x(a.ts));
+    const x1 = Math.min(scale.width, scale.x(a.ts + binSecs));
+    if (x1 <= 0 || x0 >= scale.width) continue;
+    const prev = out[out.length - 1];
+    if (prev && last && last.kind === kind && last.end === a.ts) prev.w = Math.max(1, x1 - prev.x);
+    else out.push({ kind, x: x0, w: Math.max(1, x1 - x0) });
+    last = { kind, end: a.ts + binSecs };
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ annotations and density
 
 export interface AnnotationGeom {

@@ -94,6 +94,16 @@ test.describe('timeline', () => {
       });
       // Nothing here is collapsed as idle, so the pause is wide enough to point at.
       tl.idle = [];
+      // In one hour alice typed mostly in the ssh login and a little in the pane; later the
+      // pane only printed output.
+      const pane = tl.lanes[0]!.rows.find((r) => r.key === PANE1)!;
+      const bin = tl.activity_bin_secs;
+      const at = tl.from + 5 * 3600;
+      shell.activity = [{ ts: at, inputs: 40, out_bytes: 900 }];
+      pane.activity = [
+        { ts: at, inputs: 3, out_bytes: 100 },
+        { ts: at + 10 * bin, inputs: 0, out_bytes: 5000 },
+      ];
       await route.fulfill({ response: res, json: tl });
     });
     await page.goto('/timeline');
@@ -101,6 +111,13 @@ test.describe('timeline', () => {
     const rows = page.getByTestId('tl-row');
     await expect(rows).toHaveCount(5);
     await expect(work).toHaveAttribute('aria-expanded', 'true');
+    // The activity strip: the terminal alice was in, typing elsewhere, output only.
+    const strip = (key: string) => page.locator(`[data-testid="tl-row-plot"][data-key="${key}"] [data-testid="tl-activity"]`);
+    await expect(strip('tty:lab1//dev/pts/3')).toHaveAttribute('data-kind', 'focus');
+    await expect(strip(PANE1).first()).toHaveAttribute('data-kind', 'typed');
+    await expect(strip(PANE1).last()).toHaveAttribute('data-kind', 'output');
+    // The nested sudo row is shaded.
+    await expect(page.locator(`[data-testid="tl-row-plot"][data-key="${PANE1}/nested:root"] [data-testid="tl-nested-band"]`)).toHaveCount(1);
     await work.click();
     await expect(work).toHaveAttribute('aria-expanded', 'false');
     await expect(rows).toHaveCount(1);
@@ -333,11 +350,12 @@ function week(to: number, per: number, aggregated: boolean): Timeline {
         blocks: aggregated ? [] : blocks,
         marks: [{ session, kind: 'skip' as const, ts: from + 9 * 3600, ts_end: null, reason: null, detail: null, child: null, child_scope: null, child_url: null, tmux: null }],
         density,
+        activity: [],
       });
     }
     lanes.push({ key: `user:user${p}`, label: `user${p}`, rows });
   }
-  return { from, to, group: 'user', lanes, idle: [], annotations: [], commands, aggregated, bin_secs: aggregated ? 900 : null };
+  return { from, to, group: 'user', lanes, idle: [], annotations: [], commands, aggregated, bin_secs: aggregated ? 900 : null, activity_bin_secs: 900 };
 }
 
 test.describe('timeline at scale', () => {

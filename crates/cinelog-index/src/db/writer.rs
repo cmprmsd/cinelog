@@ -300,6 +300,7 @@ fn reset_session(tx: &Transaction<'_>, sid: i64) -> Result<()> {
         "outputs",
         "commands",
         "markers",
+        "activity",
         "segments",
         "zst_frames",
         "cast_parts",
@@ -352,7 +353,7 @@ fn entomb(tx: &Transaction<'_>, sid: i64) -> Result<bool> {
     let fresh: bool = tx
         .prepare_cached("SELECT attribution IS NOT ?2 FROM sessions WHERE id = ?1")?
         .query_row(params![sid, TOMBSTONE], |r| r.get(0))?;
-    for table in ["outputs", "commands", "markers", "segments"] {
+    for table in ["outputs", "commands", "markers", "activity", "segments"] {
         tx.prepare_cached(&format!("DELETE FROM {table} WHERE session_id = ?1"))?
             .execute([sid])?;
     }
@@ -641,6 +642,14 @@ fn apply_batch(tx: &Transaction<'_>, forget: &ForgetSet, redact: &Redactor, b: &
         tx.prepare_cached("INSERT INTO markers(session_id, t, ts, kind, data_json) VALUES(?1, ?2, ?3, ?4, ?5)")?
             .execute(params![sid, m.t, m.ts, m.kind, m.data_json])?;
     }
+    for a in &b.activity {
+        tx.prepare_cached(
+            "INSERT INTO activity(session_id, minute, inputs, out_bytes) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id, minute) DO UPDATE SET inputs = inputs + excluded.inputs,
+               out_bytes = out_bytes + excluded.out_bytes",
+        )?
+        .execute(params![sid, a.minute, U64(a.inputs), U64(a.out_bytes)])?;
+    }
     for s in &b.segments {
         tx.prepare_cached(
             "INSERT INTO segments(session_id, seq, part, t_start, t_end, byte_offset, vt_dump)
@@ -839,7 +848,7 @@ impl IndexWriter for SqliteWriter {
             tx.execute_batch(&format!("DROP TRIGGER \"{name}\""))?;
         }
         tx.execute_batch(
-            "DELETE FROM outputs; DELETE FROM commands; DELETE FROM markers; DELETE FROM segments;
+            "DELETE FROM outputs; DELETE FROM commands; DELETE FROM markers; DELETE FROM activity; DELETE FROM segments;
              DELETE FROM zst_frames; DELETE FROM cast_parts; DELETE FROM index_state; DELETE FROM legacy_import;
              DELETE FROM sessions;
              INSERT INTO out_fts(out_fts) VALUES('delete-all');

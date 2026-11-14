@@ -59,6 +59,9 @@ pub(crate) fn searcher(ctx: &WebContext) -> Result<Box<dyn Searcher>> {
     Ok(cinelog_index::db::open_reader(&ctx.db)?)
 }
 
+/// `(minute, inputs, output bytes)`: one row of the `activity` table.
+pub(crate) type ActivityMinute = (i64, u64, u64);
+
 /// One session row with the internal id and cast path the API never exposes.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionRow {
@@ -426,6 +429,31 @@ impl IndexDb {
     }
 
     /// All commands of a session in `t_start` order.
+    /// `(minute, inputs, output bytes)` of the given sessions in the minutes
+    /// `[from_minute, to_minute]`, by session id, ascending. One query.
+    pub fn activity(
+        &self,
+        session_ids: &[i64],
+        from_minute: i64,
+        to_minute: i64,
+    ) -> DbResult<HashMap<i64, Vec<ActivityMinute>>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT a.session_id, a.minute, a.inputs, a.out_bytes FROM activity a
+             WHERE a.session_id IN (SELECT value FROM json_each(?1)) AND a.minute BETWEEN ?2 AND ?3
+             ORDER BY a.session_id, a.minute",
+        )?;
+        let rows = st.query_map(
+            params![serde_json::to_string(session_ids)?, from_minute, to_minute],
+            |r| Ok((r.get::<_, i64>(0)?, (r.get::<_, i64>(1)?, u64_at(r, 2)?, u64_at(r, 3)?))),
+        )?;
+        let mut out: HashMap<i64, Vec<ActivityMinute>> = HashMap::new();
+        for row in rows {
+            let (id, bin) = row?;
+            out.entry(id).or_default().push(bin);
+        }
+        Ok(out)
+    }
+
     /// The tmux sessions the tmux clients of the given sessions attached to (follow-up
     /// `multiplexer` markers), oldest first and each once. Sessions without one are left
     /// out. One query.

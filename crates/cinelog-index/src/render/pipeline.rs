@@ -4,7 +4,7 @@
 //! Everything that influences later output lives in the transcript state or in
 //! [`PState`], so resuming from any checkpoint yields the rows a single pass yields (I12).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -21,8 +21,9 @@ use super::transcript::AvtTranscript;
 use crate::api::{PipelineFactory, SessionPipeline, Transcript};
 use crate::error::{IndexError, Result};
 use crate::model::{
-    CastPart, Checkpoint, Chunk, Command, FileStamp, IndexBatch, MarkerRow, OpenCommand, Owner, PollBudget,
-    RenderOptions, Segment, SessionCounters, SessionMeta, SessionState, Stamp, TmuxLocation, ZstFrameRow, segment_due,
+    ActivityBin, CastPart, Checkpoint, Chunk, Command, FileStamp, IndexBatch, MarkerRow, OpenCommand, Owner,
+    PollBudget, RenderOptions, Segment, SessionCounters, SessionMeta, SessionState, Stamp, TmuxLocation, ZstFrameRow,
+    segment_due,
 };
 
 /// Bytes charged per event besides its data (time, code, JSON framing).
@@ -71,6 +72,8 @@ struct Out {
     chunks: Vec<Chunk>,
     provisional: Option<Vec<Chunk>>,
     markers: Vec<MarkerRow>,
+    /// minute → (inputs, output bytes) since the last batch.
+    activity: BTreeMap<i64, (u64, u64)>,
     segments: Vec<Segment>,
     /// Anything besides the session row changed.
     changed: bool,
@@ -128,6 +131,11 @@ fn is_compressed(path: &Path) -> bool {
 
 fn secs(t_us: u64) -> f64 {
     t_us as f64 / 1e6
+}
+
+/// The wall-clock minute activity at `ts` is counted in.
+fn minute_of(ts: f64) -> i64 {
+    (ts / 60.0).floor() as i64
 }
 
 impl CastPipeline {
@@ -326,7 +334,11 @@ impl CastPipeline {
         }
         let at = self.stamp(ev.t_us);
         match ev.code {
-            EventCode::Output => self.transcript.output(at, &ev.data),
+            EventCode::Output => {
+                self.out.activity.entry(minute_of(at.ts)).or_default().1 += ev.data.len() as u64;
+                self.transcript.output(at, &ev.data);
+            }
+            EventCode::Input => self.out.activity.entry(minute_of(at.ts)).or_default().0 += 1,
             EventCode::Resize => {
                 if let Some((cols, rows)) = parse_sane_resize(&ev.data) {
                     self.transcript.resize(at, cols, rows);
@@ -337,7 +349,7 @@ impl CastPipeline {
                 self.ps.exit_status = ev.data.trim().parse().ok();
                 self.ps.x_seen = true;
             }
-            EventCode::Input | EventCode::Other(_) => {}
+            EventCode::Other(_) => {}
         }
         self.ps.segment_bytes += ev.data.len() as u64 + EVENT_OVERHEAD;
         let since = at.t - self.ps.segment.t_start();
@@ -536,6 +548,15 @@ impl CastPipeline {
         b.chunks = out.chunks;
         b.provisional = out.provisional;
         b.markers = out.markers;
+        b.activity = out
+            .activity
+            .into_iter()
+            .map(|(minute, (inputs, out_bytes))| ActivityBin {
+                minute,
+                inputs,
+                out_bytes,
+            })
+            .collect();
         b.segments = last_by(out.segments, |s| u64::from(s.seq));
         b.checkpoint = Some(self.checkpoint());
         b.finished = self.finished;

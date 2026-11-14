@@ -258,6 +258,32 @@ fn markers_ctx_stats_and_clock() {
     assert_eq!(date.t_end, Some(3.0));
 }
 
+/// Keystrokes and output are counted per wall-clock minute, also where no command runs
+/// (an ssh session, an editor); an index resumed from checkpoints counts every event once.
+#[test]
+fn activity_is_counted_per_minute() {
+    let d = tempfile::tempdir().unwrap();
+    let mut c = CastFile::new(d.path(), 1, 40, 6, 0);
+    c.ev(1.0, EventCode::Input, "l")
+        .ev(1.1, EventCode::Input, "s")
+        .o(1.2, "ls\r\n")
+        .o(70.0, "a line of output\r\n")
+        .ev(75.0, EventCode::Input, "q")
+        .ev(200.0, EventCode::Exit, "0");
+    c.flush();
+    let mem = MemIndex::new();
+    index(&mem, &c.path, ALL);
+    let got = mem.activity(U);
+    let counts: Vec<(u64, u64)> = got.iter().map(|a| (a.inputs, a.out_bytes)).collect();
+    assert_eq!(counts, [(2, 4), (1, 18)], "{got:?}");
+    assert_eq!(got[1].minute - got[0].minute, 1);
+    assert_eq!(got[0].minute, (START_US as f64 / 1e6 / 60.0).floor() as i64);
+
+    let resumed = MemIndex::new();
+    index_restarting(&resumed, &c.path, 1, |_| {});
+    assert_eq!(resumed.activity(U), got);
+}
+
 #[test]
 fn alt_screen_programs_are_snapshotted() {
     let d = tempfile::tempdir().unwrap();

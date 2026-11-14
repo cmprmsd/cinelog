@@ -513,6 +513,18 @@ pub struct TranscriptState {
 
 // ------------------------------------------------------------------ markers and playback
 
+/// Terminal activity of a session in one wall-clock minute. In an [`IndexBatch`] these are
+/// increments, added to what earlier batches counted for the same minute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityBin {
+    /// `floor(ts / 60)`.
+    pub minute: i64,
+    /// Recorded `i` events (keystrokes; a paste is one).
+    pub inputs: u64,
+    /// Bytes of `o` events.
+    pub out_bytes: u64,
+}
+
 /// One `markers` row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarkerRow {
@@ -634,6 +646,9 @@ pub struct IndexBatch {
     /// `Some`: replaces all provisional chunks of the session (`Some(vec![])` clears them).
     pub provisional: Option<Vec<Chunk>>,
     pub markers: Vec<MarkerRow>,
+    /// Added to the stored counts, by minute.
+    #[serde(default)]
+    pub activity: Vec<ActivityBin>,
     /// Upserted by `seq` (the last segment's `t_end` gets filled in later).
     pub segments: Vec<Segment>,
     pub checkpoint: Option<Checkpoint>,
@@ -653,6 +668,7 @@ impl IndexBatch {
             chunks: Vec::new(),
             provisional: None,
             markers: Vec::new(),
+            activity: Vec::new(),
             segments: Vec::new(),
             checkpoint: None,
             legacy: None,
