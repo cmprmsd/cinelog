@@ -32,6 +32,7 @@
     ROW_H,
     rowAt,
     sessionMap,
+    sessionSpans,
     type BlockAt,
     type BlockRef,
     type DensityBar,
@@ -408,7 +409,6 @@
             <div
               class="row-label"
               class:grouped={r.row.group !== null && lane.items[0]?.kind === 'group'}
-              class:nested={r.row.depth > 0}
               style:height={`${ROW_H}px`}
               style:--depth={r.row.depth}
               title={`${r.row.depth > 0 ? 'nested shell: ' : ''}${r.row.user}@${r.row.host}${r.row.tmux.pane ? ` tmux pane ${r.row.tmux.pane}` : ''}${r.row.tty ? ` ${r.row.tty}` : ''}${r.row.holder_comm ? ` (${r.row.holder_comm})` : ''}`}
@@ -467,7 +467,11 @@
 
         {#each lay.rows as r (r.row.key)}
           <g transform={`translate(0 ${r.y})`} data-testid="tl-row-plot" data-key={r.row.key}>
-            {#if r.row.depth > 0}<rect class="nested-band" x="0" y="0" width={scale.width} height={ROW_H - 1} data-testid="tl-nested-band" />{/if}
+            {#if r.row.depth > 0}
+              {#each sessionSpans(r.row, scale, now) as s, si (si)}
+                <rect class="nested-band" x={s.x} y="0" width={s.w} height={ROW_H - 1} rx="2" data-testid="tl-nested-band" />
+              {/each}
+            {/if}
             <line class="row-line" x1="0" x2={scale.width} y1={ROW_H - 0.5} y2={ROW_H - 0.5} />
             {#each marks[r.index]! as m, mi (mi)}
               {#if !m.point}
@@ -656,13 +660,10 @@
     padding-left: calc(1.1rem + var(--depth, 0) * 0.9rem);
     border-bottom: 1px solid var(--border);
   }
-  /* A nested shell (sudo inside the row above) is shaded, label and plot. */
-  .row-label.nested {
-    background: color-mix(in srgb, var(--accent) 9%, var(--bg-elev));
-  }
+  /* A nested shell (sudo inside the row above) is shaded from its start to its end. */
   .nested-band {
     fill: var(--accent);
-    fill-opacity: 0.09;
+    fill-opacity: 0.14;
   }
   .row-label.grouped {
     padding-left: calc(1.9rem + var(--depth, 0) * 0.9rem);

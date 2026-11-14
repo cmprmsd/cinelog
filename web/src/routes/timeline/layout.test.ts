@@ -30,6 +30,7 @@ import {
   rowAt,
   sessionEnd,
   sessionMap,
+  sessionSpans,
 } from './layout';
 import { TimeScale } from './scale';
 
@@ -186,6 +187,21 @@ describe('layout', () => {
       ['focus', 120, 60],
     ]);
     expect(activityRuns(row('d', [], { activity: [bin(-500, 1), bin(990, 1)] }), undefined, 60, scale)).toEqual([{ kind: 'typed', x: 990, w: 10 }]);
+  });
+
+  it('spans a row\'s sessions from start to end', () => {
+    const r = row('n', [], {
+      sessions: [
+        session({ uuid: 'a', started_at: 100, ended_at: 300 }),
+        session({ uuid: 'b', started_at: 600, ended_at: null, state: 'live' }),
+        session({ uuid: 'c', started_at: 2000, ended_at: 2100 }),
+      ],
+    });
+    // The live one is drawn to now; the one after the window is left out.
+    expect(sessionSpans(r, scale, 750)).toEqual([
+      { x: 100, w: 200 },
+      { x: 600, w: 150 },
+    ]);
   });
 
   it('colours by exit', () => {

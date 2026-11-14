@@ -311,6 +311,24 @@ export function markGeoms(
   return out;
 }
 
+// ------------------------------------------------------------------ session extents
+
+/**
+ * Where the sessions of a row existed: one span per session from its start to its end (now
+ * while live), clipped to `[0, width]`. Drawn as the shade of a nested row.
+ */
+export function sessionSpans(row: TimelineRow, scale: TimeScale, now: number): { x: number; w: number }[] {
+  const out: { x: number; w: number }[] = [];
+  for (const s of row.sessions) {
+    const end = sessionEnd(s, now) ?? scale.to;
+    const x0 = Math.max(0, scale.x(s.started_at));
+    const x1 = Math.min(scale.width, scale.x(Math.max(s.started_at, end)));
+    if (x1 <= 0 || x0 >= scale.width) continue;
+    out.push({ x: x0, w: Math.max(MIN_SPAN_PX, x1 - x0) });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ activity
 
 /**
